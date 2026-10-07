@@ -241,3 +241,54 @@ def test_cancel_running_job(env_sandbox, repo, tmp_path, monkeypatch, capsys):
     except ProcessLookupError:
         group_alive = False
     assert not group_alive
+
+
+def _running_job_with_pid_file(content):
+    from agenthub.jobs import new_job
+
+    job = new_job(paths(), "implement", datetime.now(timezone.utc))
+    job.write_json("result.json", {"id": job.id, "role": "implement", "status": "running", "attempts": []})
+    (job.dir / "pid").write_text(content)
+    return job
+
+
+def _record_signals(monkeypatch):
+    calls = []
+    monkeypatch.setattr(os, "kill", lambda *a: calls.append(("kill", a)))
+    monkeypatch.setattr(os, "killpg", lambda *a: calls.append(("killpg", a)))
+    return calls
+
+
+def test_cancel_stale_pid_does_not_signal(env_sandbox, monkeypatch, capsys):
+    from agenthub.procinfo import start_time
+
+    wrong = (start_time(os.getpid()) or 0) + 1
+    job = _running_job_with_pid_file(json.dumps({"pid": os.getpid(), "start_time": wrong}))
+    calls = _record_signals(monkeypatch)
+    assert main(["cancel", job.id]) == 0
+    assert calls == []
+    result = job.read_json("result.json")
+    assert result["status"] == "cancelled"
+    assert result["exit_code"] == 130
+
+
+def test_cancel_legacy_int_pid_does_not_signal(env_sandbox, monkeypatch, capsys):
+    job = _running_job_with_pid_file(f"{os.getpid()}\n")
+    calls = _record_signals(monkeypatch)
+    assert main(["cancel", job.id]) == 0
+    assert calls == []
+    assert job.read_json("result.json")["status"] == "cancelled"
+
+
+def test_safe_strips_escape_on_tty(monkeypatch):
+    from agenthub.cli import _safe
+
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    assert _safe("a\x1b[31mb\x07c\n") == "a[31mbc\n"
+
+
+def test_safe_passthrough_when_not_tty(monkeypatch):
+    from agenthub.cli import _safe
+
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+    assert _safe("a\x1b[31mb\x07c\n") == "a\x1b[31mb\x07c\n"

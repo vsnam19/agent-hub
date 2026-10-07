@@ -20,6 +20,8 @@ class AgyAdapter(Adapter):
             "json",
             "--add-dir",
             str(req.attempt_dir),
+            "--add-dir",
+            str(req.brief_path.parent),
         ]
 
         if req.role == "implement":

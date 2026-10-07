@@ -3,6 +3,7 @@ import json
 import os
 import signal
 import sys
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from agenthub.config import ConfigError, load_pool, parse_duration, paths
 from agenthub.jobs import get_job, list_jobs
 from agenthub.orchestrate import EXIT, RunArgs, run_job
 from agenthub.pool import Cooldowns, parse_link
+from agenthub.procinfo import start_time
 
 
 class UsageError(Exception):
@@ -91,18 +93,25 @@ def _read_brief(args) -> str:
         raise UsageError(f"cannot read brief: {e}") from None
 
 
+def _safe(text: str) -> str:
+    """On a terminal, drop control/format characters (except newline and tab)."""
+    if not sys.stdout.isatty():
+        return text
+    return "".join(c for c in text if c in "\n\t" or unicodedata.category(c) not in ("Cc", "Cf"))
+
+
 def _summary(result: dict) -> str:
-    lines = [f"status: {result['status']}"]
+    lines = [f"status: {_safe(str(result['status']))}"]
     if result.get("agent"):
-        lines.append(f"agent: {result['agent']}:{result['model']}")
+        lines.append(f"agent: {_safe(str(result['agent']))}:{_safe(str(result['model']))}")
     lines.append(f"changed: {len(result.get('changed_files') or [])} files")
-    lines.append(f"job: {result['id']}")
+    lines.append(f"job: {_safe(str(result['id']))}")
     if result.get("error"):
-        lines.append(f"error: {result['error']}")
+        lines.append(f"error: {_safe(str(result['error']))}")
     reply_path = result.get("reply_path")
     reply = ""
     if reply_path and Path(reply_path).is_file():
-        reply = Path(reply_path).read_text()
+        reply = _safe(Path(reply_path).read_text())
     return "\n".join(lines) + "\n\n" + reply
 
 
@@ -197,7 +206,7 @@ def _cmd_jobs(args) -> int:
     for r in list_jobs(paths(), args.limit):
         agent = f"{r['agent']}:{r['model']}" if r.get("agent") else "-"
         dur = f"{r['duration_s']:.0f}s" if r.get("duration_s") is not None else "-"
-        print("  ".join([r["id"], r["role"], r["status"], agent, dur, r["workdir"]]))
+        print(_safe("  ".join([r["id"], r["role"], r["status"], agent, dur, r["workdir"]])))
     return 0
 
 
@@ -221,6 +230,15 @@ def _cmd_show(args) -> int:
     return 0
 
 
+def _read_pid_file(path: Path) -> tuple[int | None, int | None]:
+    """Return (pid, start_time) from the JSON pid file; a legacy plain int is unverifiable."""
+    try:
+        data = json.loads(path.read_text())
+        return int(data["pid"]), int(data["start_time"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return None, None
+
+
 def _cmd_cancel(args) -> int:
     job = _load_job(args.id)
     try:
@@ -230,14 +248,15 @@ def _cmd_cancel(args) -> int:
     if result.get("status") not in (None, "running"):
         print(f"job already finished: {result['status']}")
         return 0
-    try:
-        pid = int((job.dir / "pid").read_text().strip())
-        os.kill(pid, signal.SIGTERM)
-        print(f"sent SIGTERM to {pid}")
-        return 0
-    except (OSError, ValueError):
-        pass
+    pid, recorded = _read_pid_file(job.dir / "pid")
+    if pid is not None and recorded is not None and start_time(pid) == recorded:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            print(f"sent SIGTERM to {pid}")
+            return 0
+        except OSError:
+            pass
     result.update(status="cancelled", exit_code=EXIT["cancelled"], ended=_now().isoformat())
     job.write_json("result.json", result)
-    print(f"cancelled {job.id}")
+    print(f"cancelled {_safe(job.id)} (process not verified; nothing signalled)")
     return 0

@@ -67,7 +67,9 @@ def test_implement_ok_records_everything(env_sandbox, repo):
     assert att["n"] == 1 and att["outcome"] == "ok" and att["rc"] == 0 and att["duration_s"] >= 0
     jd = job_dir(result)
     assert (jd / "brief.md").read_text() == BRIEF
-    assert (jd / "pid").read_text().strip() == str(os.getpid())
+    from agenthub.procinfo import start_time
+
+    assert json.loads((jd / "pid").read_text()) == {"pid": os.getpid(), "start_time": start_time(os.getpid())}
     req = json.loads((jd / "request.json").read_text())
     assert req["role"] == "implement" and req["links"] == ["agy:m1"] and req["timeout_s"] == 30
     assert json.loads((jd / "result.json").read_text()) == result

@@ -1,6 +1,7 @@
 """The run loop: walk a role's chain, attempt, classify, fall back, write the result record."""
 
 import dataclasses
+import json
 import os
 import signal
 import threading
@@ -15,6 +16,7 @@ from agenthub.agents import Classified, Outcome, Request, registry
 from agenthub.config import ConfigError, Paths, Pool
 from agenthub.jobs import Job, new_job
 from agenthub.pool import Cooldowns, Link
+from agenthub.procinfo import start_time
 
 EXIT = {
     "ok": 0,
@@ -114,7 +116,8 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         diff_path.write_text(diff)
         text = briefmod.review_text(base, args.brief, diff_path)
     (job.dir / "brief.md").write_text(text)
-    (job.dir / "pid").write_text(f"{os.getpid()}\n")
+    pid = os.getpid()
+    (job.dir / "pid").write_text(json.dumps({"pid": pid, "start_time": start_time(pid)}))
 
     record: dict = {
         "id": job.id,
