@@ -23,7 +23,7 @@ class ClaudeAdapter(Adapter):
             argv.append("bypassPermissions")
         else:
             argv.append("--allowedTools")
-            argv.append('Read Grep Glob "Bash(git diff:*)" "Bash(git log:*)" "Bash(git show:*)" "Bash(git status:*)"')
+            argv.append("Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*)")
 
         return Invocation(argv=argv, stdin_path=req.brief_path)
 
@@ -58,9 +58,7 @@ class ClaudeAdapter(Adapter):
         if any(x in diag for x in ["invalid api key", "please run /login", "not logged in", "authentication"]):
             return Classified(Outcome.AUTH, reply=reply, detail=diag)
 
-        if any(x in diag for x in ["model", "not found", "invalid model"]) and (
-            "not found" in diag or "invalid model" in diag
-        ):
+        if re.search(r"model\b.{0,60}\b(not found|does not exist)|invalid model", diag):
             return Classified(Outcome.MODEL_UNAVAILABLE, reply=reply, detail=diag)
 
         if "print timeout after" in diag and "returning partial output" in diag:

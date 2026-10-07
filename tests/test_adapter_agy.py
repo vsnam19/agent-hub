@@ -158,3 +158,13 @@ def test_agy_reply_mentioning_quota_is_ok(env_sandbox, adapter_agy, req_agy):
     c = run_fake(env_sandbox, adapter_agy, "ok-quota-text", req_agy)
     assert c.outcome == Outcome.OK
     assert c.reply == "quota exceeded is mentioned here"
+
+
+def test_agy_reset_without_numbers_is_none(adapter_agy, tmp_path):
+    attempt = tmp_path / "nonum"
+    attempt.mkdir()
+    (attempt / "stdout").write_text('{"status":"ERROR","error":"quota reached, resets in soon"}')
+    (attempt / "stderr").write_text("")
+    c = adapter_agy.classify(1, attempt)
+    assert c.outcome == Outcome.QUOTA
+    assert c.reset_at is None

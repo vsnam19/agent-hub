@@ -69,9 +69,11 @@ def test_claude_build_review_argv(tmp_path):
         "json",
         "--no-session-persistence",
         "--allowedTools",
-        'Read Grep Glob "Bash(git diff:*)" "Bash(git log:*)" "Bash(git show:*)" "Bash(git status:*)"',
+        "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*)",
     ]
     assert inv.stdin_path == brief
+    for arg in inv.argv:
+        assert '"' not in arg
 
 
 def run_fake(env_sandbox, adapter, scenario, req):
@@ -178,3 +180,11 @@ def test_registry_finds_three_agents():
         assert adapter.profile_path.exists()
         lines = adapter.profile_path.read_text().splitlines()
         assert len(lines) <= 40
+
+
+def test_claude_file_not_found_is_not_model(tmp_path, adapter_claude):
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    (attempt / "stderr").write_text("config file not found; using default model")
+    c = adapter_claude.classify(2, attempt)
+    assert c.outcome == Outcome.FAILED

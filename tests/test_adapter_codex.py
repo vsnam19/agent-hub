@@ -163,3 +163,11 @@ def test_codex_reply_mentioning_quota_is_ok(env_sandbox, adapter_codex, req_code
     c = run_fake(env_sandbox, adapter_codex, "ok-quota-text", req_codex)
     assert c.outcome == Outcome.OK
     assert c.reply == "quota exceeded is mentioned here"
+
+
+def test_codex_file_not_found_is_not_model(tmp_path, adapter_codex):
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    (attempt / "stderr").write_text("config file not found; using default model")
+    c = adapter_codex.classify(2, attempt)
+    assert c.outcome == Outcome.FAILED

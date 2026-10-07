@@ -58,7 +58,7 @@ class AgyAdapter(Adapter):
         if any(x in diag for x in ["quota", "rate limit", "resource exhausted", "quota reached"]):
             reset_at = None
             m = re.search(r"resets in (?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", diag, re.IGNORECASE)
-            if m:
+            if m and (m.group(1) or m.group(2) or m.group(3)):
                 h = int(m.group(1) or 0)
                 mn = int(m.group(2) or 0)
                 s = int(m.group(3) or 0)

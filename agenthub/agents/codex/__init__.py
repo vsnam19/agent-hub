@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -72,11 +73,8 @@ class CodexAdapter(Adapter):
         if any(x in diag for x in ["not logged in", "login", "401", "unauthorized"]):
             return Classified(Outcome.AUTH, reply=reply, detail=diag)
 
-        if any(x in diag for x in ["model", "not found", "unsupported model", "does not exist"]) and (
-            "not found" in diag or "unsupported" in diag or "does not exist" in diag
-        ):
-            if "model" in diag:
-                return Classified(Outcome.MODEL_UNAVAILABLE, reply=reply, detail=diag)
+        if re.search(r"model\b.{0,60}\b(not found|does not exist|unsupported)|unsupported model", diag):
+            return Classified(Outcome.MODEL_UNAVAILABLE, reply=reply, detail=diag)
 
         if "print timeout after" in diag and "returning partial output" in diag:
             return Classified(Outcome.TIMEOUT, reply=reply, detail=diag)
