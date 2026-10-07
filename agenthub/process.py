@@ -56,7 +56,7 @@ def run(
             rc = proc.wait(timeout=timeout.total_seconds())
         except subprocess.TimeoutExpired:
             timed_out = True
-            terminate(pgid)
+            terminate(pgid, leader=proc)
             proc.wait()
             rc = proc.returncode
 
@@ -76,7 +76,7 @@ def run(
         os.close(stdin_fd)
 
 
-def terminate(pgid: int) -> None:
+def terminate(pgid: int, leader: subprocess.Popen | None = None) -> None:
     try:
         os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
@@ -88,9 +88,13 @@ def terminate(pgid: int) -> None:
             os.killpg(pgid, 0)
         except ProcessLookupError:
             return
+        if leader:
+            leader.poll()
         time.sleep(0.1)
 
     try:
         os.killpg(pgid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    if leader:
+        leader.wait()

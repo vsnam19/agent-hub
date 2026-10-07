@@ -237,3 +237,17 @@ def test_timeout_rc_is_real_returncode(tmp_path: Path, monkeypatch):
 
     assert ran.timed_out
     assert ran.rc == -signal.SIGKILL
+
+
+def test_timeout_returns_quickly_when_child_obeys_sigterm(tmp_path: Path):
+    attempt_dir = tmp_path / "attempt"
+    attempt_dir.mkdir()
+    script = tmp_path / "script.py"
+    script.write_text("import time\ntime.sleep(30)")
+
+    inv = Invocation(argv=[sys.executable, str(script)], stdin_path=None)
+    ran = run(inv, cwd=tmp_path, env={}, attempt_dir=attempt_dir, timeout=timedelta(seconds=0.5))
+
+    assert ran.timed_out
+    assert ran.rc == -signal.SIGTERM
+    assert ran.duration_s < 3.0
