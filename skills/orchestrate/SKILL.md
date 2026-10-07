@@ -28,7 +28,8 @@ like `<agent>:<model>`.
    using the Bash tool's `run_in_background`, then do other work until you are notified. Do not poll.
 6. **Read the result** and act on its `status` (table below). Never re-run blindly on a dirty tree.
 7. **Verify yourself** in the worktree: run the gate, read the whole diff, and scan every new test for missing
-   assertions. The agent's claims are not evidence.
+   assertions. The agent's claims are not evidence. Once verified, commit the work yourself if the agent did not
+   (some agents cannot commit by design).
 8. **Optional second opinion:** `agent-hub run --role review -d <worktree> --base <default branch>`.
    The CLI computes `git diff <base>...HEAD` into the job's `diff.patch` and the reviewer reads that file; the
    reviewer never gets a shell. Treat findings as input to your own judgement, not as a verdict.

@@ -28,8 +28,6 @@ class CodexAdapter(Adapter):
                     "workspace-write",
                     "-c",
                     "sandbox_workspace_write.network_access=true",
-                    "--add-dir",
-                    str(req.git_common_dir),
                 ]
             )
         else:

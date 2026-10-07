@@ -42,10 +42,29 @@ def test_codex_build_implement_argv(tmp_path):
         "workspace-write",
         "-c",
         "sandbox_workspace_write.network_access=true",
-        "--add-dir",
-        str(tmp_path / ".git"),
     ]
     assert inv.stdin_path == brief
+
+
+def test_codex_implement_cannot_write_git_dir(tmp_path):
+    adapter = CodexAdapter()
+    adapter.config = type("C", (), {"binary": "codex"})()
+    brief = tmp_path / "b.md"
+    brief.write_text("hello")
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    req = Request(
+        role="implement",
+        model="m",
+        workdir=tmp_path,
+        brief_path=brief,
+        attempt_dir=attempt,
+        git_common_dir=tmp_path / ".git",
+    )
+
+    argv = adapter.build(req).argv
+    assert str(req.git_common_dir) not in argv
+    assert "--add-dir" not in argv
 
 
 def test_codex_build_review_argv(tmp_path):
