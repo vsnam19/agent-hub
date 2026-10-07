@@ -105,5 +105,7 @@ def test_load_pool_invalid_toml_names_file(monkeypatch, tmp_path):
     (conf / "pool.toml").write_text("[invalid")
     monkeypatch.setenv("AGENT_HUB_CONFIG", str(conf))
     p = paths()
-    with pytest.raises(ConfigError, match="pool.toml"):
+    import re
+
+    with pytest.raises(ConfigError, match=re.escape(str(conf / "pool.toml"))):
         load_pool(p)

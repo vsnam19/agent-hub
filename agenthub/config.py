@@ -102,7 +102,7 @@ def load_pool(p: Paths | None = None) -> Pool:
         try:
             user_data = tomllib.loads(user_file.read_text())
         except Exception as e:
-            raise ConfigError(f"pool.toml: {e}") from e
+            raise ConfigError(f"{user_file}: {e}") from e
 
     # Merge rules
     roles = {}
@@ -119,7 +119,7 @@ def load_pool(p: Paths | None = None) -> Pool:
     try:
         quota_cooldown = parse_duration(quota_cooldown_str)
     except ConfigError as e:
-        raise ConfigError(f"pool.toml: {e}") from e
+        raise ConfigError(f"{user_file}: {e}") from e
 
     timeouts_data = defaults.get("timeout", {}).copy()
     user_timeouts = user_defaults.get("timeout", {})
@@ -130,7 +130,7 @@ def load_pool(p: Paths | None = None) -> Pool:
         try:
             timeouts[role] = parse_duration(to_str)
         except ConfigError as e:
-            raise ConfigError(f"pool.toml: {e}") from e
+            raise ConfigError(f"{user_file}: {e}") from e
 
     # Ensure every role has a timeout (fallback to 60m)
     for role in roles:
