@@ -17,8 +17,12 @@ class Repo:
     default_branch: str
 
 
+def _git_env() -> dict[str, str]:
+    return {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+
 def _run_git(workdir: Path, *args: str) -> str:
-    res = subprocess.run(["git", *args], cwd=workdir, capture_output=True, text=True, env={"GIT_TERMINAL_PROMPT": "0"})
+    res = subprocess.run(["git", *args], cwd=workdir, capture_output=True, text=True, env=_git_env())
     if res.returncode != 0:
         raise subprocess.CalledProcessError(res.returncode, ["git", *args], output=res.stdout, stderr=res.stderr)
     return res.stdout.strip()
@@ -80,6 +84,7 @@ def fingerprint(repo: Repo) -> str:
         cwd=repo.root,
         capture_output=True,
         check=True,
+        env=_git_env(),
     )
     h.update(res.stdout)
 
@@ -115,13 +120,23 @@ def changes(repo: Repo, since: str) -> tuple[list[str], str]:
     changed_paths = set()
 
     res_diff = subprocess.run(
-        ["git", "diff", "--name-only", since], cwd=repo.root, capture_output=True, text=True, check=True
+        ["git", "diff", "--name-only", since],
+        cwd=repo.root,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_git_env(),
     )
     if res_diff.stdout.strip():
         changed_paths.update(res_diff.stdout.strip().splitlines())
 
     res_untracked = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard"], cwd=repo.root, capture_output=True, text=True, check=True
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=repo.root,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_git_env(),
     )
     untracked_files = []
     if res_untracked.stdout.strip():
@@ -134,7 +149,12 @@ def changes(repo: Repo, since: str) -> tuple[list[str], str]:
         return [], ""
 
     res_stat = subprocess.run(
-        ["git", "diff", "--stat", since], cwd=repo.root, capture_output=True, text=True, check=True
+        ["git", "diff", "--stat", since],
+        cwd=repo.root,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=_git_env(),
     )
     lines = res_stat.stdout.strip().splitlines()
     diffstat = lines[-1].strip() if lines else ""

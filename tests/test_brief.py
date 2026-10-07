@@ -4,7 +4,7 @@ from agenthub.brief import BriefError, review_text, validate
 
 
 def test_implement_brief_ok():
-    validate("implement", "## Input\ntext\n## Expected output\nmore text")
+    assert validate("implement", "## Input\ntext\n## Expected output\nmore text") is None
 
 
 def test_implement_brief_missing_both_lists_both():
@@ -13,7 +13,7 @@ def test_implement_brief_missing_both_lists_both():
 
 
 def test_brief_headings_any_case_and_level():
-    validate("implement", "###   iNpUt  :\r\nblah\r\n#### EXPECTED OUTPUT \r\nblah")
+    assert validate("implement", "###   iNpUt  :\r\nblah\r\n#### EXPECTED OUTPUT \r\nblah") is None
 
 
 def test_h1_does_not_count():
@@ -22,8 +22,8 @@ def test_h1_does_not_count():
 
 
 def test_review_brief_optional():
-    validate("review", "no headings at all")
-    validate("review", "")
+    assert validate("review", "no headings at all") is None
+    assert validate("review", "") is None
 
 
 def test_unknown_role():

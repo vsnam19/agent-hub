@@ -2,7 +2,7 @@ import subprocess
 
 import pytest
 
-from agenthub.guards import GuardError, changes, check_implement, fingerprint, head, inspect
+from agenthub.guards import GuardError, _git_env, changes, check_implement, fingerprint, head, inspect
 from tests.gitrepo import make_repo
 
 
@@ -49,7 +49,7 @@ def test_check_implement_refuses_detached(tmp_path):
 def test_check_implement_ok_on_feature(tmp_path):
     repo_path = make_repo(tmp_path / "repo", default="main", branch="feat/x")
     r = inspect(repo_path)
-    check_implement(r)
+    assert check_implement(r) is None
 
 
 def test_guard_subdirectory_and_spaces(tmp_path):
@@ -122,3 +122,12 @@ def test_common_dir_of_linked_worktree(tmp_path):
 
     r = inspect(wt_repo)
     assert r.common_dir == main_repo.resolve() / ".git"
+
+
+def test_git_env_keeps_environment(monkeypatch):
+    monkeypatch.setenv("HOME", "/fake/home")
+    monkeypatch.setenv("PATH", "/fake/path")
+    env = _git_env()
+    assert env["HOME"] == "/fake/home"
+    assert env["PATH"] == "/fake/path"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
