@@ -1,0 +1,34 @@
+[project]
+name = "agent-hub"
+version = "0.1.0"
+description = "Run coding agents from one orchestrator, by role, with quota fallback"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+agent-hub = "agenthub.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.16",
+]
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "agenthub"
+module-root = ""
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+exclude = ["docs/"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
