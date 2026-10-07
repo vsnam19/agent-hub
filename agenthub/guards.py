@@ -75,6 +75,19 @@ def check_implement(repo: Repo) -> None:
         raise GuardError(f"Cannot implement on default branch {repo.default_branch}")
 
 
+def review_diff(repo: Repo, base: str) -> str:
+    res = subprocess.run(
+        ["git", "diff", f"{base}...HEAD", "--"],
+        cwd=repo.root,
+        capture_output=True,
+        text=True,
+        env=_git_env(),
+    )
+    if res.returncode != 0:
+        raise GuardError(f"Cannot diff against base {base!r}: {res.stderr.strip()}")
+    return res.stdout
+
+
 def fingerprint(repo: Repo) -> str:
     h = hashlib.sha256()
     h.update(head(repo).encode())

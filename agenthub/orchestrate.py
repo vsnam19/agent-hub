@@ -77,18 +77,20 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     workdir = args.workdir
     repo = None
     refusal = None
+    base = None
+    diff = ""
     try:
         repo = guards.inspect(workdir)
         if args.role == "implement":
             guards.check_implement(repo)
+        else:
+            base = args.base or repo.default_branch
+            diff = guards.review_diff(repo, base)
     except guards.GuardError as e:
         refusal = str(e)
 
-    base = None
-    text = args.brief
-    if args.role == "review":
+    if args.role == "review" and base is None:
         base = args.base or (repo.default_branch if repo else "HEAD")
-        text = briefmod.review_text(base, args.brief)
 
     removed: set[str] = set()
     for link in args.links:
@@ -106,6 +108,11 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
             "removed_env": sorted(removed),
         },
     )
+    text = args.brief
+    if args.role == "review":
+        diff_path = job.dir / "diff.patch"
+        diff_path.write_text(diff)
+        text = briefmod.review_text(base, args.brief, diff_path)
     (job.dir / "brief.md").write_text(text)
     (job.dir / "pid").write_text(f"{os.getpid()}\n")
 

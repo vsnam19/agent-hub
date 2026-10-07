@@ -2,7 +2,7 @@ import subprocess
 
 import pytest
 
-from agenthub.guards import GuardError, _git_env, changes, check_implement, fingerprint, head, inspect
+from agenthub.guards import GuardError, _git_env, changes, check_implement, fingerprint, head, inspect, review_diff
 from tests.gitrepo import make_repo
 
 
@@ -131,3 +131,19 @@ def test_git_env_keeps_environment(monkeypatch):
     assert env["HOME"] == "/fake/home"
     assert env["PATH"] == "/fake/path"
     assert env["GIT_TERMINAL_PROMPT"] == "0"
+
+
+def test_review_diff_contains_branch_change(tmp_path):
+    repo_path = make_repo(tmp_path / "repo")
+    (repo_path / "new.txt").write_text("added line\n")
+    subprocess.run(["git", "add", "new.txt"], cwd=repo_path, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "add"], cwd=repo_path, check=True, capture_output=True, env=_git_env())
+    out = review_diff(inspect(repo_path), "master")
+    assert "new.txt" in out
+    assert "+added line" in out
+
+
+def test_review_diff_unknown_base_raises(tmp_path):
+    repo_path = make_repo(tmp_path / "repo")
+    with pytest.raises(GuardError, match="no-such-base"):
+        review_diff(inspect(repo_path), "no-such-base")

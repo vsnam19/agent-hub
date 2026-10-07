@@ -231,9 +231,33 @@ def test_review_brief_includes_preamble(env_sandbox, repo):
     result = go(repo, ["codex:m1"], role="review", brief="Focus on locking.", base="master")
     assert result["status"] == "ok"
     sent = fake_calls(env_sandbox.fakelog, "codex")[0]["stdin"]
-    assert "git diff master...HEAD" in sent
+    assert str(job_dir(result) / "diff.patch") in sent
+    assert "git diff" not in sent
     assert "Focus on locking." in sent
     assert (job_dir(result) / "brief.md").read_text() == sent
+
+
+def test_review_writes_diff_patch(env_sandbox, repo):
+    import subprocess
+
+    (repo / "feat.txt").write_text("feature line\n")
+    subprocess.run(["git", "add", "feat.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "feat"], cwd=repo, check=True, capture_output=True)
+    result = go(repo, ["codex:m1"], role="review", brief="", base="master")
+    assert result["status"] == "ok"
+    patch = job_dir(result) / "diff.patch"
+    assert patch.is_file()
+    assert "+feature line" in patch.read_text()
+    sent = fake_calls(env_sandbox.fakelog, "codex")[0]["stdin"]
+    assert str(patch) in sent
+
+
+def test_review_unknown_base_refused(env_sandbox, repo):
+    result = go(repo, ["codex:m1"], role="review", brief="", base="no-such-base")
+    assert result["status"] == "refused"
+    assert result["exit_code"] == 3
+    assert "no-such-base" in result["error"]
+    assert fake_calls(env_sandbox.fakelog, "codex") == []
 
 
 def test_secret_env_not_passed(env_sandbox, repo, monkeypatch):

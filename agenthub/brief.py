@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 
 
 class BriefError(Exception):
@@ -36,11 +37,11 @@ def validate(role: str, text: str) -> None:
         raise BriefError(f"Brief missing headings: {', '.join(missing)}")
 
 
-def review_text(base: str, brief: str | None) -> str:
+def review_text(base: str, brief: str | None, diff_path: Path) -> str:
     preamble = (
-        f"You are reviewing the changes on the current branch against `{base}` in this repository. Read them with\n"
-        f"`git diff {base}...HEAD` and the files involved. Do not modify any file. "
-        f"Report findings as a list, most severe\n"
+        f"You are reviewing the changes on the current branch against `{base}` in this repository. The changes\n"
+        f"between `{base}` and HEAD are in the file `{diff_path}`: read it, and read the files it touches in the\n"
+        f"current directory. Do not modify any file. Report findings as a list, most severe\n"
         f"first; for each give: severity (critical/important/minor), file:line, the problem, and a concrete failure\n"
         f'scenario. Say "no findings" if there are none.'
     )

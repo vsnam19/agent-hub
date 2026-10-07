@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from agenthub.brief import BriefError, review_text, validate
@@ -32,17 +34,25 @@ def test_unknown_role():
 
 
 def test_review_text_contains_base_and_notes():
-    text = review_text("master", "check security")
+    text = review_text("master", "check security", Path("/j/diff.patch"))
     assert "`master`" in text
-    assert "`git diff master...HEAD`" in text
+    assert "/j/diff.patch" in text
     assert "## Orchestrator notes" in text
     assert "check security" in text
 
 
 def test_review_text_without_notes_has_no_notes_section():
-    text = review_text("main", None)
+    text = review_text("main", None, Path("/j/diff.patch"))
     assert "`main`" in text
     assert "## Orchestrator notes" not in text
 
-    text2 = review_text("main", "   \n  ")
+    text2 = review_text("main", "   \n  ", Path("/j/diff.patch"))
     assert "## Orchestrator notes" not in text2
+
+
+def test_review_text_points_at_diff_file_and_has_no_git_command():
+    text = review_text("master", None, Path("/jobs/j1/diff.patch"))
+    assert "/jobs/j1/diff.patch" in text
+    assert "git diff" not in text
+    assert "git log" not in text
+    assert "Do not modify any file" in text

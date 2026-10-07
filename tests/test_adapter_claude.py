@@ -47,8 +47,8 @@ def test_claude_build_review_argv(tmp_path):
 
     brief = tmp_path / "b.md"
     brief.write_text("hello")
-    attempt = tmp_path / "attempt"
-    attempt.mkdir()
+    attempt = tmp_path / "attempts" / "1-claude-m"
+    attempt.mkdir(parents=True)
 
     req = Request(
         role="review",
@@ -69,11 +69,33 @@ def test_claude_build_review_argv(tmp_path):
         "json",
         "--no-session-persistence",
         "--allowedTools",
-        "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*)",
+        "Read,Grep,Glob",
+        "--add-dir",
+        str(tmp_path),
     ]
     assert inv.stdin_path == brief
     for arg in inv.argv:
         assert '"' not in arg
+
+
+def test_claude_review_has_no_shell_tool(tmp_path):
+    adapter = ClaudeAdapter()
+    adapter.config = type("C", (), {"binary": "claude"})()
+    brief = tmp_path / "b.md"
+    brief.write_text("hello")
+    attempt = tmp_path / "attempts" / "1-claude-m"
+    attempt.mkdir(parents=True)
+    req = Request(
+        role="review",
+        model="m",
+        workdir=tmp_path,
+        brief_path=brief,
+        attempt_dir=attempt,
+        git_common_dir=tmp_path / ".git",
+    )
+    argv = adapter.build(req).argv
+    assert argv
+    assert not any("Bash" in a for a in argv)
 
 
 def run_fake(env_sandbox, adapter, scenario, req):

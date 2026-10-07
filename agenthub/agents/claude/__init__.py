@@ -23,7 +23,9 @@ class ClaudeAdapter(Adapter):
             argv.append("bypassPermissions")
         else:
             argv.append("--allowedTools")
-            argv.append("Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*)")
+            argv.append("Read,Grep,Glob")
+            argv.append("--add-dir")
+            argv.append(str(req.brief_path.parent))
 
         return Invocation(argv=argv, stdin_path=req.brief_path)
 
