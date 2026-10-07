@@ -9,9 +9,12 @@ repo="$tmp/repo"
 git init -q -b main "$repo"
 git -C "$repo" config user.email smoke@example.invalid
 git -C "$repo" config user.name smoke
+git -C "$repo" config commit.gpgsign false
+git -C "$repo" config tag.gpgsign false
 printf '# smoke\n' >"$repo/README.md"
 git -C "$repo" add README.md
 git -C "$repo" commit -q -m "chore: init"
+base_sha="$(git -C "$repo" rev-parse HEAD)"
 git -C "$repo" checkout -q -b feat/smoke
 
 cat >"$tmp/brief.md" <<'BRIEF'
@@ -64,8 +67,8 @@ for agent in agy codex claude; do
         continue
     fi
 
-    git -C "$repo" reset -q --hard feat/smoke
-    git -C "$repo" clean -q -fd
+    git -C "$repo" reset -q --hard "$base_sha"
+    git -C "$repo" clean -fdq
 
     impl="$(agent-hub run --role implement --agent "$agent:$model" --brief "$tmp/brief.md" -d "$repo" --json |
         python3 -c 'import json, sys; print(json.load(sys.stdin)["status"])' || true)"

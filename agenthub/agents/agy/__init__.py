@@ -20,9 +20,10 @@ class AgyAdapter(Adapter):
             "json",
             "--add-dir",
             str(req.attempt_dir),
-            "--add-dir",
-            str(req.brief_path.parent),
         ]
+        if req.role == "review":
+            # the reviewer reads diff.patch from the job directory; the implementer must not get it
+            argv += ["--add-dir", str(req.brief_path.parent)]
 
         if req.role == "implement":
             argv.append("--dangerously-skip-permissions")

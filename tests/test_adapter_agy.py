@@ -35,14 +35,34 @@ def test_agy_build_implement_argv(tmp_path):
         "json",
         "--add-dir",
         str(attempt),
-        "--add-dir",
-        str(brief.parent),
         "--dangerously-skip-permissions",
         "-p",
         f"Read the file {attempt}/brief.md and carry out the task it describes. Work in the current directory.",
     ]
     assert inv.stdin_path is None
     assert (attempt / "brief.md").read_text() == "hello"
+
+
+def test_agy_implement_has_no_job_dir(tmp_path):
+    adapter = AgyAdapter()
+    adapter.config = type("C", (), {"binary": "agy"})()
+    job = tmp_path / "job"
+    job.mkdir()
+    brief = job / "b.md"
+    brief.write_text("hello")
+    attempt = job / "attempt"
+    attempt.mkdir()
+    req = Request(
+        role="implement",
+        model="m",
+        workdir=tmp_path,
+        brief_path=brief,
+        attempt_dir=attempt,
+        git_common_dir=tmp_path,
+    )
+    inv = adapter.build(req)
+    assert str(req.brief_path.parent) not in inv.argv
+    assert str(attempt) in inv.argv
 
 
 def test_agy_build_review_argv(tmp_path):

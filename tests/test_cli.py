@@ -292,3 +292,40 @@ def test_safe_passthrough_when_not_tty(monkeypatch):
 
     monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
     assert _safe("a\x1b[31mb\x07c\n") == "a\x1b[31mb\x07c\n"
+
+
+def test_pool_output_sanitised_on_tty(env_sandbox, monkeypatch, capsys):
+    from agenthub.agents.agy import AgyAdapter
+
+    monkeypatch.setattr(AgyAdapter, "version", lambda self: "x\x1b[2Jy")
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    assert main(["pool"]) == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert "x[2Jy" in out
+
+
+def test_error_message_sanitised_on_tty(env_sandbox, repo, tmp_path, monkeypatch, capsys):
+    write_pool(env_sandbox, '[roles.implement]\nchain = ["bad\\u001bagent:m"]\n')
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
+    rc = main(["run", "--role", "implement", "--brief", str(write_brief(tmp_path)), "-d", str(repo)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert err.startswith("agent-hub: ")
+    assert "bad" in err and "\x1b" not in err
+
+
+def test_profile_sanitised_on_tty(env_sandbox, monkeypatch, capsys):
+    class P:
+        def read_text(self):
+            return "profile\x1b[2Jtext\n"
+
+    class Stub:
+        profile_path = P()
+
+    monkeypatch.setattr("agenthub.cli.registry", lambda: {"stub": Stub()})
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    assert main(["profile", "stub"]) == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert "profile[2Jtext" in out

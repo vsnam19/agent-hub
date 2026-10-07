@@ -76,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as e:  # --help
         return e.code if isinstance(e.code, int) else 0
     except (UsageError, ConfigError, BriefError) as e:
-        print(f"agent-hub: {e}", file=sys.stderr)
+        print(_safe(f"agent-hub: {e}", sys.stderr), file=sys.stderr)
         return 2
 
 
@@ -93,9 +93,11 @@ def _read_brief(args) -> str:
         raise UsageError(f"cannot read brief: {e}") from None
 
 
-def _safe(text: str) -> str:
+def _safe(text: str, stream=None) -> str:
     """On a terminal, drop control/format characters (except newline and tab)."""
-    if not sys.stdout.isatty():
+    if stream is None:
+        stream = sys.stdout
+    if not stream.isatty():
         return text
     return "".join(c for c in text if c in "\n\t" or unicodedata.category(c) not in ("Cc", "Cf"))
 
@@ -156,9 +158,9 @@ def _cmd_pool(args) -> int:
     if args.clear:
         link = parse_link(args.clear)
         if cooldowns.clear(link):
-            print(f"cleared {link}")
+            print(_safe(f"cleared {link}"))
         else:
-            print(f"no cooldown for {link}")
+            print(_safe(f"no cooldown for {link}"))
         return 0
 
     roles: dict[str, list[dict]] = {}
@@ -183,14 +185,14 @@ def _cmd_pool(args) -> int:
         print(json.dumps({"roles": roles}, indent=2))
         return 0
     for role, entries in roles.items():
-        print(f"{role}:")
+        print(_safe(f"{role}:"))
         for e in entries:
             parts = [e["link"], "installed" if e["installed"] else "missing"]
             if e["version"]:
                 parts.append(e["version"])
             if e["cooldown_until"]:
                 parts.append(f"cooldown until {e['cooldown_until']}")
-            print("  " + "  ".join(parts))
+            print(_safe("  " + "  ".join(parts)))
     return 0
 
 
@@ -198,7 +200,7 @@ def _cmd_profile(args) -> int:
     adapter = registry().get(args.agent)
     if adapter is None:
         raise UsageError(f"unknown agent: {args.agent}")
-    print(adapter.profile_path.read_text(), end="")
+    print(_safe(adapter.profile_path.read_text()), end="")
     return 0
 
 
@@ -246,17 +248,17 @@ def _cmd_cancel(args) -> int:
     except (OSError, ValueError):
         result = {}
     if result.get("status") not in (None, "running"):
-        print(f"job already finished: {result['status']}")
+        print(_safe(f"job already finished: {result['status']}"))
         return 0
     pid, recorded = _read_pid_file(job.dir / "pid")
     if pid is not None and recorded is not None and start_time(pid) == recorded:
         try:
             os.kill(pid, signal.SIGTERM)
-            print(f"sent SIGTERM to {pid}")
+            print(_safe(f"sent SIGTERM to {pid}"))
             return 0
         except OSError:
             pass
     result.update(status="cancelled", exit_code=EXIT["cancelled"], ended=_now().isoformat())
     job.write_json("result.json", result)
-    print(f"cancelled {_safe(job.id)} (process not verified; nothing signalled)")
+    print(_safe(f"cancelled {job.id} (process not verified; nothing signalled)"))
     return 0
