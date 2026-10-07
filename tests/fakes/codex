@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+import subprocess
+from pathlib import Path
+
+from _common import record_call
+
+def get_out_file() -> Path | None:
+    try:
+        idx = sys.argv.index("-o")
+        return Path(sys.argv[idx + 1])
+    except ValueError:
+        return None
+
+def do_slow():
+    subprocess.Popen(["sleep", "60"])
+    time.sleep(60)
+
+def main():
+    scenario = record_call("codex")
+    
+    out_file = get_out_file()
+
+    if scenario == "ok":
+        print(json.dumps({"type": "thread.started"}))
+        print(json.dumps({"type": "turn.completed"}))
+        if out_file:
+            out_file.write_text("done")
+        sys.exit(0)
+    elif scenario == "ok-quota-text":
+        print(json.dumps({"type": "thread.started"}))
+        print(json.dumps({"type": "turn.completed"}))
+        if out_file:
+            out_file.write_text("quota exceeded is mentioned here")
+        sys.exit(0)
+    elif scenario == "quota":
+        print(json.dumps({"type": "error", "message": "You've hit your usage limit. Try again later."}))
+        sys.exit(1)
+    elif scenario == "quota-reset":
+        print(json.dumps({"type": "error", "message": "quota", "resets_in_seconds": 3600}))
+        sys.exit(1)
+    elif scenario == "auth":
+        print(json.dumps({"type": "error", "message": "401 Unauthorized: not logged in"}))
+        sys.exit(1)
+    elif scenario == "model":
+        print(json.dumps({"type": "error", "message": "model 'x' not found"}))
+        sys.exit(1)
+    elif scenario == "empty":
+        if out_file:
+            out_file.write_text("")
+        sys.exit(0)
+    elif scenario == "fail":
+        print("boom", file=sys.stderr)
+        sys.exit(2)
+    elif scenario == "slow":
+        do_slow()
+    elif scenario == "write":
+        Path("agent_wrote.txt").write_text("hello")
+        print(json.dumps({"type": "thread.started"}))
+        print(json.dumps({"type": "turn.completed"}))
+        if out_file:
+            out_file.write_text("done")
+        sys.exit(0)
+    elif scenario == "write-quota":
+        Path("agent_wrote.txt").write_text("hello")
+        print(json.dumps({"type": "error", "message": "You've hit your usage limit. Try again later."}))
+        sys.exit(1)
+    else:
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

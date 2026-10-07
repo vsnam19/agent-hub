@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+import subprocess
+from pathlib import Path
+
+from _common import record_call
+
+def do_slow():
+    subprocess.Popen(["sleep", "60"])
+    time.sleep(60)
+
+def main():
+    scenario = record_call("claude")
+    
+    if scenario == "ok":
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "done"}))
+        sys.exit(0)
+    elif scenario == "ok-quota-text":
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "quota exceeded is mentioned here"}))
+        sys.exit(0)
+    elif scenario == "quota":
+        print(json.dumps({"type": "result", "is_error": True, "result": "Claude AI usage limit reached"}))
+        sys.exit(1)
+    elif scenario == "quota-reset":
+        print(json.dumps({"type": "result", "is_error": True, "result": "You've hit your limit · resets 1760000000"}))
+        sys.exit(1)
+    elif scenario == "auth":
+        print(json.dumps({"type": "result", "is_error": True, "result": "Invalid API key · Please run /login"}))
+        sys.exit(1)
+    elif scenario == "model":
+        print(json.dumps({"type": "result", "is_error": True, "result": "invalid model: x"}))
+        sys.exit(1)
+    elif scenario == "empty":
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": ""}))
+        sys.exit(0)
+    elif scenario == "fail":
+        print("boom", file=sys.stderr)
+        sys.exit(2)
+    elif scenario == "slow":
+        do_slow()
+    elif scenario == "write":
+        Path("agent_wrote.txt").write_text("hello")
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "done"}))
+        sys.exit(0)
+    elif scenario == "write-quota":
+        Path("agent_wrote.txt").write_text("hello")
+        print(json.dumps({"type": "result", "is_error": True, "result": "Claude AI usage limit reached"}))
+        sys.exit(1)
+    else:
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
