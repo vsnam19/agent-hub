@@ -147,3 +147,75 @@ def test_review_diff_unknown_base_raises(tmp_path):
     repo_path = make_repo(tmp_path / "repo")
     with pytest.raises(GuardError, match="no-such-base"):
         review_diff(inspect(repo_path), "no-such-base")
+
+
+def _marker_script(tmp_path, name="hook.sh"):
+    marker = tmp_path / "marker"
+    script = tmp_path / name
+    script.write_text(f"#!/bin/sh\ntouch {marker}\nexit 0\n")
+    script.chmod(0o755)
+    return script, marker
+
+
+def _git(repo_path, *args):
+    subprocess.run(["git", *args], cwd=repo_path, check=True, capture_output=True, text=True)
+
+
+def test_review_diff_rejects_option_like_base(tmp_path):
+    repo_path = make_repo(tmp_path / "repo")
+    pwned = tmp_path / "pwned"
+    with pytest.raises(GuardError, match="--output="):
+        review_diff(inspect(repo_path), f"--output={pwned}")
+    assert not pwned.exists()
+
+
+def test_diff_ignores_external_diff_config(tmp_path):
+    repo_path = make_repo(tmp_path / "repo")
+    script, marker = _marker_script(tmp_path)
+    _git(repo_path, "config", "diff.external", str(script))
+    start = head(inspect(repo_path))
+    (repo_path / "README.md").write_text("Hello\nCommitted line\n")
+    _git(repo_path, "commit", "-am", "change")
+    (repo_path / "README.md").write_text("Hello\nCommitted line\nUncommitted line\n")
+    repo = inspect(repo_path)
+
+    diff = review_diff(repo, "master")
+    paths, stat = changes(repo, start)
+
+    assert not marker.exists()
+    assert "Committed line" in diff
+    assert paths == ["README.md"]
+    assert "1 file changed" in stat
+
+
+def test_diff_ignores_textconv(tmp_path):
+    repo_path = make_repo(tmp_path / "repo")
+    script, marker = _marker_script(tmp_path)
+    (repo_path / ".gitattributes").write_text("*.txt diff=evil\n")
+    (repo_path / "a.txt").write_text("one\n")
+    _git(repo_path, "add", ".")
+    _git(repo_path, "commit", "-m", "add txt")
+    start = head(inspect(repo_path))
+    _git(repo_path, "config", "diff.evil.textconv", str(script))
+    (repo_path / "a.txt").write_text("one\ntwo\n")
+    _git(repo_path, "commit", "-am", "edit txt")
+    (repo_path / "a.txt").write_text("one\ntwo\nthree\n")
+    repo = inspect(repo_path)
+
+    diff = review_diff(repo, start)
+    paths, _ = changes(repo, start)
+
+    assert not marker.exists()
+    assert "+two" in diff
+    assert paths == ["a.txt"]
+
+
+def test_fingerprint_ignores_fsmonitor(tmp_path):
+    repo_path = make_repo(tmp_path / "repo")
+    script, marker = _marker_script(tmp_path)
+    _git(repo_path, "config", "core.fsmonitor", str(script))
+    (repo_path / "new.txt").write_text("x\n")
+
+    fingerprint(inspect(repo_path))
+
+    assert not marker.exists()

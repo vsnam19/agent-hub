@@ -21,10 +21,16 @@ def _git_env() -> dict[str, str]:
     return {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
 
+def _git_argv(*args: str) -> list[str]:
+    """Every git argv is built here: repo-configured executables (fsmonitor, hooks) are disabled."""
+    return ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args]
+
+
 def _run_git(workdir: Path, *args: str) -> str:
-    res = subprocess.run(["git", *args], cwd=workdir, capture_output=True, text=True, env=_git_env())
+    argv = _git_argv(*args)
+    res = subprocess.run(argv, cwd=workdir, capture_output=True, text=True, env=_git_env())
     if res.returncode != 0:
-        raise subprocess.CalledProcessError(res.returncode, ["git", *args], output=res.stdout, stderr=res.stderr)
+        raise subprocess.CalledProcessError(res.returncode, argv, output=res.stdout, stderr=res.stderr)
     return res.stdout.strip()
 
 
@@ -76,8 +82,17 @@ def check_implement(repo: Repo) -> None:
 
 
 def review_diff(repo: Repo, base: str) -> str:
+    verify = subprocess.run(
+        _git_argv("rev-parse", "--verify", "--quiet", "--end-of-options", f"{base}^{{commit}}"),
+        cwd=repo.root,
+        capture_output=True,
+        text=True,
+        env=_git_env(),
+    )
+    if verify.returncode != 0:
+        raise GuardError(f"Cannot diff against base {base!r}: not a valid commit")
     res = subprocess.run(
-        ["git", "diff", f"{base}...HEAD", "--"],
+        _git_argv("diff", "--no-ext-diff", "--no-textconv", "--end-of-options", f"{base}...HEAD", "--"),
         cwd=repo.root,
         capture_output=True,
         text=True,
@@ -93,7 +108,7 @@ def fingerprint(repo: Repo) -> str:
     h.update(head(repo).encode())
 
     res = subprocess.run(
-        ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        _git_argv("status", "--porcelain=v1", "-z", "--untracked-files=all"),
         cwd=repo.root,
         capture_output=True,
         check=True,
@@ -133,7 +148,7 @@ def changes(repo: Repo, since: str) -> tuple[list[str], str]:
     changed_paths = set()
 
     res_diff = subprocess.run(
-        ["git", "diff", "--name-only", since],
+        _git_argv("diff", "--no-ext-diff", "--no-textconv", "--name-only", since),
         cwd=repo.root,
         capture_output=True,
         text=True,
@@ -144,7 +159,7 @@ def changes(repo: Repo, since: str) -> tuple[list[str], str]:
         changed_paths.update(res_diff.stdout.strip().splitlines())
 
     res_untracked = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard"],
+        _git_argv("ls-files", "--others", "--exclude-standard"),
         cwd=repo.root,
         capture_output=True,
         text=True,
@@ -162,7 +177,7 @@ def changes(repo: Repo, since: str) -> tuple[list[str], str]:
         return [], ""
 
     res_stat = subprocess.run(
-        ["git", "diff", "--stat", since],
+        _git_argv("diff", "--no-ext-diff", "--no-textconv", "--stat", since),
         cwd=repo.root,
         capture_output=True,
         text=True,
