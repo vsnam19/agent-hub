@@ -23,14 +23,17 @@ like `<agent>:<model>`.
    assertions. The CLI refuses an implement brief that lacks `## Input` or `## Expected output` (exit 2).
 4. **Prepare a worktree** on a feature branch. The CLI never creates one and refuses the default branch or a
    detached HEAD (`refused`, exit 3).
-5. **Run in the background:**
+5. **Run the job, then wait for it.** Start it with the Bash tool's `run_in_background`:
    `agent-hub run --role implement --brief brief.md -d <worktree> --json`
-   using the Bash tool's `run_in_background`, then do other work until you are notified. Do not poll.
+   Then call `agent-hub wait -d <worktree> --timeout 9m` in the foreground (Bash timeout 600000 ms). Exit 124
+   means it is still running: do any independent work you have, then call `wait` again. Any other exit is the
+   job's own exit code and `wait` has printed its result. Steps 6–7 happen before your final reply; never end
+   your turn while a job you started is still running, because nothing wakes you after your turn ends.
 6. **Read the result** and act on its `status` (table below). Never re-run blindly on a dirty tree.
 7. **Verify yourself** in the worktree: run the gate, read the whole diff, and scan every new test for missing
    assertions. The agent's claims are not evidence. Once verified, commit the work yourself if the agent did not
    (some agents cannot commit by design).
-8. **Optional second opinion:** `agent-hub run --role review -d <worktree> --base <default branch>`.
+8. **Optional second opinion:** start it the same way (background + `wait`): `agent-hub run --role review -d <worktree> --base <default branch>`.
    The CLI computes `git diff <base>...HEAD` into the job's `diff.patch` and the reviewer reads that file; the
    reviewer never gets a shell. Treat findings as input to your own judgement, not as a verdict.
 9. **Force a link** with `--agent <agent>:<model>` when one model's output is poor or you need a specific one.
@@ -56,7 +59,11 @@ like `<agent>:<model>`.
 Exit code 2 has no status: it means a usage or configuration error (bad flag, unknown agent, brief missing a
 required heading, unknown job id). Fix the call and run again.
 
+`wait` exits 124 while the job is still running.
+
 ## Rules
+
+- Never end your turn while a job you started is still running; keep calling wait.
 
 - An agent's claims are not evidence. "All tests pass" in a reply means nothing until you ran the gate.
 - Fallback only happens while the tree is unchanged; once an agent has edited files, the next step is yours.

@@ -41,6 +41,10 @@ def main():
         sys.exit(2)
     elif scenario == "slow":
         do_slow()
+    elif scenario == "slow2":
+        time.sleep(2)
+        print(json.dumps({"result": f"done: {trunc_prompt}"}))
+        sys.exit(0)
     elif scenario == "write":
         Path("agent_wrote.txt").write_text("hello")
         print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "done"}))

@@ -57,6 +57,13 @@ def main():
         sys.exit(2)
     elif scenario == "slow":
         do_slow()
+    elif scenario == "slow2":
+        time.sleep(2)
+        print(json.dumps({"type": "thread.started"}))
+        print(json.dumps({"type": "turn.completed"}))
+        if out_file:
+            Path(out_file).write_text(f"done: {trunc_prompt}")
+        sys.exit(0)
     elif scenario == "write":
         Path("agent_wrote.txt").write_text("hello")
         print(json.dumps({"type": "thread.started"}))

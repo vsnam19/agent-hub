@@ -45,8 +45,10 @@ agent-hub profile AGENT
 agent-hub jobs [--limit LIMIT]
 agent-hub show [--json] ID
 agent-hub cancel ID
+agent-hub wait -d WORKDIR [--timeout TIMEOUT] [--json]
 ```
 
+- `wait` blocks until the newest job for that work directory ends (or until `--timeout`, default 9m), and prints its result like `show` (or `--json`).
 - `run` runs one job in the foreground and prints a short summary then the reply; `--json` prints only the result
   record. `--brief` is a file, or `-` for stdin, and is required for `implement` (optional for `review`).
   `--agent` replaces the chain with that single `agent:model` link. `--timeout` takes a duration such as `30m`.
@@ -77,6 +79,7 @@ agent-hub cancel ID
 | 7 | `empty` | The agent exited cleanly but returned nothing. |
 | 8 | `interrupted` | Quota, auth or model failure after the tree had changed; no fallback. |
 | 130 | `cancelled` | `cancel` or Ctrl-C. |
+| 124 | | `wait` only: the job is still running when the timeout expires. |
 
 ## Development
 

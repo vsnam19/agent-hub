@@ -3,6 +3,7 @@ import json
 import os
 import signal
 import sys
+import time
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,9 @@ from agenthub.jobs import get_job, list_jobs
 from agenthub.orchestrate import EXIT, RunArgs, run_job
 from agenthub.pool import Cooldowns, parse_link
 from agenthub.procinfo import start_time
+
+WAIT_POLL_S = 1.0
+WAIT_APPEAR_S = 10.0
 
 
 class UsageError(Exception):
@@ -58,6 +62,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     cancel = sub.add_parser("cancel", help="cancel a running job")
     cancel.add_argument("id")
+
+    wait = sub.add_parser("wait", help="wait for a job to finish")
+    wait.add_argument("-d", "--dir", required=True, dest="workdir")
+    wait.add_argument("--timeout", help="e.g. 9m")
+    wait.add_argument("--json", action="store_true")
+
     return parser
 
 
@@ -71,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
             "jobs": _cmd_jobs,
             "show": _cmd_show,
             "cancel": _cmd_cancel,
+            "wait": _cmd_wait,
         }[args.command]
         return handler(args)
     except SystemExit as e:  # --help
@@ -262,3 +273,43 @@ def _cmd_cancel(args) -> int:
     job.write_json("result.json", result)
     print(_safe(f"cancelled {job.id} (process not verified; nothing signalled)"))
     return 0
+
+
+def _cmd_wait(args) -> int:
+    workdir = Path(args.workdir).expanduser().resolve()
+    timeout_td = parse_duration(args.timeout) if args.timeout else parse_duration("9m")
+    timeout_s = timeout_td.total_seconds()
+
+    start_time = time.monotonic()
+
+    target_job = None
+    while time.monotonic() - start_time <= WAIT_APPEAR_S:
+        for r in list_jobs(paths(), 100):
+            if Path(r.get("workdir", "")).expanduser().resolve() == workdir:
+                target_job = _load_job(r["id"])
+                break
+        if target_job is not None:
+            break
+        time.sleep(WAIT_POLL_S)
+
+    if target_job is None:
+        print(_safe(f"agent-hub: no job for {args.workdir}", sys.stderr), file=sys.stderr)
+        return 2
+
+    while time.monotonic() - start_time <= timeout_s:
+        try:
+            result = target_job.read_json("result.json")
+        except (OSError, ValueError):
+            result = {"status": "running"}
+
+        if result.get("status") != "running":
+            if args.json:
+                print(json.dumps(result, indent=2))
+            else:
+                _emit(_summary(result))
+            return result.get("exit_code", 1)
+
+        time.sleep(WAIT_POLL_S)
+
+    print(_safe(f"still running: {target_job.id}"))
+    return 124

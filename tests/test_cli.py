@@ -8,6 +8,7 @@ from pathlib import Path
 
 from agenthub.cli import main
 from agenthub.config import paths
+from agenthub.jobs import list_jobs
 from agenthub.pool import Cooldowns, Link
 
 BRIEF = "## Input\n\nfoo\n\n## Expected output\n\nbar\n"
@@ -329,3 +330,126 @@ def test_profile_sanitised_on_tty(env_sandbox, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "\x1b" not in out
     assert "profile[2Jtext" in out
+
+
+def test_wait_returns_finished_job_result(env_sandbox, repo, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_AGY_SCENARIO", "ok")
+    write_brief(repo)
+    main(["run", "--role", "implement", "-d", str(repo), "--brief", str(repo / "brief.md")])
+    capsys.readouterr()
+
+    assert main(["wait", "-d", str(repo)]) == 0
+    out, err = capsys.readouterr()
+    assert "status: ok" in out
+
+
+def test_wait_times_out_with_124(env_sandbox, repo, tmp_path, monkeypatch, capsys):
+    import subprocess
+    import sys
+
+    monkeypatch.setenv("FAKE_AGY_SCENARIO", "slow")
+    write_brief(repo)
+
+    env = os.environ.copy()
+    env["FAKE_AGY_SCENARIO"] = "slow"
+    p = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "agenthub",
+            "run",
+            "--role",
+            "implement",
+            "-d",
+            str(repo),
+            "--brief",
+            str(repo / "brief.md"),
+        ],
+        env=env,
+    )
+
+    try:
+        assert main(["wait", "-d", str(repo), "--timeout", "2s"]) == 124
+        out, err = capsys.readouterr()
+        assert "still running:" in out
+
+        job_id = [r["id"] for r in list_jobs(paths(), 10)][0]
+        main(["cancel", job_id])
+    finally:
+        p.wait()
+
+
+def test_wait_follows_job_to_completion(env_sandbox, repo, tmp_path, capsys):
+    import subprocess
+    import sys
+
+    write_brief(repo)
+
+    env = os.environ.copy()
+    env["FAKE_AGY_SCENARIO"] = "slow2"
+    p = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "agenthub",
+            "run",
+            "--role",
+            "implement",
+            "-d",
+            str(repo),
+            "--brief",
+            str(repo / "brief.md"),
+        ],
+        env=env,
+    )
+
+    try:
+        assert main(["wait", "-d", str(repo), "--timeout", "30s"]) == 0
+        out, err = capsys.readouterr()
+        assert "status: ok" in out
+    finally:
+        p.wait()
+
+
+def test_wait_no_job_exit_2(env_sandbox, repo, monkeypatch, capsys):
+    import agenthub.cli as cli
+
+    monkeypatch.setattr(cli, "WAIT_APPEAR_S", 0.5)
+    assert main(["wait", "-d", str(repo)]) == 2
+    out, err = capsys.readouterr()
+    assert f"agent-hub: no job for {repo}" in err
+
+
+def test_wait_json_output(env_sandbox, repo, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_AGY_SCENARIO", "ok")
+    write_brief(repo)
+    main(["run", "--role", "implement", "-d", str(repo), "--brief", str(repo / "brief.md")])
+    capsys.readouterr()
+
+    assert main(["wait", "-d", str(repo), "--json"]) == 0
+    out, err = capsys.readouterr()
+    import json
+
+    data = json.loads(out)
+    assert data["status"] == "ok"
+    assert data["workdir"] == str(repo.resolve())
+
+
+def test_wait_picks_newest_job_for_dir(env_sandbox, repo, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_AGY_SCENARIO", "ok,empty")
+    write_brief(repo)
+
+    # Run first job (status: ok)
+    main(["run", "--role", "implement", "-d", str(repo), "--brief", str(repo / "brief.md")])
+
+    import time
+
+    time.sleep(1.1)  # ensure a newer timestamp for the next job ID
+
+    # Run second job (status: empty)
+    main(["run", "--role", "implement", "-d", str(repo), "--brief", str(repo / "brief.md")])
+    capsys.readouterr()
+
+    assert main(["wait", "-d", str(repo)]) == 7
+    out, err = capsys.readouterr()
+    assert "status: empty" in out
