@@ -1,5 +1,6 @@
 import os
 import signal
+import subprocess
 import sys
 import time
 from datetime import timedelta
@@ -180,4 +181,59 @@ def test_on_start_receives_pgid(tmp_path: Path):
 
 def test_terminate_missing_group_is_quiet():
     # A process group that definitely doesn't exist (e.g. 999999)
-    terminate(999999)  # Should not raise exception
+    assert terminate(999999) is None  # Should not raise exception
+
+
+def test_terminate_returns_quickly_when_group_exits(tmp_path: Path):
+    import threading
+
+    script = tmp_path / "script.py"
+    script.write_text("import time; time.sleep(10)")
+    proc = subprocess.Popen([sys.executable, str(script)], start_new_session=True)
+    pgid = proc.pid
+    threading.Thread(target=proc.wait).start()
+    time.sleep(0.1)
+
+    start = time.time()
+    terminate(pgid)
+    duration = time.time() - start
+
+    assert duration < 2.0
+    proc.wait()
+    with pytest.raises(ProcessLookupError):
+        os.killpg(pgid, 0)
+
+
+def test_terminate_escalates_to_sigkill(tmp_path: Path, monkeypatch):
+    import threading
+
+    monkeypatch.setattr("agenthub.process.KILL_GRACE_S", 0.5)
+    script = tmp_path / "script.py"
+    script.write_text("import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(10)")
+    proc = subprocess.Popen([sys.executable, str(script)], start_new_session=True)
+    pgid = proc.pid
+    threading.Thread(target=proc.wait).start()
+    time.sleep(0.1)
+
+    start = time.time()
+    terminate(pgid)
+    duration = time.time() - start
+
+    assert duration < 2.0
+    proc.wait()
+    with pytest.raises(ProcessLookupError):
+        os.killpg(pgid, 0)
+
+
+def test_timeout_rc_is_real_returncode(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("agenthub.process.KILL_GRACE_S", 0.5)
+    attempt_dir = tmp_path / "attempt"
+    attempt_dir.mkdir()
+    script = tmp_path / "script.py"
+    script.write_text("import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(10)")
+
+    inv = Invocation(argv=[sys.executable, str(script)], stdin_path=None)
+    ran = run(inv, cwd=tmp_path, env={}, attempt_dir=attempt_dir, timeout=timedelta(seconds=0.5))
+
+    assert ran.timed_out
+    assert ran.rc == -signal.SIGKILL

@@ -1,15 +1,11 @@
 import importlib
 import shutil
 import subprocess
+import tomllib
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-
-try:
-    import tomllib
-except ImportError:
-    import tomli as tomllib  # type: ignore
 
 
 class Outcome(StrEnum):

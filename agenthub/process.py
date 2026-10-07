@@ -58,7 +58,7 @@ def run(
             timed_out = True
             terminate(pgid)
             proc.wait()
-            rc = -signal.SIGTERM
+            rc = proc.returncode
 
         # Terminate any remaining processes in the group
         if not timed_out:
@@ -82,7 +82,13 @@ def terminate(pgid: int) -> None:
     except ProcessLookupError:
         return
 
-    time.sleep(KILL_GRACE_S)
+    start_time = time.monotonic()
+    while time.monotonic() - start_time < KILL_GRACE_S:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
 
     try:
         os.killpg(pgid, signal.SIGKILL)
