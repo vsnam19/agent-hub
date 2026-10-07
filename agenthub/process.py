@@ -11,6 +11,9 @@ from agenthub.agents import Invocation
 
 KILL_GRACE_S = 10.0
 
+# Leaders of running groups, so terminate() can reap them (a zombie leader keeps its group "alive").
+_LEADERS: dict[int, subprocess.Popen] = {}
+
 
 @dataclass(frozen=True)
 class Ran:
@@ -38,6 +41,7 @@ def run(
     else:
         stdin_fd = os.open(os.devnull, os.O_RDONLY)
 
+    leader_pid: int | None = None
     try:
         proc = subprocess.Popen(
             inv.argv,
@@ -49,6 +53,8 @@ def run(
             start_new_session=True,
         )
         pgid = proc.pid
+        leader_pid = pgid
+        _LEADERS[pgid] = proc
         on_start(pgid)
 
         timed_out = False
@@ -71,12 +77,15 @@ def run(
         return Ran(rc=rc, timed_out=timed_out, duration_s=duration_s, pgid=pgid)
 
     finally:
+        if leader_pid is not None:
+            _LEADERS.pop(leader_pid, None)
         os.close(stdout_fd)
         os.close(stderr_fd)
         os.close(stdin_fd)
 
 
 def terminate(pgid: int, leader: subprocess.Popen | None = None) -> None:
+    leader = leader or _LEADERS.get(pgid)
     try:
         os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
