@@ -239,7 +239,7 @@ structured error fields), never the model's reply text, so a reply mentioning "q
   The brief is copied to `<attempt_dir>/brief.md`. stdin `/dev/null`.
 - stdout is one JSON object; parse with `json.loads(strict=False)` (agy emits raw newlines in strings). Reply =
   `response`; error text = `error` field + stderr.
-- Classify (case-insensitive on error text): `quota`, `rate limit`, `resource exhausted` → QUOTA; `unauthenticated`,
+- Classify (case-insensitive on error text): `quota`, `rate limit`, `resource exhausted`, `quota reached` → QUOTA, reset from `Resets in <h>h<m>m<s>s` when present (observed 2026-10-08: "Individual quota reached. … Resets in 117h47m44s."); `unauthenticated`,
   `unauthorized`, `sign in`, `please authenticate`, `reauth` → AUTH; `not a known model`, `is not recognized as a
   known model`, `invalid --model` → MODEL_UNAVAILABLE; stderr `print timeout after … returning partial output` →
   TIMEOUT; rc ≠ 0 otherwise → FAILED; rc 0 with blank reply → EMPTY; else OK. If stdout is not JSON, fall back to

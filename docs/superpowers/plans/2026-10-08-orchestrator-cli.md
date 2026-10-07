@@ -327,7 +327,7 @@ CLAUDECODE, GH_TOKEN, HOME, PATH}}` to `$FAKE_LOG_DIR/<name>.<n>.json`; scenario
 | ok | `{"status":"SUCCESS","response":"done: <first 20 chars of prompt/stdin>"}`, 0 | events `{"type":"thread.started"}` `{"type":"turn.completed"}`; `-o` file `done`, 0 | `{"type":"result","subtype":"success","is_error":false,"result":"done"}`, 0 |
 | ok-quota-text | as ok with response `"quota exceeded is mentioned here"` | `-o` file same text | result same text |
 | quota | `{"status":"ERROR","error":"RESOURCE_EXHAUSTED: quota exceeded"}`, 1 | `{"type":"error","message":"You've hit your usage limit. Try again later."}`, 1 | `{"type":"result","is_error":true,"result":"Claude AI usage limit reached"}`, 1 |
-| quota-reset | error adds nothing (agy has no reset) — same as quota | event has `"resets_in_seconds": 3600`, 1 | result `"You've hit your limit · resets 1760000000"` → reset epoch, 1 |
+| quota-reset | error `"RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 117h47m44s."`, 1 | event has `"resets_in_seconds": 3600`, 1 | result `"You've hit your limit · resets 1760000000"` → reset epoch, 1 |
 | auth | error `"UNAUTHENTICATED: please sign in"`, 1 | message `"401 Unauthorized: not logged in"`, 1 | result `"Invalid API key · Please run /login"`, 1 |
 | model | error `"model foo is not a known model"`, 1 | message `"model 'x' not found"`, 1 | result `"invalid model: x"`, 1 |
 | empty | `{"status":"SUCCESS","response":""}`, 0 | `-o` file empty, 0 | result `""`, 0 |
@@ -337,7 +337,7 @@ CLAUDECODE, GH_TOKEN, HOME, PATH}}` to `$FAKE_LOG_DIR/<name>.<n>.json`; scenario
 | write-quota | creates the file, then quota | same | same |
 
 Adapter argv exactly per spec §8.1–8.3 (`brief_path` copied to `attempt_dir/"brief.md"` by the agy adapter in
-`build`). Classification per spec §8.1–8.3: scan stderr + structured error fields only, never the reply. Reset time:
+`build`). Classification per spec §8.1–8.3: scan stderr + structured error fields only, never the reply. Reset time: agy `Resets in <h>h<m>m<s>s` → now + that duration;
 codex `resets_in_seconds` → now + seconds; claude `resets <epoch>` or `|<epoch>` → that UTC instant; otherwise
 `None`. agent.toml: agy `read_only = "best-effort"`, codex and claude `"native"`; all `env_passthrough = []`.
 
@@ -354,7 +354,7 @@ profile.md content (≤ 40 lines each, spec §8.4):
   `--add-dir <common_dir>`; agy review has `--mode plan` and no skip-permissions),
   `test_X_classify_ok`, `test_X_classify_quota`, `test_X_classify_auth`, `test_X_classify_model_unavailable`,
   `test_X_classify_empty`, `test_X_classify_fail`, `test_X_reply_mentioning_quota_is_ok`,
-  and for codex/claude `test_X_quota_reset_time_parsed`. Each classification test runs the fake through
+  and for every agent `test_X_quota_reset_time_parsed`. Each classification test runs the fake through
   `process.run` with the adapter's `build` output under `env_sandbox`, then calls `classify`. Plus
   `test_fake_records_call` and `test_registry_finds_three_agents` (names == {"agy","codex","claude"}, each
   `profile_path` exists and is ≤ 40 lines).
