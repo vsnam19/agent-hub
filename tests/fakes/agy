@@ -72,6 +72,14 @@ unit-test-verified
 """
         print(json.dumps({"status": "SUCCESS", "response": response}))
         sys.exit(0)
+    elif scenario == "remove-assert":
+        Path("test_foo.py").write_text("def test_a():\n    pass\n")
+        response = "done\n## Status\nsuccess\n## What I did\nremoved assert\n## Verification\nnot-verified\n## Notes\nnone\n## Follow-ups\nnone\n"
+        print(json.dumps({"status": "SUCCESS", "response": response}))
+        sys.exit(0)
+    elif scenario == "no-handoff":
+        print(json.dumps({"status": "SUCCESS", "response": "I did the work but no handoff"}))
+        sys.exit(0)
     elif scenario == "write-quota":
         Path("agent_wrote.txt").write_text("hello")
         print(json.dumps({"status": "ERROR", "error": "RESOURCE_EXHAUSTED: quota exceeded"}))

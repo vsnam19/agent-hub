@@ -28,7 +28,9 @@ def make_pool(**kw):
     )
 
 
-def args_for(repo, links, role="implement", brief=BRIEF, timeout=timedelta(seconds=30), base=None, gates=None):
+def args_for(
+    repo, links, role="implement", brief=BRIEF, timeout=timedelta(seconds=30), base=None, gates=None, jev=False
+):
     return RunArgs(
         role=role,
         brief=brief,
@@ -37,6 +39,7 @@ def args_for(repo, links, role="implement", brief=BRIEF, timeout=timedelta(secon
         timeout=timeout,
         base=base,
         gates=gates or [],
+        jev=jev,
     )
 
 
@@ -381,3 +384,51 @@ def test_gate_ignored_for_review(env_sandbox, repo):
     result = go(repo, ["codex:m1"], role="review", brief="", base="master", gates=["exit 1"])
     assert result["status"] == "ok"
     assert result["gate"] == []
+
+
+def test_gate_touched_recorded(env_sandbox, repo, monkeypatch):
+    import subprocess
+
+    subprocess.run(["git", "checkout", "-b", "feat/test"], cwd=repo, check=True)
+    (repo / "test_foo.py").write_text("def test_a():\n    assert 1\n")
+    subprocess.run(["git", "add", "."], cwd=repo)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo)
+
+    os.environ["FAKE_AGY_SCENARIO"] = "remove-assert"
+    result = go(repo, ["agy:m1"])
+    assert result["status"] == "ok"
+    assert result.get("gate_touched") == [{"file": "test_foo.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_jev_used_only_when_handoff_missing(env_sandbox, repo, monkeypatch, tmp_path):
+    bin_path = tmp_path / "fake-jev"
+    bin_path.write_text(
+        '#!/bin/sh\necho \'{"results": [{"id": "reply", "label": "partial", "probability": 0.8, "decision": "auto"}], "model": "test"}\'\n'  # noqa: E501
+    )
+    bin_path.chmod(0o755)
+    monkeypatch.setenv("AGENT_HUB_JEV_BIN", str(bin_path))
+    monkeypatch.setenv("AGENT_HUB_JEV", "1")
+
+    os.environ["FAKE_AGY_SCENARIO"] = "no-handoff"
+    result = go(repo, ["agy:m1"], jev=True)
+    assert result["status"] == "ok"
+    assert result.get("handoff_missing") is True
+    assert result.get("handoff_inferred") == {
+        "label": "partial",
+        "probability": 0.8,
+        "decision": "auto",
+        "model": "test",
+    }
+
+
+def test_jev_off_by_default(env_sandbox, repo, monkeypatch, tmp_path):
+    bin_path = tmp_path / "fake-jev"
+    bin_path.write_text("#!/bin/sh\nexit 1\n")
+    bin_path.chmod(0o755)
+    monkeypatch.setenv("AGENT_HUB_JEV_BIN", str(bin_path))
+
+    os.environ["FAKE_AGY_SCENARIO"] = "no-handoff"
+    result = go(repo, ["agy:m1"])
+    assert result["status"] == "ok"
+    assert result.get("handoff_missing") is True
+    assert result.get("handoff_inferred") is None

@@ -333,3 +333,32 @@ def test_exit_code_all_done_vs_not(tmp_path):
     spawn = FakeSpawner({"t1": [{"status": "failed"}]})
     rc = run_plan(plan, state, spawn)
     assert rc == 1
+
+
+def test_gate_touched_in_task_state(tmp_path, monkeypatch):
+    import json
+
+    from agenthub.planstate import AttemptState, State, TaskState
+
+    # We can just test that loading and saving state preserves gate_touched
+    state = State(
+        slug="test",
+        started="now",
+        updated="now",
+        tasks={
+            "t1": TaskState(
+                attempts=[
+                    AttemptState(
+                        job="j1", status="ok", exit_code=0, gate_touched=[{"file": "x", "kind": "y", "lines": [1]}]
+                    )
+                ]
+            )
+        },
+    )
+    state._path = tmp_path / "state.json"
+    state.save()
+
+    with open(state._path) as f:
+        data = json.load(f)
+
+    assert data["tasks"]["t1"]["attempts"][0]["gate_touched"] == [{"file": "x", "kind": "y", "lines": [1]}]

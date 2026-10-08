@@ -27,7 +27,7 @@ like `<agent>:<model>`.
    your turn while a job you started is still running, because nothing wakes you after your turn ends.
 6. **Read the result** and act on its `status` (table below). Never re-run blindly on a dirty tree.
 7. **Verify yourself** in the worktree: run the gate, read the whole diff, and scan every new test for missing
-   assertions. check the diff for edits to the gate itself (tests, justfile, lint config) and pass the repository's lint and tests as `--gate`. The agent's claims are not evidence. Once verified, commit the work yourself if the agent did not
+   assertions. check the diff for edits to the gate itself (tests, justfile, lint config) and pass the repository's lint and tests as `--gate`. The agent's claims are not evidence. read every hunk listed in `gate_touched` before accepting. Once verified, commit the work yourself if the agent did not
    (some agents cannot commit by design).
 8. **Optional second opinion:** start it the same way (background + `wait`): `agent-hub run --role review -d <worktree> --base <default branch>`.
    The CLI computes `git diff <base>...HEAD` into the job's `diff.patch` and the reviewer reads that file; the

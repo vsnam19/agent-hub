@@ -46,6 +46,7 @@ class RunArgs:
     timeout: timedelta
     base: str | None
     gates: list[str] = dataclasses.field(default_factory=list)
+    jev: bool = False
 
 
 class _Cancel:
@@ -221,11 +222,17 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
             status = TERMINAL[cl.outcome]
             break
 
+    record["handoff_inferred"] = None
     if args.role == "implement":
         reply_path = record.get("reply_path")
         parsed = None
         if reply_path and Path(reply_path).is_file():
-            parsed = handoff.parse(Path(reply_path).read_text())
+            reply_text = Path(reply_path).read_text()
+            parsed = handoff.parse(reply_text)
+            if parsed is None and args.jev:
+                from agenthub import jevclient
+
+                record["handoff_inferred"] = jevclient.classify_reply(reply_text)
         record["handoff"] = parsed
         record["handoff_missing"] = parsed is None
     else:
@@ -262,6 +269,13 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
             if rc != 0:
                 status = "gate-failed"
                 break
+
+    if args.role == "implement" and status in ("ok", "gate-failed"):
+        from agenthub import gateguard
+
+        record["gate_touched"] = gateguard.inspect_diff(repo, start_head)
+    else:
+        record["gate_touched"] = []
 
     files, stat = guards.changes(repo, start_head)
     record.update(changed_files=files, diffstat=stat)

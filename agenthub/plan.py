@@ -34,6 +34,7 @@ class Plan:
     tasks: list[Task]
     max_parallel: int = 2
     path: Path | None = None
+    jev: bool = False
 
 
 def load(path: Path) -> Plan:
@@ -181,4 +182,5 @@ def load(path: Path) -> Plan:
         tasks=tasks,
         max_parallel=int(data.get("max_parallel", 2)),
         path=path,
+        jev=bool(data.get("jev", False)),
     )

@@ -51,6 +51,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--base", help="review only: ref to compare against (default: the default branch)")
     run.add_argument("--timeout", help="e.g. 30m (default: the role's timeout)")
     run.add_argument("--gate", action="append", dest="gates", help="gate command to run (repeatable)")
+    run.add_argument("--jev", action="store_true", help="use jev fallback for missing handoffs")
     run.add_argument("--json", action="store_true")
 
     pool = sub.add_parser("pool", help="show roles, chains and cooldowns")
@@ -187,6 +188,7 @@ def _cmd_run(args) -> int:
         timeout=timeout,
         base=args.base,
         gates=args.gates or [],
+        jev=args.jev or os.environ.get("AGENT_HUB_JEV") == "1",
     )
     result = run_job(run_args, p, pool, _now)
     if args.json:
@@ -395,6 +397,9 @@ def _cmd_plan(args) -> int:
             if attempts:
                 last = attempts[-1]
                 line += f" ({len(attempts)} attempts, last: {last.get('status', '')})"
+                gate_touched = last.get("gate_touched", [])
+                if gate_touched:
+                    line += f" gate touched: {len(gate_touched)}"
             if branch:
                 line += f" branch={branch}"
             if handoff:

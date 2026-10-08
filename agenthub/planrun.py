@@ -197,6 +197,8 @@ def run_plan(
                     argv.extend(["--gate", g])
                 if task.role == "review":
                     argv.extend(["--base", tstate.start_ref])
+                if plan.jev:
+                    argv.append("--jev")
 
                 popen = spawn(argv, log_file)
                 running_children[task.name] = popen
@@ -259,6 +261,7 @@ def run_plan(
                     job_status = job_result.get("status", "failed")
                     attempt.status = job_status
                     attempt.exit_code = job_result.get("exit_code", popen.returncode if popen else -1)
+                    attempt.gate_touched = job_result.get("gate_touched", [])
 
                     reply_text = ""
                     reply_path = job_result.get("reply_path")

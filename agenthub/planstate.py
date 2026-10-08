@@ -14,6 +14,7 @@ class AttemptState:
     job: str
     status: str
     exit_code: int
+    gate_touched: list = field(default_factory=list)
 
 
 @dataclass
@@ -112,7 +113,12 @@ def load_or_init(plan: Plan) -> State:
 
         tasks_state = {}
         for k, v in data.get("tasks", {}).items():
-            attempts = [AttemptState(**a) for a in v.get("attempts", [])]
+            attempts = [
+                AttemptState(
+                    job=a["job"], status=a["status"], exit_code=a["exit_code"], gate_touched=a.get("gate_touched", [])
+                )
+                for a in v.get("attempts", [])
+            ]
             tasks_state[k] = TaskState(
                 status=v.get("status", "pending"),
                 attempts=attempts,

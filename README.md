@@ -58,7 +58,7 @@ agent-hub plan wait <plan.json> [--timeout 9m]
   `--agent` replaces the chain with that single `agent:model` link. `--timeout` takes a duration such as `30m`.
   `--gate` is a shell command to run after a successful attempt, stopping at the first failure; repeatable.
 - `implement` briefs must contain `## Input` and `## Expected output` headings, and `-d` must be a git work tree on
-  a non-default branch. The CLI never creates worktrees. The CLI appends a footer asking for a structured handoff, which is parsed and included in the result.
+  a non-default branch. The CLI never creates worktrees. The CLI appends a footer asking for a structured handoff, which is parsed and included in the result. If `--jev` (or `AGENT_HUB_JEV=1`) is set, a missing handoff is inferred using `jev-code`. The result also includes `gate_touched`, listing changes that could weaken the gate.
 - `review` is read-only. The CLI computes `git diff <base>...HEAD` into the job's `diff.patch` and the reviewer reads
   that file; the reviewer never gets a shell. `--base` defaults to the repository's default branch. The work tree is
   fingerprinted before and after, and any change fails the job as `modified-tree`. `--gate` is ignored.
