@@ -80,3 +80,13 @@ def test_list_jobs_skips_dirs_without_result(paths):
     jobs = list_jobs(paths, limit=10)
     assert len(jobs) == 1
     assert jobs[0]["id"] == job2.id
+
+
+def test_list_jobs_skips_non_job_dirs(paths):
+    job1_dir = paths.jobs_dir / "job1"
+    job1_dir.mkdir(parents=True)
+    job = Job(id="job1", dir=job1_dir)
+    job.write_json("result.json", {"id": "job1"})
+
+    jobs = list_jobs(paths, limit=10)
+    assert len(jobs) == 0

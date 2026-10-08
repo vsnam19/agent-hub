@@ -322,7 +322,10 @@ def _cmd_wait(args) -> int:
     target_job = None
     while time.monotonic() - start_time <= WAIT_APPEAR_S:
         for r in list_jobs(paths(), 100):
-            if Path(r.get("workdir", "")).expanduser().resolve() == workdir:
+            job_workdir = r.get("workdir")
+            if not job_workdir:
+                continue
+            if Path(job_workdir).expanduser().resolve() == workdir:
                 target_job = _load_job(r["id"])
                 break
         if target_job is not None:

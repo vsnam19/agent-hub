@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -7,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 
 from agenthub.config import Paths
+
+JOB_ID_RE = re.compile(r"^\d{8}-\d{6}-.*-[0-9a-f]{4}$")
 
 
 @dataclass
@@ -59,7 +62,7 @@ def list_jobs(p: Paths, limit: int) -> list[dict]:
 
     jobs = []
     for entry in os.scandir(p.jobs_dir):
-        if entry.is_dir():
+        if entry.is_dir() and JOB_ID_RE.match(entry.name):
             result_path = Path(entry.path) / "result.json"
             if result_path.is_file():
                 jobs.append((entry.name, result_path))

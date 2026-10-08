@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,6 +7,16 @@ from types import SimpleNamespace
 import pytest
 
 from tests.gitrepo import make_repo
+
+
+@pytest.fixture(autouse=True)
+def _isolate_state(tmp_path, monkeypatch):
+    import os
+
+    if os.environ.get("AGENT_HUB_STATE") is None:
+        monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path / "hub_state"))
+    if os.environ.get("AGENT_HUB_CONFIG") is None:
+        monkeypatch.setenv("AGENT_HUB_CONFIG", str(tmp_path / "hub_config"))
 
 
 @pytest.fixture
@@ -70,3 +81,12 @@ def fake_calls(fakelog: Path, name: str) -> list[dict]:
         calls.append(json.loads(log_file.read_text()))
         i += 1
     return calls
+
+
+@pytest.fixture(autouse=True)
+def _restore_environ():
+    """Undo any direct os.environ edits a test makes, so nothing leaks into later tests."""
+    saved = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)

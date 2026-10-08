@@ -1,3 +1,0 @@
-## Input
-
-## Expected output

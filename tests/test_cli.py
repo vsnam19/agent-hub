@@ -455,10 +455,10 @@ def test_wait_picks_newest_job_for_dir(env_sandbox, repo, tmp_path, monkeypatch,
     assert "status: empty" in out
 
 
-def test_run_gate_flag_and_summary(capsys, monkeypatch, env_sandbox, repo):
-    os.environ["FAKE_AGY_SCENARIO"] = "write"
-    Path("b").write_text("## Input\n\n## Expected output\n")
-    Path("b").write_text("## Input\n\n## Expected output\n")
+def test_run_gate_flag_and_summary(capsys, monkeypatch, env_sandbox, repo, tmp_path):
+    monkeypatch.setenv("FAKE_AGY_SCENARIO", "write")
+    brief = tmp_path / "b"
+    brief.write_text("## Input\n\n## Expected output\n")
     ret = main(
         [
             "run",
@@ -467,7 +467,7 @@ def test_run_gate_flag_and_summary(capsys, monkeypatch, env_sandbox, repo):
             "-d",
             str(repo),
             "--brief",
-            "b",
+            str(brief),
             "--agent",
             "agy:m1",
             "--gate",
@@ -481,11 +481,45 @@ def test_run_gate_flag_and_summary(capsys, monkeypatch, env_sandbox, repo):
     assert "gate: passed (2)" in out
 
 
-def test_run_summary_shows_handoff(capsys, monkeypatch, env_sandbox, repo):
-    os.environ["FAKE_AGY_SCENARIO"] = "handoff"
-    Path("b").write_text("## Input\n\n## Expected output\n")
-    Path("b").write_text("## Input\n\n## Expected output\n")
-    ret = main(["run", "--role", "implement", "-d", str(repo), "--brief", "b", "--agent", "agy:m1"])
+def test_run_summary_shows_handoff(capsys, monkeypatch, env_sandbox, repo, tmp_path):
+    monkeypatch.setenv("FAKE_AGY_SCENARIO", "handoff")
+    brief = tmp_path / "b"
+    brief.write_text("## Input\n\n## Expected output\n")
+    ret = main(["run", "--role", "implement", "-d", str(repo), "--brief", str(brief), "--agent", "agy:m1"])
     assert ret == 0
     out = capsys.readouterr().out
     assert "handoff: success · unit-test-verified" in out
+
+
+def test_wait_ignores_record_without_workdir(env_sandbox, repo, tmp_path, monkeypatch, capsys):
+    import agenthub.cli as cli
+
+    # Create a real finished job for repo
+    monkeypatch.setenv("FAKE_AGY_SCENARIO", "ok")
+    write_brief(repo)
+    main(["run", "--role", "implement", "-d", str(repo), "--brief", str(repo / "brief.md")])
+    capsys.readouterr()
+
+    job1_dir = paths().jobs_dir / "job1"
+    job1_dir.mkdir(parents=True)
+    (job1_dir / "result.json").write_text(json.dumps({"status": "ok", "exit_code": 0}))
+
+    # Wait for the real repo should find the real job, not the stray record
+    assert main(["wait", "-d", str(repo)]) == 0
+    out, err = capsys.readouterr()
+    assert "status: ok" in out
+
+    # From a cwd with only the stray record, it should timeout/exit 2
+    monkeypatch.setattr(cli, "WAIT_APPEAR_S", 0.5)
+    monkeypatch.chdir(tmp_path)
+    assert main(["wait", "-d", "."]) == 2
+    out, err = capsys.readouterr()
+    assert "agent-hub: no job for ." in err
+
+
+def test_suite_uses_temp_state(tmp_path):
+    import os
+
+    state_dir = paths().state_dir
+    assert str(tmp_path) in str(state_dir)
+    assert os.environ.get("AGENT_HUB_STATE") is not None
