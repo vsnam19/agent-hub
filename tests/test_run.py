@@ -28,7 +28,7 @@ def make_pool(**kw):
     )
 
 
-def args_for(repo, links, role="implement", brief=BRIEF, timeout=timedelta(seconds=30), base=None):
+def args_for(repo, links, role="implement", brief=BRIEF, timeout=timedelta(seconds=30), base=None, gates=None):
     return RunArgs(
         role=role,
         brief=brief,
@@ -36,6 +36,7 @@ def args_for(repo, links, role="implement", brief=BRIEF, timeout=timedelta(secon
         links=[parse_link(x) if isinstance(x, str) else x for x in links],
         timeout=timeout,
         base=base,
+        gates=gates or [],
     )
 
 
@@ -66,7 +67,7 @@ def test_implement_ok_records_everything(env_sandbox, repo):
     att = result["attempts"][0]
     assert att["n"] == 1 and att["outcome"] == "ok" and att["rc"] == 0 and att["duration_s"] >= 0
     jd = job_dir(result)
-    assert (jd / "brief.md").read_text() == BRIEF
+    assert (jd / "brief.md").read_text().startswith(BRIEF)
     from agenthub.procinfo import start_time
 
     assert json.loads((jd / "pid").read_text()) == {"pid": os.getpid(), "start_time": start_time(os.getpid())}
@@ -91,7 +92,7 @@ def test_implement_refused_on_default_branch(env_sandbox, repo):
     assert result["attempts"] == []
     assert fake_calls(env_sandbox.fakelog, "agy") == []
     assert (job_dir(result) / "result.json").is_file()
-    assert (job_dir(result) / "brief.md").read_text() == BRIEF
+    assert (job_dir(result) / "brief.md").read_text().startswith(BRIEF)
 
 
 def test_fallback_on_quota_sets_cooldown(env_sandbox, repo, monkeypatch):
@@ -300,3 +301,83 @@ def test_run_job_cancelled_flag_via_signal(env_sandbox, repo, monkeypatch):
     assert result["exit_code"] == 130
     assert len(result["attempts"]) == 1
     assert orchestrate.EXIT["cancelled"] == 130
+
+
+def test_implement_brief_has_handoff_footer(env_sandbox, repo):
+    result = go(repo, ["codex:m1"])
+    sent = fake_calls(env_sandbox.fakelog, "codex")[0]["stdin"]
+    assert "## Status" in sent
+    assert "## Status" in (job_dir(result) / "brief.md").read_text()
+
+
+def test_review_brief_has_no_footer(env_sandbox, repo):
+    result = go(repo, ["codex:m1"], role="review", brief="", base="master")
+    sent = fake_calls(env_sandbox.fakelog, "codex")[0]["stdin"]
+    assert "## Status" not in sent
+    assert "## Status" not in (job_dir(result) / "brief.md").read_text()
+
+
+def test_handoff_parsed_into_result(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "agy", "handoff")
+    result = go(repo, ["agy:m1"])
+    assert result["handoff"] is not None
+    assert result["handoff"]["status"] == "success"
+    assert result["handoff"]["verification"] == "unit-test-verified"
+    assert result["handoff"]["did"] == ["one", "two"]
+    assert result["handoff_missing"] is False
+
+
+def test_handoff_missing_flag(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "agy", "write")
+    result = go(repo, ["agy:m1"])
+    assert result["handoff"] is None
+    assert result["handoff_missing"] is True
+
+
+def test_gate_passes(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "agy", "write")
+    result = go(repo, ["agy:m1"], gates=["test -f agent_wrote.txt"])
+    assert result["status"] == "ok"
+    assert len(result["gate"]) == 1
+    assert result["gate"][0]["rc"] == 0
+    assert result["gate"][0]["cmd"] == "test -f agent_wrote.txt"
+
+
+def test_gate_fails_status_and_exit(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "agy", "write")
+    result = go(repo, ["agy:m1"], gates=["echo failed; exit 3"])
+    assert result["status"] == "gate-failed"
+    assert result["exit_code"] == 9
+    assert len(result["gate"]) == 1
+    assert result["gate"][0]["rc"] == 3
+    assert "failed" in result["gate"][0]["tail"]
+    assert Path(result["gate"][0]["log"]).is_file()
+
+
+def test_gate_stops_at_first_failure(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "agy", "write")
+    result = go(repo, ["agy:m1"], gates=["exit 1", "exit 0"])
+    assert result["status"] == "gate-failed"
+    assert len(result["gate"]) == 1
+    assert result["gate"][0]["rc"] == 1
+
+
+def test_gate_not_run_when_job_failed(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "agy", "fail")
+    result = go(repo, ["agy:m1"], gates=["exit 1"])
+    assert result["status"] == "failed"
+    assert result["gate"] == []
+
+
+def test_gate_env_filtered(env_sandbox, repo, monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", "super-secret")
+    scenario(monkeypatch, "agy", "write")
+    result = go(repo, ["agy:m1"], gates=["env"])
+    assert result["status"] == "ok"
+    assert "super-secret" not in result["gate"][0]["tail"]
+
+
+def test_gate_ignored_for_review(env_sandbox, repo):
+    result = go(repo, ["codex:m1"], role="review", brief="", base="master", gates=["exit 1"])
+    assert result["status"] == "ok"
+    assert result["gate"] == []

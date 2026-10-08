@@ -44,6 +44,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--agent", help="use this single agent:model instead of the role's chain")
     run.add_argument("--base", help="review only: ref to compare against (default: the default branch)")
     run.add_argument("--timeout", help="e.g. 30m (default: the role's timeout)")
+    run.add_argument("--gate", action="append", dest="gates", help="gate command to run (repeatable)")
     run.add_argument("--json", action="store_true")
 
     pool = sub.add_parser("pool", help="show roles, chains and cooldowns")
@@ -119,6 +120,21 @@ def _summary(result: dict) -> str:
         lines.append(f"agent: {_safe(str(result['agent']))}:{_safe(str(result['model']))}")
     lines.append(f"changed: {len(result.get('changed_files') or [])} files")
     lines.append(f"job: {_safe(str(result['id']))}")
+
+    if result.get("handoff"):
+        h = result["handoff"]
+        lines.append(f"handoff: {_safe(h['status'])} · {_safe(h['verification'])}")
+
+    if "gate" in result and result["gate"]:
+        gates = result["gate"]
+        failed = next((g for g in gates if g["rc"] != 0), None)
+        if failed:
+            lines.append(f"gate: FAILED: {_safe(failed['cmd'])} (rc {failed['rc']})")
+            if failed.get("tail"):
+                lines.append(_safe(failed["tail"]))
+        else:
+            lines.append(f"gate: passed ({len(gates)})")
+
     if result.get("error"):
         lines.append(f"error: {_safe(str(result['error']))}")
     reply_path = result.get("reply_path")
@@ -150,6 +166,7 @@ def _cmd_run(args) -> int:
         links=links,
         timeout=timeout,
         base=args.base,
+        gates=args.gates or [],
     )
     result = run_job(run_args, p, pool, _now)
     if args.json:

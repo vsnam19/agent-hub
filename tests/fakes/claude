@@ -49,6 +49,19 @@ def main():
         Path("agent_wrote.txt").write_text("hello")
         print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "done"}))
         sys.exit(0)
+    elif scenario == "handoff":
+        Path("agent_wrote.txt").write_text("hello")
+        response = """done
+## Status
+success
+## What I did
+- one
+- two
+## Verification
+unit-test-verified
+"""
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": response}))
+        sys.exit(0)
     elif scenario == "write-quota":
         Path("agent_wrote.txt").write_text("hello")
         print(json.dumps({"type": "result", "is_error": True, "result": "Claude AI usage limit reached"}))

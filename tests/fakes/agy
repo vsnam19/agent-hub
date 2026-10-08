@@ -59,6 +59,19 @@ def main():
         Path("agent_wrote.txt").write_text("hello")
         print(json.dumps({"status": "SUCCESS", "response": f"done: {trunc_prompt}"}))
         sys.exit(0)
+    elif scenario == "handoff":
+        Path("agent_wrote.txt").write_text("hello")
+        response = """done
+## Status
+success
+## What I did
+- one
+- two
+## Verification
+unit-test-verified
+"""
+        print(json.dumps({"status": "SUCCESS", "response": response}))
+        sys.exit(0)
     elif scenario == "write-quota":
         Path("agent_wrote.txt").write_text("hello")
         print(json.dumps({"status": "ERROR", "error": "RESOURCE_EXHAUSTED: quota exceeded"}))

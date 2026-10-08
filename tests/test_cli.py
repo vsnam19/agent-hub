@@ -75,7 +75,7 @@ def test_run_brief_from_stdin(env_sandbox, repo, monkeypatch, capsys):
     rc = main(["run", "--role", "implement", "--brief", "-", "-d", str(repo), "--agent", "claude:s", "--json"])
     assert rc == 0
     result = json.loads(capsys.readouterr().out)
-    assert (paths().jobs_dir / result["id"] / "brief.md").read_text() == BRIEF
+    assert (paths().jobs_dir / result["id"] / "brief.md").read_text().startswith(BRIEF)
 
 
 def test_run_refused_exit_3(env_sandbox, tmp_path, capsys):
@@ -453,3 +453,39 @@ def test_wait_picks_newest_job_for_dir(env_sandbox, repo, tmp_path, monkeypatch,
     assert main(["wait", "-d", str(repo)]) == 7
     out, err = capsys.readouterr()
     assert "status: empty" in out
+
+
+def test_run_gate_flag_and_summary(capsys, monkeypatch, env_sandbox, repo):
+    os.environ["FAKE_AGY_SCENARIO"] = "write"
+    Path("b").write_text("## Input\n\n## Expected output\n")
+    Path("b").write_text("## Input\n\n## Expected output\n")
+    ret = main(
+        [
+            "run",
+            "--role",
+            "implement",
+            "-d",
+            str(repo),
+            "--brief",
+            "b",
+            "--agent",
+            "agy:m1",
+            "--gate",
+            "exit 0",
+            "--gate",
+            "echo ok",
+        ]
+    )
+    assert ret == 0
+    out = capsys.readouterr().out
+    assert "gate: passed (2)" in out
+
+
+def test_run_summary_shows_handoff(capsys, monkeypatch, env_sandbox, repo):
+    os.environ["FAKE_AGY_SCENARIO"] = "handoff"
+    Path("b").write_text("## Input\n\n## Expected output\n")
+    Path("b").write_text("## Input\n\n## Expected output\n")
+    ret = main(["run", "--role", "implement", "-d", str(repo), "--brief", "b", "--agent", "agy:m1"])
+    assert ret == 0
+    out = capsys.readouterr().out
+    assert "handoff: success · unit-test-verified" in out

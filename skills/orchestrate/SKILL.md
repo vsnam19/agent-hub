@@ -54,6 +54,7 @@ like `<agent>:<model>`.
 | `timeout` | 6 | The attempt hit its timeout. | Inspect the tree and any partial reply; re-brief with a smaller scope or a longer `--timeout`. |
 | `empty` | 7 | The agent exited cleanly but returned nothing. | Inspect the tree; the work may still be done. Re-brief or take over. |
 | `interrupted` | 8 | Quota, auth or model failure after the tree had changed; no fallback. | Inspect the half-done tree, then finish it yourself or re-brief a fresh run from a clean state. |
+| `gate-failed` | 9 | A gate command failed. | read the gate tail, re-brief or fix |
 | `cancelled` | 130 | `agent-hub cancel` or Ctrl-C. | Inspect the tree; start again only if still wanted. |
 
 Exit code 2 has no status: it means a usage or configuration error (bad flag, unknown agent, brief missing a

@@ -40,7 +40,7 @@ State (cooldowns and job directories) lives in `$XDG_STATE_HOME/agent-hub/` or `
 ## Commands
 
 ```
-agent-hub run --role {implement,review} [--brief BRIEF] -d WORKDIR [--agent AGENT] [--base BASE] [--timeout TIMEOUT] [--json]
+agent-hub run --role {implement,review} [--brief BRIEF] -d WORKDIR [--agent AGENT] [--base BASE] [--timeout TIMEOUT] [--gate CMD] [--json]
 agent-hub pool [--json] [--clear AGENT:MODEL]
 agent-hub profile AGENT
 agent-hub jobs [--limit LIMIT]
@@ -53,11 +53,12 @@ agent-hub wait -d WORKDIR [--timeout TIMEOUT] [--json]
 - `run` runs one job in the foreground and prints a short summary then the reply; `--json` prints only the result
   record. `--brief` is a file, or `-` for stdin, and is required for `implement` (optional for `review`).
   `--agent` replaces the chain with that single `agent:model` link. `--timeout` takes a duration such as `30m`.
+  `--gate` is a shell command to run after a successful attempt, stopping at the first failure; repeatable.
 - `implement` briefs must contain `## Input` and `## Expected output` headings, and `-d` must be a git work tree on
-  a non-default branch. The CLI never creates worktrees.
+  a non-default branch. The CLI never creates worktrees. The CLI appends a footer asking for a structured handoff, which is parsed and included in the result.
 - `review` is read-only. The CLI computes `git diff <base>...HEAD` into the job's `diff.patch` and the reviewer reads
   that file; the reviewer never gets a shell. `--base` defaults to the repository's default branch. The work tree is
-  fingerprinted before and after, and any change fails the job as `modified-tree`.
+  fingerprinted before and after, and any change fails the job as `modified-tree`. `--gate` is ignored.
 - `pool` lists every role, its chain, and per link whether it is installed, its version and any cooldown;
   `--clear` lifts one cooldown.
 - `profile` prints an agent's `profile.md`, with strengths, weaknesses and what to put in a brief.
@@ -79,6 +80,7 @@ agent-hub wait -d WORKDIR [--timeout TIMEOUT] [--json]
 | 6 | `timeout` | The attempt hit its timeout. |
 | 7 | `empty` | The agent exited cleanly but returned nothing. |
 | 8 | `interrupted` | Quota, auth or model failure after the tree had changed; no fallback. |
+| 9 | `gate-failed` | A gate command failed. |
 | 130 | `cancelled` | `cancel` or Ctrl-C. |
 | 124 | | `wait` only: the job is still running when the timeout expires. |
 

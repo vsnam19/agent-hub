@@ -71,6 +71,22 @@ def main():
         if out_file:
             out_file.write_text("done")
         sys.exit(0)
+    elif scenario == "handoff":
+        Path("agent_wrote.txt").write_text("hello")
+        print(json.dumps({"type": "thread.started"}))
+        print(json.dumps({"type": "turn.completed"}))
+        if out_file:
+            response = """done
+## Status
+success
+## What I did
+- one
+- two
+## Verification
+unit-test-verified
+"""
+            out_file.write_text(response)
+        sys.exit(0)
     elif scenario == "write-quota":
         Path("agent_wrote.txt").write_text("hello")
         print(json.dumps({"type": "error", "message": "You've hit your usage limit. Try again later."}))

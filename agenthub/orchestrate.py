@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 from agenthub import brief as briefmod
-from agenthub import env, guards, process
+from agenthub import env, guards, handoff, process
 from agenthub.agents import Classified, Outcome, Request, registry
 from agenthub.config import ConfigError, Paths, Pool
 from agenthub.jobs import Job, new_job
@@ -27,8 +27,11 @@ EXIT = {
     "timeout": 6,
     "empty": 7,
     "interrupted": 8,
+    "gate-failed": 9,
     "cancelled": 130,
 }
+
+GATE_TIMEOUT_S = 600
 
 FALLBACK = (Outcome.QUOTA, Outcome.AUTH, Outcome.MODEL_UNAVAILABLE)
 TERMINAL = {Outcome.EMPTY: "empty", Outcome.TIMEOUT: "timeout", Outcome.FAILED: "failed"}
@@ -42,6 +45,7 @@ class RunArgs:
     links: list[Link]
     timeout: timedelta
     base: str | None
+    gates: list[str] = dataclasses.field(default_factory=list)
 
 
 class _Cancel:
@@ -115,6 +119,8 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         diff_path = job.dir / "diff.patch"
         diff_path.write_text(diff)
         text = briefmod.review_text(base, args.brief, diff_path)
+    elif args.role == "implement":
+        text += "\n" + handoff.FOOTER
     (job.dir / "brief.md").write_text(text)
     pid = os.getpid()
     (job.dir / "pid").write_text(json.dumps({"pid": pid, "start_time": start_time(pid)}))
@@ -214,6 +220,48 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
                 continue
             status = TERMINAL[cl.outcome]
             break
+
+    if args.role == "implement":
+        reply_path = record.get("reply_path")
+        parsed = None
+        if reply_path and Path(reply_path).is_file():
+            parsed = handoff.parse(Path(reply_path).read_text())
+        record["handoff"] = parsed
+        record["handoff_missing"] = parsed is None
+    else:
+        record["handoff"] = None
+        record["handoff_missing"] = False
+
+    record["gate"] = []
+    if status == "ok" and args.role != "review" and args.gates:
+        gate_env, _ = env.child_env(os.environ, ())
+        gate_dir = job.dir / "gate"
+        gate_dir.mkdir(exist_ok=True)
+
+        for n, cmd in enumerate(args.gates, start=1):
+            attempt_dir = gate_dir / str(n)
+            attempt_dir.mkdir(exist_ok=True)
+
+            inv = process.Invocation(argv=["bash", "-c", cmd], stdin_path=None)
+            ran = process.run(inv, workdir, gate_env, attempt_dir, timedelta(seconds=GATE_TIMEOUT_S))
+
+            stdout_text = (attempt_dir / "stdout").read_text(errors="replace")
+            stderr_text = (attempt_dir / "stderr").read_text(errors="replace")
+            log_content = stdout_text + stderr_text
+            log_path = gate_dir / f"{n}.log"
+            log_path.write_text(log_content)
+
+            lines = log_content.splitlines()
+            tail = "\n".join(lines[-40:])
+
+            rc = ran.rc if not ran.timed_out else (ran.rc if ran.rc != 0 else -15)
+            record["gate"].append(
+                {"cmd": cmd, "rc": rc, "duration_s": round(ran.duration_s, 3), "tail": tail, "log": str(log_path)}
+            )
+
+            if rc != 0:
+                status = "gate-failed"
+                break
 
     files, stat = guards.changes(repo, start_head)
     record.update(changed_files=files, diffstat=stat)
