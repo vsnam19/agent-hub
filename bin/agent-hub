@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "agent-hub: uv is required (https://docs.astral.sh/uv/)" >&2
+  exit 127
+fi
+
+# Resolve the real path to the script, following symlinks
+script_path=$(readlink -f "$0")
+# The repository root is the parent of the bin/ directory
+root=$(dirname "$(dirname "$script_path")")
+
+exec uv run --quiet --frozen --project "$root" agent-hub "$@"

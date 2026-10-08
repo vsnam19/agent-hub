@@ -9,13 +9,14 @@ dependencies (Python 3.12+ standard library only).
 ## Install
 
 ```sh
-uv tool install --editable .
+claude plugin marketplace add ~/Workspaces/tools/agent-plugins   # once; later: vsnam19/agent-plugins
+claude plugin install agent-hub@agent-plugins
 ```
 
-Install the `orchestrate` skill for Claude Code by symlinking it:
+For a terminal, use `uv tool install`:
 
 ```sh
-ln -s "$PWD/skills/orchestrate" ~/.claude/skills/orchestrate
+uv tool install --editable .
 ```
 
 ## Pool

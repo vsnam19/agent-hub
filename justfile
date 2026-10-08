@@ -9,3 +9,6 @@ test:
 
 smoke:
     scripts/smoke.sh
+
+validate:
+    claude plugin validate .
