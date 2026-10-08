@@ -1,5 +1,7 @@
 # agent-hub
 
+System overview — how the pieces fit, this machine's setup, testing, lessons: [`docs/overview.md`](docs/overview.md).
+
 `agent-hub` lets one coding agent (the orchestrator, normally Claude Code) hand well-specified work to other coding
 agents on this machine and get back a record it can verify. Jobs are picked by role (`implement`, `review`); each
 role is an ordered chain of `agent:model` links, and the CLI walks the chain, skipping links that are on cooldown
@@ -58,7 +60,7 @@ agent-hub plan wait <plan.json> [--timeout 9m]
   `--agent` replaces the chain with that single `agent:model` link. `--timeout` takes a duration such as `30m`.
   `--gate` is a shell command to run after a successful attempt, stopping at the first failure; repeatable.
 - `implement` briefs must contain `## Input` and `## Expected output` headings, and `-d` must be a git work tree on
-  a non-default branch. The CLI never creates worktrees. The CLI appends a footer asking for a structured handoff, which is parsed and included in the result. If `--jev` (or `AGENT_HUB_JEV=1`) is set, a missing handoff is inferred using `jev-code`. The result also includes `gate_touched`, listing changes that could weaken the gate.
+  a non-default branch. Single jobs never create worktrees (plan mode does, one per task). The CLI appends a footer asking for a structured handoff, which is parsed and included in the result. If `--jev` (or `AGENT_HUB_JEV=1`) is set, a missing handoff is inferred using `jev-code`. The result also includes `gate_touched`, listing changes that could weaken the gate.
 - `review` is read-only. The CLI computes `git diff <base>...HEAD` into the job's `diff.patch` and the reviewer reads
   that file; the reviewer never gets a shell. `--base` defaults to the repository's default branch. The work tree is
   fingerprinted before and after, and any change fails the job as `modified-tree`. `--gate` is ignored.
@@ -92,6 +94,12 @@ Run a graph of tasks with `agent-hub plan run <plan.json>`. The file defines the
 - `plan run` creates worktrees (`repo/.worktrees/slug-name`) and branches (`orch/slug/name`), running dependencies first and merging upstream branches into dependents. It saves state to `state.json` and resumes on restart. It polls the jobs and retries tasks based on exit codes.
 - `plan status` prints the status of each task in the plan.
 - `plan wait` blocks until all tasks in the plan are done (or failed/blocked), and prints the status.
+
+### Jev (optional)
+
+`--jev` (or `AGENT_HUB_JEV=1`) asks a local Jev decision model to classify an implement reply that has no handoff;
+the answer goes to `handoff_inferred` and never changes the status. Setup: Ollama ≥ 0.35 with `nimble` pulled, and
+`jev-code` on PATH (or `AGENT_HUB_JEV_BIN`): `npm install --prefix ~/.local/share/jev-code @french-castle/jev-code`.
 
 ## Exit codes
 
