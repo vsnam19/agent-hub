@@ -144,6 +144,24 @@ def test_two_dependencies_merged(tmp_path):
     assert state.task("t3").status == "done"
 
 
+def test_merge_ignores_commit_signing(tmp_path):
+    repo_dir = make_repo(tmp_path / "repo")
+    import subprocess
+
+    from agenthub.guards import _git_argv
+
+    subprocess.run(_git_argv("config", "commit.gpgsign", "true"), cwd=repo_dir)
+    subprocess.run(_git_argv("config", "gpg.program", "/bin/false"), cwd=repo_dir)
+
+    plan = make_plan(tmp_path, [{"name": "t1"}, {"name": "t2"}, {"name": "t3", "depends_on": ["t1", "t2"]}])
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [{"status": "ok"}], "t2": [{"status": "ok"}], "t3": [{"status": "ok"}]})
+
+    rc = run_plan(plan, state, spawn)
+    assert rc == 0
+    assert state.task("t3").status == "done"
+
+
 def test_merge_conflict_blocks(tmp_path):
     repo_dir = make_repo(tmp_path / "repo")
 

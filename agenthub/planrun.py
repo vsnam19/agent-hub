@@ -1,5 +1,6 @@
 import fnmatch
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -11,7 +12,7 @@ from agenthub.guards import _git_argv
 from agenthub.plan import Plan, Task
 from agenthub.planstate import AttemptState, State, TaskState
 
-PLAN_POLL_S = 2.0
+PLAN_POLL_S = float(os.environ.get("AGENT_HUB_PLAN_POLL_S", "2.0"))
 
 
 def compose_brief(plan: Plan, task: Task, state: State, attempt_note: str) -> str:
@@ -131,7 +132,14 @@ def run_plan(
                                 dep_branch = state.task(dep).branch
                                 res = subprocess.run(
                                     _git_argv(
-                                        "-c", "core.hooksPath=/dev/null", "merge", "--no-ff", "--no-edit", dep_branch
+                                        "-c",
+                                        "core.hooksPath=/dev/null",
+                                        "-c",
+                                        "commit.gpgsign=false",
+                                        "merge",
+                                        "--no-ff",
+                                        "--no-edit",
+                                        dep_branch,
                                     ),
                                     cwd=worktree_abs,
                                     capture_output=True,

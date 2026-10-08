@@ -47,6 +47,9 @@ agent-hub jobs [--limit LIMIT]
 agent-hub show [--json] ID
 agent-hub cancel ID
 agent-hub wait -d WORKDIR [--timeout TIMEOUT] [--json]
+agent-hub plan run <plan.json> [--max-parallel N]
+agent-hub plan status <plan.json> [--json]
+agent-hub plan wait <plan.json> [--timeout 9m]
 ```
 
 - `wait` blocks until the newest job for that work directory ends (or until `--timeout`, default 9m), and prints its result like `show` (or `--json`).
@@ -66,6 +69,29 @@ agent-hub wait -d WORKDIR [--timeout TIMEOUT] [--json]
 - `cancel` sends SIGTERM to the job's recorded pid, after verifying the pid against the process start time so a
   recycled pid is never signalled. If the process is gone, a job left `running` is marked `cancelled`.
 - Human output on a TTY strips control characters from agent text; `--json` output is not altered.
+
+
+### Plan mode
+
+Run a graph of tasks with `agent-hub plan run <plan.json>`. The file defines the graph:
+
+```json
+{
+  "goal": "context for every task",
+  "repo": "/abs/path/to/repo",
+  "base": "master",
+  "slug": "wait-cmd",
+  "max_parallel": 2,
+  "tasks": [
+    {"name": "core", "role": "implement", "brief": "briefs/core.md", "gate": ["just lint"]},
+    {"name": "core-review", "role": "review", "verifies": "core", "brief": null}
+  ]
+}
+```
+
+- `plan run` creates worktrees (`repo/.worktrees/slug-name`) and branches (`orch/slug/name`), running dependencies first and merging upstream branches into dependents. It saves state to `state.json` and resumes on restart. It polls the jobs and retries tasks based on exit codes.
+- `plan status` prints the status of each task in the plan.
+- `plan wait` blocks until all tasks in the plan are done (or failed/blocked), and prints the status.
 
 ## Exit codes
 

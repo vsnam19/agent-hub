@@ -11,33 +11,38 @@ like `<agent>:<model>`.
 
 ## The loop
 
-1. **Decide what to delegate.** Only implementation and second-opinion review go to the pool. Design, planning,
-   research, verification and the final judgement stay with you. A tiny edit is cheaper to do yourself.
+1. **Decide what to delegate.** Only implementation and second-opinion review go to the pool. Design, planning, research, and verification stay with you.
 2. **Look at the pool.** Run `agent-hub pool` to see each role's chain, what is installed and what is on
-   cooldown. Run `agent-hub profile <agent>` for every agent you are about to use and shape the brief to its
-   known weaknesses.
+   cooldown. Run `agent-hub profile <agent>` to shape the brief to an agent's weaknesses.
 3. **Write the brief** from `brief-template.md` (Goal / Input / Expected output / Constraints / Gate).
    Input names the files, the current behaviour and the interfaces. Expected output names the files to change,
    the exact test names that must pass, and the exact commands with their expected result. The Gate always
    includes the repository's full lint and the existing tests of every touched file, and forbids tests without
-   assertions. The CLI refuses an implement brief that lacks `## Input` or `## Expected output` (exit 2).
-4. **Prepare a worktree** on a feature branch. The CLI never creates one and refuses the default branch or a
-   detached HEAD (`refused`, exit 3).
+   assertions. The CLI refuses briefs lacking `## Input` or `## Expected output`.
+4. **Prepare a worktree** on a feature branch. The CLI refuses the default branch or detached HEAD.
 5. **Run the job, then wait for it.** Start it with the Bash tool's `run_in_background`:
    `agent-hub run --role implement --brief brief.md -d <worktree> --json`
-   Then call `agent-hub wait -d <worktree> --timeout 9m` in the foreground (Bash timeout 600000 ms). Exit 124
-   means it is still running: do any independent work you have, then call `wait` again. Any other exit is the
+   Then call `agent-hub wait -d <worktree> --timeout 9m`. Exit 124 means it is running: do independent work, then call `wait` again. Any other exit is the
    job's own exit code and `wait` has printed its result. Steps 6–7 happen before your final reply; never end
    your turn while a job you started is still running, because nothing wakes you after your turn ends.
 6. **Read the result** and act on its `status` (table below). Never re-run blindly on a dirty tree.
 7. **Verify yourself** in the worktree: run the gate, read the whole diff, and scan every new test for missing
-   assertions. The agent's claims are not evidence. Once verified, commit the work yourself if the agent did not
+   assertions. check the diff for edits to the gate itself (tests, justfile, lint config) and pass the repository's lint and tests as `--gate`. The agent's claims are not evidence. Once verified, commit the work yourself if the agent did not
    (some agents cannot commit by design).
 8. **Optional second opinion:** start it the same way (background + `wait`): `agent-hub run --role review -d <worktree> --base <default branch>`.
    The CLI computes `git diff <base>...HEAD` into the job's `diff.patch` and the reviewer reads that file; the
    reviewer never gets a shell. Treat findings as input to your own judgement, not as a verdict.
 9. **Force a link** with `--agent <agent>:<model>` when one model's output is poor or you need a specific one.
    It replaces the chain with that single link.
+
+
+## Several tasks: plan mode
+
+When a goal has several tasks, write a plan file and use `agent-hub plan run` (background) +
+`agent-hub plan wait` until it stops returning 124. Plan file fields: `goal`, `repo`, `base`, `slug`, `tasks`
+(with `name`, `role`, `brief` or `verifies`, `depends_on`). Use `"gate"` to pass the repository's lint and tests.
+Read `handoffs/` first, the full reply only when needed, and use `plan status`. Merge verified
+`orch/<slug>/*` branches yourself.
 
 ## Statuses
 

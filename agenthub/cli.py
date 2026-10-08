@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 import unicodedata
@@ -13,11 +14,16 @@ from agenthub.brief import BriefError
 from agenthub.config import ConfigError, load_pool, parse_duration, paths
 from agenthub.jobs import get_job, list_jobs
 from agenthub.orchestrate import EXIT, RunArgs, run_job
+from agenthub.plan import PlanError
+from agenthub.plan import load as load_plan
+from agenthub.planrun import run_plan
 from agenthub.pool import Cooldowns, parse_link
 from agenthub.procinfo import start_time
 
 WAIT_POLL_S = 1.0
 WAIT_APPEAR_S = 10.0
+PLAN_WAIT_POLL_S = 1.0
+PLAN_WAIT_APPEAR_S = float(os.environ.get("AGENT_HUB_PLAN_WAIT_APPEAR_S", "10.0"))
 
 
 class UsageError(Exception):
@@ -69,6 +75,19 @@ def _build_parser() -> argparse.ArgumentParser:
     wait.add_argument("--timeout", help="e.g. 9m")
     wait.add_argument("--json", action="store_true")
 
+    plan = sub.add_parser("plan", help="run a multi-task plan")
+    plan_sub = plan.add_subparsers(dest="plan_command", required=True, parser_class=_Parser)
+    plan_run = plan_sub.add_parser("run")
+    plan_run.add_argument("plan_file", metavar="<plan.json>")
+    plan_run.add_argument("--max-parallel", type=int, metavar="N")
+    plan_status = plan_sub.add_parser("status")
+    plan_status.add_argument("plan_file", metavar="<plan.json>")
+    plan_status.add_argument("--json", action="store_true")
+    plan_wait = plan_sub.add_parser("wait")
+    plan_wait.add_argument("plan_file", metavar="<plan.json>")
+    plan_wait.add_argument("--timeout", help="e.g. 9m")
+    plan_wait.add_argument("--json", action="store_true")
+
     return parser
 
 
@@ -83,11 +102,12 @@ def main(argv: list[str] | None = None) -> int:
             "show": _cmd_show,
             "cancel": _cmd_cancel,
             "wait": _cmd_wait,
+            "plan": _cmd_plan,
         }[args.command]
         return handler(args)
     except SystemExit as e:  # --help
         return e.code if isinstance(e.code, int) else 0
-    except (UsageError, ConfigError, BriefError) as e:
+    except (UsageError, ConfigError, BriefError, PlanError) as e:
         print(_safe(f"agent-hub: {e}", sys.stderr), file=sys.stderr)
         return 2
 
@@ -330,3 +350,91 @@ def _cmd_wait(args) -> int:
 
     print(_safe(f"still running: {target_job.id}"))
     return 124
+
+
+def _cmd_plan(args) -> int:
+    plan_file = Path(args.plan_file).resolve()
+    plan = load_plan(plan_file)
+    plan_dir = plan.path.parent
+    state_file = plan_dir / "state.json"
+
+    if args.plan_command == "run":
+        from agenthub.planstate import load_or_init
+
+        state = load_or_init(plan)
+
+        def spawn(argv: list[str], log: Path) -> subprocess.Popen:
+            f = open(log, "wb")
+            return subprocess.Popen(argv, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+
+        return run_plan(plan, state, spawn, args.max_parallel)
+
+    elif args.plan_command == "status":
+        if not state_file.is_file():
+            raise UsageError("state.json not found")
+
+        with open(state_file, "r") as f:
+            state_data = json.load(f)
+
+        if args.json:
+            print(json.dumps(state_data, indent=2))
+            return 0
+
+        tasks = state_data.get("tasks", {})
+        for t in plan.tasks:
+            ts = tasks.get(t.name, {})
+            status = ts.get("status", "pending")
+            attempts = ts.get("attempts", [])
+            branch = ts.get("branch", "")
+            handoff = ts.get("handoff", "")
+
+            line = f"{t.name}: {status}"
+            if attempts:
+                last = attempts[-1]
+                line += f" ({len(attempts)} attempts, last: {last.get('status', '')})"
+            if branch:
+                line += f" branch={branch}"
+            if handoff:
+                from agenthub.handoff import parse as parse_handoff
+
+                handoff_path = plan_dir / handoff
+                if handoff_path.is_file():
+                    parsed = parse_handoff(handoff_path.read_text())
+                    if parsed:
+                        line += f" handoff={parsed['status']} · {parsed['verification']}"
+            print(_safe(line))
+        return 0
+
+    elif args.plan_command == "wait":
+        import argparse
+
+        timeout_td = parse_duration(args.timeout) if args.timeout else parse_duration("9m")
+        timeout_s = timeout_td.total_seconds()
+
+        start_time = time.monotonic()
+
+        while time.monotonic() - start_time <= PLAN_WAIT_APPEAR_S:
+            if state_file.is_file():
+                break
+            time.sleep(PLAN_WAIT_POLL_S)
+        else:
+            print(_safe("agent-hub: state.json did not appear", sys.stderr), file=sys.stderr)
+            return 2
+
+        while time.monotonic() - start_time <= timeout_s:
+            res = subprocess.run(
+                [sys.executable, "-m", "agenthub", "plan", "status", str(plan_file), "--json"], capture_output=True
+            )
+            if res.returncode != 0:
+                return res.returncode
+            state_data = json.loads(res.stdout)
+            tasks = state_data.get("tasks", {})
+            if not any(ts.get("status") in ("pending", "running") for ts in tasks.values()):
+                _cmd_plan(argparse.Namespace(plan_command="status", plan_file=args.plan_file, json=args.json))
+                if all(ts.get("status") == "done" for t, ts in tasks.items() if any(pt.name == t for pt in plan.tasks)):
+                    return 0
+                return 1
+            time.sleep(PLAN_WAIT_POLL_S)
+
+        print(_safe(f"still running: {plan.slug}"))
+        return 124
