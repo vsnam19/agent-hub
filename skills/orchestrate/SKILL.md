@@ -44,6 +44,13 @@ When a goal has several tasks, write a plan file and use `agent-hub plan run` (b
 Read `handoffs/` first, the full reply only when needed, and use `plan status`. Merge verified
 `orch/<slug>/*` branches yourself.
 
+## Long sessions
+
+Every request re-reads the whole conversation, so a long session gets expensive with each tool call. At a phase
+boundary — plan written → implementation, a plan finished and merged, after an abandoned approach — first make sure
+the next phase needs nothing from the chat: plan file, handoffs, decisions and commits are on disk. Then tell the user
+to run `/compact` or start a new session. Do not compact in the middle of a task: file paths and partial state are lost.
+
 ## Statuses
 
 `result.json` (also `agent-hub show <id> --json`) carries `status` and `exit_code`. Inspect a finished job with

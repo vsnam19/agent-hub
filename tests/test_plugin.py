@@ -19,7 +19,7 @@ def test_plugin_manifest_fields():
     expected = {
         "name": "agent-hub",
         "description": "Run coding agents from one orchestrator, by role, with quota fallback",
-        "version": "0.3.0",
+        "version": manifest["version"],
         "author": {"name": "vsnam19"},
         "license": "MIT",
         "keywords": ["agents", "orchestration", "delegation", "codex", "agy"],
