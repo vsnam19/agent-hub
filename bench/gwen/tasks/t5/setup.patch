@@ -8,20 +8,22 @@ index aea06e8..aa870ca 100644
  Screw,3,0.10
 +"Bolt, large",12,0.30
 diff --git a/src/minilib/inventory.py b/src/minilib/inventory.py
-index 023ff67..65d8685 100644
+index 023ff67..41a45ef 100644
 --- a/src/minilib/inventory.py
 +++ b/src/minilib/inventory.py
-@@ -12,8 +12,11 @@ class Item:
+@@ -12,9 +12,12 @@ class Item:
  def load_items(path: str) -> list[Item]:
      items = []
      with open(path, encoding="utf-8") as f:
 -        reader = csv.DictReader(f)
 -        for row in reader:
+-            items.append(Item(name=row["name"], qty=int(row["qty"]), price=float(row["price"])))
 +        next(f)
 +        for line in f:
 +            if not line.strip():
 +                continue
-+            parts = line.strip().split(',')
-             items.append(Item(name=row["name"], qty=int(row["qty"]), price=float(row["price"])))
++            parts = line.strip().split(",")
++            items.append(Item(name=parts[0], qty=int(parts[1]), price=float(parts[2])))
      return items
+ 
  
