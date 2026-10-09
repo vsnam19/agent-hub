@@ -13,7 +13,6 @@ from bench.gwen.memsample import MemSampler
 from bench.gwen.proxy import RecordingProxy
 from bench.gwen.tasks import Task, install_hidden, load_tasks, prepare
 
-
 SECRET_WORDS = ("TOKEN", "SECRET", "API_KEY", "PASSWORD")
 GATE_TIMEOUT = 300
 

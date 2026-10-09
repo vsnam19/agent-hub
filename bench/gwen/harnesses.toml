@@ -15,7 +15,7 @@ env = { OPENAI_API_BASE = "{base_url}/v1", OPENAI_API_KEY = "{api_key}" }
 
 [mini-swe-agent]
 argv = ["mini", "--model", "openai/{model}", "--task", "{brief_text}", "--yolo", "--exit-immediately"]
-env = { OPENAI_API_BASE = "{base_url}/v1", OPENAI_API_KEY = "{api_key}", MSWEA_CONFIGURED = "true" }
+env = { OPENAI_API_BASE = "{base_url}/v1", OPENAI_API_KEY = "{api_key}", MSWEA_CONFIGURED = "true", MSWEA_COST_TRACKING = "ignore_errors" }
 
 [codex]
 argv = ["codex", "exec", "--skip-git-repo-check", "-s", "workspace-write", "-m", "{model}",
@@ -23,6 +23,7 @@ argv = ["codex", "exec", "--skip-git-repo-check", "-s", "workspace-write", "-m",
         "-c", "model_providers.gwen={name=\"gwen\", base_url=\"{base_url}/v1\", env_key=\"GWEN_API_KEY\", wire_api=\"responses\"}"]
 stdin = true
 env = { GWEN_API_KEY = "{api_key}", CODEX_HOME = "{home}/.codex" }
+files = { ".codex/config.toml" = "" }
 
 [claude]
 argv = ["claude", "-p", "--model", "{model}", "--permission-mode", "bypassPermissions", "--no-session-persistence"]
