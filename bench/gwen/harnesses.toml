@@ -10,7 +10,8 @@ files = { "opencode.json" = '''{"provider": {"gwen": {"npm": "@ai-sdk/openai-com
 [aider]
 ignore = [".aider*"]
 argv = ["aider", "--model", "openai/{model}", "--message-file", "{brief_path}", "--yes-always", "--no-auto-commits",
-        "--no-gitignore", "--no-show-model-warnings", "--no-check-update", "--analytics-disable"]
+        "--no-gitignore", "--no-show-model-warnings", "--no-check-update", "--analytics-disable",
+        "--lint-cmd", "python: ruff check --fix", "--auto-lint", "--test-cmd", "python -m pytest -q", "--auto-test"]
 env = { OPENAI_API_BASE = "{base_url}/v1", OPENAI_API_KEY = "{api_key}" }
 
 [mini-swe-agent]
