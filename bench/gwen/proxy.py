@@ -7,6 +7,23 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
+def _ask_for_stream_usage(path: str, body: bytes) -> bytes:
+    """OpenAI-style servers send usage in a stream only when asked; ask, so every run records its tokens."""
+    if not path.endswith("/chat/completions") or not body:
+        return body
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return body
+    if not isinstance(data, dict) or not data.get("stream"):
+        return body
+    opts = data.get("stream_options") or {}
+    if opts.get("include_usage"):
+        return body
+    data["stream_options"] = {**opts, "include_usage": True}
+    return json.dumps(data).encode()
+
+
 class RecordingProxyHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._forward()
@@ -34,9 +51,9 @@ class RecordingProxyHandler(BaseHTTPRequestHandler):
                 headers[k] = v
 
         content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length)
-        if content_length > 0:
-            headers["Content-Length"] = str(content_length)
+        body = _ask_for_stream_usage(self.path, self.rfile.read(content_length))
+        if body:
+            headers["Content-Length"] = str(len(body))
 
         conn = HTTPConnection(parsed.hostname, parsed.port or 80)
 

@@ -129,3 +129,28 @@ def test_log_has_no_headers_or_bodies(tmp_path, fake_upstream):
     log_text = log_path.read_text()
     assert "TOP_SECRET_KEY" not in log_text
     assert "super_secret_code" not in log_text
+
+
+def _post_through_proxy(tmp_path, fake_upstream, path, payload):
+    proxy = RecordingProxy(fake_upstream.url, tmp_path / "proxy.jsonl")
+    url = proxy.start()
+    req = urllib.request.Request(f"{url}{path}", method="POST", data=json.dumps(payload).encode())
+    try:
+        urllib.request.urlopen(req).read()
+    except urllib.error.HTTPError:
+        pass
+    proxy.stop()
+    return json.loads(fake_upstream.server.requests[-1]["body"])
+
+
+def test_streaming_chat_request_asks_for_usage(tmp_path, fake_upstream):
+    sent = _post_through_proxy(tmp_path, fake_upstream, "/v1/chat/completions", {"model": "m", "stream": True})
+    assert sent["stream_options"] == {"include_usage": True}
+    assert sent["model"] == "m"
+
+
+def test_non_streaming_and_other_paths_unchanged(tmp_path, fake_upstream):
+    plain = _post_through_proxy(tmp_path, fake_upstream, "/v1/chat/completions", {"model": "m"})
+    assert "stream_options" not in plain
+    other = _post_through_proxy(tmp_path, fake_upstream, "/v1/messages", {"model": "m", "stream": True})
+    assert "stream_options" not in other
