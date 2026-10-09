@@ -73,8 +73,9 @@ def test_logs_rejects_non_numeric(tmp_path):
 def test_install_puts_local_bin_on_path(tmp_path):
     res = run_host_script("install")
     assert res.returncode == 0
-    first = get_fake_logs(tmp_path)[0]["argv"][-1]
-    assert first.index(".local/bin") < first.index("uv tool install")
+    cmds = [log["argv"][-1] for log in get_fake_logs(tmp_path) if "uv tool install" in log["argv"][-1]]
+    assert len(cmds) == 1
+    assert cmds[0].index(".local/bin") < cmds[0].index("uv tool install")
 
 
 def test_install_sends_key_on_stdin_not_argv(tmp_path):
