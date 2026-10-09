@@ -15,7 +15,8 @@ argv = ["aider", "--model", "openai/{model}", "--message-file", "{brief_path}", 
 env = { OPENAI_API_BASE = "{base_url}/v1", OPENAI_API_KEY = "{api_key}" }
 
 [mini-swe-agent]
-argv = ["mini", "--model", "openai/{model}", "--task", "{brief_text}", "--yolo", "--exit-immediately"]
+argv = ["mini", "--model", "openai/{model}", "-c", "mini.yaml", "-c", "model.model_kwargs.max_tokens=16384",
+        "--task", "{brief_text}", "--yolo", "--exit-immediately"]
 env = { OPENAI_API_BASE = "{base_url}/v1", OPENAI_API_KEY = "{api_key}", MSWEA_CONFIGURED = "true", MSWEA_COST_TRACKING = "ignore_errors" }
 
 [codex]
