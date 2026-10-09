@@ -12,3 +12,10 @@ Fix the off-by-one bug in `paginate()` so the visible tests pass.
 
 ## Constraints
 - Do not change `page_count`.
+
+## Gate
+
+Before finishing, run from the repository root and make both pass:
+
+- `ruff check .`
+- `python -m pytest -q`

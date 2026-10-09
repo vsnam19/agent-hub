@@ -12,3 +12,10 @@ Add a test.
 
 ## Expected output
 - Command supports `--json`.
+
+## Gate
+
+Before finishing, run from the repository root and make both pass:
+
+- `ruff check .`
+- `python -m pytest -q`

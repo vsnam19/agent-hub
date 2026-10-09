@@ -41,8 +41,11 @@ elif mode == "prehide":
         f.write("def test_ok(): pass\n")
 
 elif mode == "hang":
-    subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
-    time.sleep(10)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    if os.environ.get("FAKE_PIDFILE"):
+        with open(os.environ["FAKE_PIDFILE"], "w") as f:
+            f.write(f"{os.getpid()} {child.pid}")
+    time.sleep(30)
 
 elif mode == "env_check":
     for k, v in os.environ.items():

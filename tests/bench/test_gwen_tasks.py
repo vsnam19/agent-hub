@@ -79,6 +79,7 @@ def test_solution_stays_in_scope(tmp_path, tid):
 def test_brief_has_required_sections_and_hides_hidden_tests(tid):
     brief = load_tasks()[tid].brief
     assert "## Goal" in brief and "## Input" in brief and "## Expected output" in brief
+    assert "## Gate" in brief and "ruff check ." in brief and "python -m pytest -q" in brief
     assert "hidden" not in brief.lower()
 
 

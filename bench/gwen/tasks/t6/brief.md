@@ -13,3 +13,10 @@ Write tests in `tests/test_report.py`.
 ## Expected output
 - `report.py` and `test_report.py` created.
 - `report` subcommand works.
+
+## Gate
+
+Before finishing, run from the repository root and make both pass:
+
+- `ruff check .`
+- `python -m pytest -q`

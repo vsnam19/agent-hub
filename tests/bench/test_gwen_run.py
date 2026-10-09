@@ -1,5 +1,9 @@
 import json
 import os
+import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -148,8 +152,20 @@ def test_hidden_tests_cannot_be_preempted(tmp_path, fake_upstream, harnesses_fil
     assert res["gate"]["hidden"] != 0
 
 
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    # a zombie left by an exited child still answers kill(0); check its state
+    stat = Path(f"/proc/{pid}/stat")
+    return stat.exists() and stat.read_text().split()[2] != "Z"
+
+
 def test_timeout_kills_group(tmp_path, fake_upstream, harnesses_file, env_with_fakes):
     env_with_fakes.setenv("FAKE_HARNESS_MODE", "hang")
+    pidfile = tmp_path / "pids"
+    env_with_fakes.setenv("FAKE_PIDFILE", str(pidfile))
     tasks = load_tasks()
     t1 = tasks["t1"]
 
@@ -167,6 +183,53 @@ def test_timeout_kills_group(tmp_path, fake_upstream, harnesses_file, env_with_f
 
     assert res["timed_out"] is True
     assert "hidden" in res["gate"]
+    harness_pid, child_pid = map(int, pidfile.read_text().split())
+    assert not _alive(harness_pid)
+    assert not _alive(child_pid)
+
+
+def test_sigterm_to_runner_kills_the_harness(tmp_path, fake_upstream, harnesses_file, env_with_fakes):
+    env_with_fakes.setenv("FAKE_HARNESS_MODE", "hang")
+    pidfile = tmp_path / "pids"
+    env_with_fakes.setenv("FAKE_PIDFILE", str(pidfile))
+    env_with_fakes.setenv("GWEN_BENCH_HARNESSES", str(harnesses_file))
+    key = tmp_path / "key"
+    key.write_text("k")
+    repo_root = Path(__file__).parent.parent.parent
+    runner = subprocess.Popen(
+        [sys.executable, "-m", "bench.gwen.run", "--harness", "fake", "--task", "t1", "--model", "model1",
+         "--base-url", fake_upstream.url, "--no-mem", "--api-key-file", str(key),
+         "--out-root", str(tmp_path / "runs"), "--results", str(tmp_path / "r.jsonl"), "--timeout", "60"],
+        cwd=repo_root,
+    )  # fmt: skip
+    deadline = time.time() + 30
+    while time.time() < deadline and not pidfile.exists():
+        time.sleep(0.1)
+    time.sleep(0.2)
+    harness_pid, child_pid = map(int, pidfile.read_text().split())
+
+    runner.send_signal(signal.SIGTERM)
+    assert runner.wait(timeout=20) != 0
+    assert not _alive(harness_pid)
+    assert not _alive(child_pid)
+
+
+def test_agent_runs_the_bench_tools(tmp_path, fake_upstream, harnesses_file, env_with_fakes):
+    env_with_fakes.setenv("FAKE_HARNESS_MODE", "env_check")
+    res = run_one(
+        "fake",
+        "model1",
+        load_tasks()["t1"],
+        base_url=fake_upstream.url,
+        api_key="secret",
+        out_root=tmp_path,
+        timeout=30.0,
+        ssh_target=None,
+        harnesses_file=harnesses_file,
+    )
+    env_lines = (Path(res["run_dir"]) / "stdout").read_text().splitlines()
+    path = next(line for line in env_lines if line.startswith("PATH=")).removeprefix("PATH=")
+    assert path.split(os.pathsep)[0] == str(Path(sys.executable).parent)
 
 
 def test_isolated_home_and_secret_env(tmp_path, fake_upstream, harnesses_file, env_with_fakes):

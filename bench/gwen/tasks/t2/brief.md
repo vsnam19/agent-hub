@@ -11,3 +11,10 @@ Write tests in `tests/test_textstats.py`.
 
 ## Expected output
 - Implementation of `top_words` and passing tests.
+
+## Gate
+
+Before finishing, run from the repository root and make both pass:
+
+- `ruff check .`
+- `python -m pytest -q`

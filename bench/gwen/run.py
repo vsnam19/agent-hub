@@ -2,6 +2,7 @@ import argparse
 import fnmatch
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -28,6 +29,24 @@ def _gate(cmd: list[str], repo: Path) -> tuple[int, str]:
     return res.returncode, "\n".join((res.stdout + res.stderr).splitlines()[-20:])
 
 
+def _kill_group(p: subprocess.Popen) -> None:
+    """SIGTERM the harness's process group, then SIGKILL whatever is left after 5 s."""
+    for sig, grace in ((signal.SIGTERM, 5.0), (signal.SIGKILL, 0.0)):
+        try:
+            os.killpg(p.pid, sig)
+        except ProcessLookupError:
+            return
+        try:
+            p.wait(timeout=grace or None)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _raise_on_sigterm(signum, frame):
+    raise KeyboardInterrupt(f"signal {signum}")
+
+
 def preflight(base_url: str, api_key: str, model: str, timeout: float = 10.0) -> str | None:
     """None when the server answers and serves `model`, else a one-line reason."""
     req = urllib.request.Request(f"{base_url}/v1/models", headers={"Authorization": f"Bearer {api_key}"})
@@ -42,7 +61,7 @@ def preflight(base_url: str, api_key: str, model: str, timeout: float = 10.0) ->
 
 
 def get_harnesses_file():
-    return Path(__file__).parent / "harnesses.toml"
+    return Path(os.environ.get("GWEN_BENCH_HARNESSES") or Path(__file__).parent / "harnesses.toml")
 
 
 def run_one(
@@ -103,6 +122,8 @@ def run_one(
     for k, v in cfg.get("env", {}).items():
         env[k] = substitute(v)
 
+    # The agent runs the same python/pytest/ruff the gate uses (the bench's own environment).
+    env["PATH"] = f"{Path(sys.executable).parent}{os.pathsep}{env.get('PATH', '')}"
     env["HOME"] = str(home)
     env["XDG_CONFIG_HOME"] = str(home / ".config")
     env["XDG_DATA_HOME"] = str(home / ".local" / "share")
@@ -121,23 +142,22 @@ def run_one(
     timed_out = False
 
     with open(run_dir / "stdout", "wb") as out, open(run_dir / "stderr", "wb") as err:
+        stdin_src = subprocess.PIPE if cfg.get("stdin") else subprocess.DEVNULL
+        p = subprocess.Popen(argv, cwd=repo, env=env, stdout=out, stderr=err, stdin=stdin_src, start_new_session=True)
         try:
-            stdin_src = subprocess.PIPE if cfg.get("stdin") else subprocess.DEVNULL
-            p = subprocess.Popen(
-                argv, cwd=repo, env=env, stdout=out, stderr=err, stdin=stdin_src, start_new_session=True
-            )
             if cfg.get("stdin"):
                 p.stdin.write(task.brief.encode("utf-8"))
                 p.stdin.close()
             p.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
-            os.killpg(os.getpgid(p.pid), 15)
-            time.sleep(5)
-            try:
-                os.killpg(os.getpgid(p.pid), 9)
-            except ProcessLookupError:
-                pass
+            _kill_group(p)
+        except BaseException:
+            # SIGTERM/Ctrl-C of the runner: never leave the harness running on its own.
+            _kill_group(p)
+            proxy.stop()
+            sampler.stop()
+            raise
 
     wall_s = time.time() - start_t
 
@@ -299,4 +319,5 @@ def _run_batch(
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _raise_on_sigterm)
     sys.exit(main())

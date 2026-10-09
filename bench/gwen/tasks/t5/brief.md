@@ -30,3 +30,10 @@ ValueError: invalid literal for int() with base 10: ' large"'
 ## Constraints
 
 - Do not modify `data/items.csv`.
+
+## Gate
+
+Before finishing, run from the repository root and make both pass:
+
+- `ruff check .`
+- `python -m pytest -q`
