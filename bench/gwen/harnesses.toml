@@ -8,6 +8,7 @@ env = { OPENCODE_CONFIG = "{home}/opencode.json" }
 files = { "opencode.json" = '''{"provider": {"gwen": {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "{base_url}/v1", "apiKey": "{api_key}"}, "models": {"{model}": {}}}}}''' }
 
 [aider]
+ignore = [".aider*"]
 argv = ["aider", "--model", "openai/{model}", "--message-file", "{brief_path}", "--yes-always", "--no-auto-commits",
         "--no-gitignore", "--no-show-model-warnings", "--no-check-update", "--analytics-disable"]
 env = { OPENAI_API_BASE = "{base_url}/v1", OPENAI_API_KEY = "{api_key}" }

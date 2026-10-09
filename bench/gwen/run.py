@@ -6,11 +6,25 @@ import subprocess
 import sys
 import time
 import tomllib
+import uuid
 from pathlib import Path
 
 from bench.gwen.memsample import MemSampler
 from bench.gwen.proxy import RecordingProxy
 from bench.gwen.tasks import Task, install_hidden, load_tasks, prepare
+
+
+SECRET_WORDS = ("TOKEN", "SECRET", "API_KEY", "PASSWORD")
+GATE_TIMEOUT = 300
+
+
+def _gate(cmd: list[str], repo: Path) -> tuple[int, str]:
+    """Run one gate command; returns (rc, last 20 output lines). A timeout counts as rc 124."""
+    try:
+        res = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, timeout=GATE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return 124, f"timed out after {GATE_TIMEOUT}s"
+    return res.returncode, "\n".join((res.stdout + res.stderr).splitlines()[-20:])
 
 
 def get_harnesses_file():
@@ -31,8 +45,9 @@ def run_one(
 ) -> dict:
 
     ts = time.strftime("%Y%m%d-%H%M%S")
-    run_dir = out_root / f"{ts}-{harness}-{model}-{task.id}"
-    run_dir.mkdir(parents=True, exist_ok=True)
+    safe_model = model.replace("/", "_")
+    run_dir = out_root / f"{ts}-{uuid.uuid4().hex[:6]}-{harness}-{safe_model}-{task.id}"
+    run_dir.mkdir(parents=True)
     home = run_dir / "home"
     home.mkdir()
     repo = run_dir / "repo"
@@ -46,7 +61,7 @@ def run_one(
 
     cfg = harnesses[harness]
 
-    prepare(task, repo)
+    setup_commit = prepare(task, repo)
 
     proxy_log = run_dir / "proxy.jsonl"
     proxy = RecordingProxy(base_url, proxy_log)
@@ -58,29 +73,18 @@ def run_one(
     brief_path = run_dir / "brief.md"
     brief_path.write_text(task.brief)
 
-    env = os.environ.copy()
-    keys_to_remove = []
-    for k in env:
-        upper = k.upper()
-        if "TOKEN" in upper or "SECRET" in upper or "API_KEY" in upper or "PASSWORD" in upper:
-            keys_to_remove.append(k)
-    for k in keys_to_remove:
-        del env[k]
+    env = {k: v for k, v in os.environ.items() if not any(w in k.upper() for w in SECRET_WORDS)}
 
     def substitute(s: str) -> str:
-        base_u = (
-            proxy_url.replace("http://", "").replace("/v1", "").split("/")[0]
-            if "/v1" not in proxy_url
-            else proxy_url.replace("/v1", "")
-        )  # noqa: E501
         return (
             s.replace("{model}", model)
-            .replace("{base_url}", base_u)
+            .replace("{base_url}", proxy_url)
             .replace("{api_key}", api_key)
             .replace("{brief_path}", str(brief_path))
             .replace("{brief_text}", task.brief)
+            .replace("{workdir}", str(repo))
             .replace("{home}", str(home))
-        )  # noqa: E501
+        )
 
     for k, v in cfg.get("env", {}).items():
         env[k] = substitute(v)
@@ -91,30 +95,10 @@ def run_one(
     env["XDG_STATE_HOME"] = str(home / ".local" / "state")
     env["XDG_CACHE_HOME"] = str(home / ".cache")
 
-    # Simple substitution for base_url without /v1 which is requested by some harnesses
-    base_url_no_v1 = proxy_url
-    if proxy_url.endswith("/v1"):
-        base_url_no_v1 = proxy_url[:-3]
-
-    for k, v in cfg.get("env", {}).items():
-        val = v.replace("{model}", model)
-        val = val.replace("{base_url}", base_url_no_v1)
-        val = val.replace("{api_key}", api_key)
-        val = val.replace("{brief_path}", str(brief_path))
-        val = val.replace("{brief_text}", task.brief)
-        val = val.replace("{home}", str(home))
-        env[k] = val
-
     for fname, content in cfg.get("files", {}).items():
         fpath = home / fname
         fpath.parent.mkdir(parents=True, exist_ok=True)
-        val = content.replace("{model}", model)
-        val = val.replace("{base_url}", base_url_no_v1)
-        val = val.replace("{api_key}", api_key)
-        val = val.replace("{brief_path}", str(brief_path))
-        val = val.replace("{brief_text}", task.brief)
-        val = val.replace("{home}", str(home))
-        fpath.write_text(val)
+        fpath.write_text(substitute(content))
 
     argv = [substitute(a) for a in cfg["argv"]]
     argv_redacted = [a.replace(api_key, "***") if api_key else a for a in argv]
@@ -146,10 +130,12 @@ def run_one(
     proxy.stop()
     mem_res = sampler.stop()
 
-    # Changed files
-    setup_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+    # Changed files: working tree and index, plus anything the agent committed after the setup commit
     status_out = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=all"], cwd=repo, capture_output=True, text=True
+        ["git", "status", "--porcelain", "--untracked-files=all", "--no-renames"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
     ).stdout
     changed = [line[3:] for line in status_out.splitlines()]
     diff_out = subprocess.run(
@@ -159,6 +145,8 @@ def run_one(
         if line and line not in changed:
             changed.append(line)
 
+    ignore = cfg.get("ignore", [])
+    changed = [c for c in changed if not any(fnmatch.fnmatch(c, g) for g in ignore)]
     scope_violation = []
     for c in changed:
         if not any(fnmatch.fnmatch(c, g) for g in task.paths_allowed):
@@ -166,17 +154,15 @@ def run_one(
 
     install_hidden(task, repo)
 
-    ruff = subprocess.run([sys.executable, "-m", "ruff", "check", "--no-cache", "."], cwd=repo, capture_output=True)
-    vis = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *task.visible_tests],
-        cwd=repo,
-        capture_output=True,
-    )
-    hid = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests/hidden"], cwd=repo, capture_output=True
-    )
+    py = [sys.executable, "-m"]
+    gate = {
+        "ruff": _gate(py + ["ruff", "check", "--no-cache", "."], repo),
+        "visible": _gate(py + ["pytest", "-q", "-p", "no:cacheprovider", *task.visible_tests], repo),
+        "hidden": _gate(py + ["pytest", "-q", "-p", "no:cacheprovider", "tests/hidden"], repo),
+    }
+    (run_dir / "gate.log").write_text("\n\n".join(f"== {k} rc={rc}\n{tail}" for k, (rc, tail) in gate.items()))
 
-    passed = ruff.returncode == 0 and vis.returncode == 0 and hid.returncode == 0 and not scope_violation
+    passed = all(rc == 0 for rc, _ in gate.values()) and not scope_violation
 
     res = {
         "ts": ts,
@@ -187,7 +173,7 @@ def run_one(
         "rc": p.returncode if not timed_out else None,
         "timed_out": timed_out,
         "wall_s": wall_s,
-        "gate": {"ruff": ruff.returncode, "visible": vis.returncode, "hidden": hid.returncode},
+        "gate": {k: rc for k, (rc, _) in gate.items()},
         "scope_violation": scope_violation,
         "changed": changed,
         "usage": proxy.summary(),
@@ -213,7 +199,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ssh", default="sammy@sammys-macbook-air")
     parser.add_argument("--no-mem", action="store_true")
     parser.add_argument("--timeout", type=float, default=1200.0)
-    parser.add_argument("--results", default=f"bench/gwen/results/{time.strftime('%Y-%m-%d')}.jsonl")
+    parser.add_argument(
+        "--results", default=str(Path(__file__).parent / "results" / f"{time.strftime('%Y-%m-%d')}.jsonl")
+    )
     def_out = os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")) + "/agent-hub/bench"
     parser.add_argument("--out-root", default=def_out)
 
@@ -240,10 +228,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        with open(args.api_key_file) as f:
-            api_key = f.read().strip()
-    except Exception:
-        api_key = "dummy" if not os.path.exists(args.api_key_file) else ""
+        api_key = Path(args.api_key_file).read_text().strip()
+    except OSError as e:
+        print(f"cannot read the API key file: {e}", file=sys.stderr)
+        return 2
 
     out_root = Path(args.out_root)
     results_file = Path(args.results)

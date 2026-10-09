@@ -26,6 +26,15 @@ elif mode == "outside":
     if os.path.exists("data/items.csv"):
         os.remove("data/items.csv")
 
+elif mode == "commit_outside":
+    # solve, run the tests (leaves __pycache__ and .pytest_cache), then commit an out-of-scope edit
+    subprocess.run(["git", "apply", os.environ["FAKE_SOLUTION_PATCH"]], check=True)
+    subprocess.run([sys.executable, "-m", "pytest", "-q"], check=False, capture_output=True)
+    with open("README.md", "w") as f:
+        f.write("changed and committed")
+    git = ["git", "-c", "user.name=a", "-c", "user.email=a@a", "-c", "commit.gpgsign=false"]
+    subprocess.run(git + ["commit", "-qam", "agent commit"], check=True)
+
 elif mode == "prehide":
     os.makedirs("tests/hidden", exist_ok=True)
     with open("tests/hidden/test_x.py", "w") as f:

@@ -101,7 +101,31 @@ def test_scope_violation(tmp_path, fake_upstream, harnesses_file, env_with_fakes
     )
 
     assert res["pass"] is False
-    assert "README.md" in res["scope_violation"] or "data/items.csv" in res["scope_violation"]
+    assert "README.md" in res["scope_violation"]
+    assert "data/items.csv" in res["scope_violation"]
+
+
+def test_committed_changes_are_scoped_and_caches_ignored(tmp_path, fake_upstream, harnesses_file, env_with_fakes):
+    env_with_fakes.setenv("FAKE_HARNESS_MODE", "commit_outside")
+    t1 = load_tasks()["t1"]
+    env_with_fakes.setenv("FAKE_SOLUTION_PATCH", str(t1.dir / "solution.patch"))
+
+    res = run_one(
+        "fake",
+        "org/model1",
+        t1,
+        base_url=fake_upstream.url,
+        api_key="secret",
+        out_root=tmp_path,
+        timeout=60.0,
+        ssh_target=None,
+        harnesses_file=harnesses_file,
+    )
+
+    assert res["scope_violation"] == ["README.md"]
+    assert res["pass"] is False
+    assert res["gate"]["hidden"] == 0
+    assert "/" not in Path(res["run_dir"]).name
 
 
 def test_hidden_tests_cannot_be_preempted(tmp_path, fake_upstream, harnesses_file, env_with_fakes):
