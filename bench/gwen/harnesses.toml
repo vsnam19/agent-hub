@@ -1,0 +1,29 @@
+[qwen-code]
+argv = ["qwen", "--yolo", "-m", "{model}", "-p", "{brief_text}"]
+env = { OPENAI_BASE_URL = "{base_url}/v1", OPENAI_API_KEY = "{api_key}", OPENAI_MODEL = "{model}" }
+
+[opencode]
+argv = ["opencode", "run", "--model", "gwen/{model}", "{brief_text}"]
+env = { OPENCODE_CONFIG = "{home}/opencode.json" }
+files = { "opencode.json" = '''{"provider": {"gwen": {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "{base_url}/v1", "apiKey": "{api_key}"}, "models": {"{model}": {}}}}}''' }
+
+[aider]
+argv = ["aider", "--model", "openai/{model}", "--message-file", "{brief_path}", "--yes-always", "--no-auto-commits",
+        "--no-gitignore", "--no-show-model-warnings", "--no-check-update", "--analytics-disable"]
+env = { OPENAI_API_BASE = "{base_url}/v1", OPENAI_API_KEY = "{api_key}" }
+
+[mini-swe-agent]
+argv = ["mini", "--model", "openai/{model}", "--task", "{brief_text}", "--yolo", "--exit-immediately"]
+env = { OPENAI_API_BASE = "{base_url}/v1", OPENAI_API_KEY = "{api_key}", MSWEA_CONFIGURED = "true" }
+
+[codex]
+argv = ["codex", "exec", "--skip-git-repo-check", "-s", "workspace-write", "-m", "{model}",
+        "-c", "model_provider=\"gwen\"",
+        "-c", "model_providers.gwen={name=\"gwen\", base_url=\"{base_url}/v1\", env_key=\"GWEN_API_KEY\", wire_api=\"responses\"}"]
+stdin = true
+env = { GWEN_API_KEY = "{api_key}", CODEX_HOME = "{home}/.codex" }
+
+[claude]
+argv = ["claude", "-p", "--model", "{model}", "--permission-mode", "bypassPermissions", "--no-session-persistence"]
+stdin = true
+env = { ANTHROPIC_BASE_URL = "{base_url}", ANTHROPIC_AUTH_TOKEN = "{api_key}", CLAUDE_CONFIG_DIR = "{home}/.claude" }
