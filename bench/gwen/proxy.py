@@ -100,23 +100,28 @@ class RecordingProxyHandler(BaseHTTPRequestHandler):
 
         # Try JSON parsing if it's not SSE
         content_type = resp.getheader("Content-Type", "")
-        if "application/json" in content_type:
-            resp_body = resp.read()
-            self.wfile.write(resp_body)
-            self.wfile.flush()
-            check_usage(resp_body.decode("utf-8", errors="ignore"))
-        else:
-            # Stream SSE
-            while True:
-                line = resp.readline()
-                if not line:
-                    break
-                self.wfile.write(line)
+        error = None
+        try:
+            if "application/json" in content_type:
+                resp_body = resp.read()
+                check_usage(resp_body.decode("utf-8", errors="ignore"))
+                self.wfile.write(resp_body)
                 self.wfile.flush()
-                if line.startswith(b"data: "):
-                    check_usage(line.decode("utf-8", errors="ignore"))
+            else:
+                # Stream SSE
+                while True:
+                    line = resp.readline()
+                    if not line:
+                        break
+                    if line.startswith(b"data: "):
+                        check_usage(line.decode("utf-8", errors="ignore"))
+                    self.wfile.write(line)
+                    self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            # The harness went away mid-response (killed at its timeout, or it gave up).
+            error = "client disconnected"
 
-        self._log(start_ts, content_length, usage)
+        self._log(start_ts, content_length, usage, error=error)
         conn.close()
 
     def _log(self, ts, req_bytes, usage, error=None):

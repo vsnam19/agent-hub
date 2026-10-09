@@ -154,3 +154,25 @@ def test_non_streaming_and_other_paths_unchanged(tmp_path, fake_upstream):
     assert "stream_options" not in plain
     other = _post_through_proxy(tmp_path, fake_upstream, "/v1/messages", {"model": "m", "stream": True})
     assert "stream_options" not in other
+
+
+def test_client_disconnect_mid_stream_is_logged_not_raised(tmp_path, fake_upstream, capsys):
+    import socket
+
+    log_path = tmp_path / "proxy.jsonl"
+    proxy = RecordingProxy(fake_upstream.url, log_path)
+    url = proxy.start()
+    host, port = url.removeprefix("http://").split(":")
+    sock = socket.create_connection((host, int(port)))
+    sock.sendall(b"POST /v1/chat/completions_sse HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}")
+    sock.recv(64)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00")
+    sock.close()
+    deadline = time.time() + 5
+    while time.time() < deadline and not log_path.exists():
+        time.sleep(0.1)
+    proxy.stop()
+
+    logs = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert logs[-1]["error"] == "client disconnected"
+    assert "Traceback" not in capsys.readouterr().err
