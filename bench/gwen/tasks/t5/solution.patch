@@ -1,0 +1,18 @@
+diff --git a/src/minilib/inventory.py b/src/minilib/inventory.py
+index 65d8685..023ff67 100644
+--- a/src/minilib/inventory.py
++++ b/src/minilib/inventory.py
+@@ -12,11 +12,8 @@ class Item:
+ def load_items(path: str) -> list[Item]:
+     items = []
+     with open(path, encoding="utf-8") as f:
+-        next(f)
+-        for line in f:
+-            if not line.strip():
+-                continue
+-            parts = line.strip().split(',')
++        reader = csv.DictReader(f)
++        for row in reader:
+             items.append(Item(name=row["name"], qty=int(row["qty"]), price=float(row["price"])))
+     return items
+ 

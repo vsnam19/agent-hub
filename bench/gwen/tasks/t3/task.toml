@@ -1,0 +1,3 @@
+title = "rename load_items"
+paths_allowed = ["src/minilib/inventory.py", "src/minilib/cli.py", "tests/test_inventory.py"]
+visible_tests = ["tests/test_inventory.py"]

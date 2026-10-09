@@ -1,0 +1,3 @@
+title = "report subcommand"
+paths_allowed = ["src/minilib/report.py", "tests/test_report.py", "src/minilib/cli.py", "tests/test_cli.py"]
+visible_tests = ["tests/test_report.py", "tests/test_cli.py"]

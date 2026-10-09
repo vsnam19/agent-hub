@@ -1,0 +1,4 @@
+title = "stats --json"
+paths_allowed = ["src/minilib/cli.py", "tests/test_cli.py"]
+visible_tests = ["tests/test_cli.py"]
+
