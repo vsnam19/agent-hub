@@ -38,13 +38,20 @@ prompt plus a few files. The bake-off measures three models:
 |---|---|---|
 | `qwen3.5-4b-4bit` | Rapid-MLX's pick for 16 GB; fastest; most room for daily apps | ≈ 6.0 GB |
 | `qwen3.5-9b-4bit` | expected best quality that fits; Qwen3.5 hybrid attention (3 Gated DeltaNet : 1 full attention layer) keeps the KV cache ≈ 4× smaller, so 32k+ context is realistic | ≈ 8.7 GB |
-| `qwen3-14b-4bit` (if the alias exists, else `Qwen/Qwen3-14B-MLX-4bit`) | the user's original choice, as the reference point | ≈ 9–11 GB |
+| `Qwen/Qwen3-14B-MLX-4bit` (Rapid-MLX 0.15.7 has no alias) | the user's original choice, as the reference point | ≈ 9–11 GB |
 
-Total download ≈ 17 GB, within the 35 GB free. KV cache is quantised to 4 bits (Rapid-MLX default). Expected
+Total download ≈ 17 GB, within the 35 GB free. KV cache stays bf16: Rapid-MLX 0.15.7 refuses KV quantisation for
+Qwen3.5's hybrid (ArraysCache) layers, and their cache is small anyway. Expected
 generation on an M2 (100 GB/s): ≈ 20–25 tok/s for 4B, ≈ 12–15 for 9B, ≈ 8–10 for 14B; prefill a few hundred tok/s,
 which is why the prefix cache matters (the system prompt is re-sent every turn).
 
 Rejected: Qwen3.6/3.8 (smallest is 27B), gpt-oss-20b (≈ 12 GB, no headroom), any 8-bit quant.
+
+## 2a. Measured on 2026-10-09 (qwen3.5-4b-4bit, Linux → Mac over Tailscale)
+
+Tool call parsed correctly (hermes parser); first request 11 s including model load; generation ≈ 26 tok/s; prefill
+9.4k tokens in 52 s (≈ 180 tok/s) — a cold 10k-token agent prompt costs ~50 s per turn unless the prefix cache hits;
+the Wi-Fi LAN address (`192.168.0.109:8642`) refuses connections.
 
 ## 3. Serving on the Mac (D-041, D-042)
 
@@ -57,8 +64,9 @@ Code. That lets every candidate harness, including the existing `codex` and `cla
 tool-call parsing is its stated focus.
 
 **Service** (D-042): a launchd user agent `~/Library/LaunchAgents/dev.vsn.gwen.plist` runs
-`rapid-mlx serve <model> --host 100.86.30.90 --port 8642 --api-key-file ~/.config/gwen/api-key` (flag name confirmed at
-install time; fall back to an environment variable read by a wrapper script `~/.local/bin/gwen-serve`), `KeepAlive`
+the wrapper `~/.local/bin/gwen-serve` → `rapid-mlx serve <model> --host 100.86.30.90 --port 8642
+--lazy-load --idle-unload-seconds 1800` (unloads after 30 idle
+minutes, giving the memory back to daily apps), `KeepAlive`
 true, logs to `~/Library/Logs/gwen/`. The model to serve is the first line of `~/.config/gwen/model`; switching models
 = write the file, `launchctl kickstart -k gui/$UID/dev.vsn.gwen`. One model loaded at a time.
 
@@ -69,8 +77,10 @@ setup is reproducible and never needs a human at the Mac after the SSH key is in
 
 - Bind to the Tailscale address only, never `0.0.0.0` or the Wi-Fi address: devices on the Wi-Fi LAN cannot reach the
   port. Traffic is WireGuard-encrypted end to end. If Tailscale is not up yet, the bind fails and launchd retries.
-- API key: 32 random bytes, stored on the Mac in `~/.config/gwen/api-key` (mode 600) and on Linux in fnox as
-  `GWEN_API_KEY`; agent-hub passes it to the harness via `env_passthrough` (it would otherwise be dropped by D-014).
+- API key: 32 random bytes, stored in `~/.config/gwen/api-key` (mode 600) on both machines; the server reads it
+  from `RAPID_MLX_API_KEY` (set by `gwen-serve`, never on argv); agent-hub passes it to the harness via
+  `env_passthrough` (it would otherwise be dropped by D-014). Not in fnox: a new fnox secret must be declared in
+  vsndevenv's seed config, too heavy for a key that only guards a tailnet inference endpoint.
 - The Mac only does inference. It never receives a work tree and never runs tools; the harness and every tool call run
   on Linux under agent-hub's existing guards. A prompt-injected model can therefore do no more on the Mac than return
   text.
@@ -135,7 +145,8 @@ all three green and no file outside the task's allowed paths changed.
 `bench/gwen/run.py --harness <h> --model <m> --task <t> [--repeat n]` copies the fixture into a fresh temp git repo,
 runs the harness command template with a 20-minute timeout, applies the gate, and appends one JSON line to
 `bench/gwen/results/<date>.jsonl`: harness, model, task, pass, gate details, wall time, prompt/completion/cached tokens
-(from the server's `usage` in the harness logs or the server log), tool-call parse errors seen, and the Mac's memory
+(recorded by a small local proxy between the harness and the Mac, which reads `usage` from every
+response — harness-agnostic), tool-call parse errors seen, and the Mac's memory
 (`memory_pressure` and swap used, sampled over SSH every 10 s). `bench/gwen/report.py` turns the JSONL into a
 markdown table. Stages, to keep machine time bounded:
 
