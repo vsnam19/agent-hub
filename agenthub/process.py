@@ -46,7 +46,8 @@ def run(
         proc = subprocess.Popen(
             inv.argv,
             cwd=cwd,
-            env=env,
+            # Some agents (opencode) resolve their work tree from $PWD instead of the real cwd (D-053).
+            env={**env, "PWD": str(cwd)},
             stdin=stdin_fd,
             stdout=stdout_fd,
             stderr=stderr_fd,

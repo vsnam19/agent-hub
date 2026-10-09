@@ -124,6 +124,8 @@ def run_one(
 
     # The agent runs the same python/pytest/ruff the gate uses (the bench's own environment).
     env["PATH"] = f"{Path(sys.executable).parent}{os.pathsep}{env.get('PATH', '')}"
+    # Some harnesses (opencode) take their working directory from $PWD, not the real cwd: never inherit ours.
+    env["PWD"] = str(repo)
     env["HOME"] = str(home)
     env["XDG_CONFIG_HOME"] = str(home / ".config")
     env["XDG_DATA_HOME"] = str(home / ".local" / "share")

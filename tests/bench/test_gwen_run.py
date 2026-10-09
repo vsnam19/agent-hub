@@ -230,6 +230,8 @@ def test_agent_runs_the_bench_tools(tmp_path, fake_upstream, harnesses_file, env
     env_lines = (Path(res["run_dir"]) / "stdout").read_text().splitlines()
     path = next(line for line in env_lines if line.startswith("PATH=")).removeprefix("PATH=")
     assert path.split(os.pathsep)[0] == str(Path(sys.executable).parent)
+    pwd = next(line for line in env_lines if line.startswith("PWD=")).removeprefix("PWD=")
+    assert pwd == str(Path(res["run_dir"]) / "repo")
 
 
 def test_isolated_home_and_secret_env(tmp_path, fake_upstream, harnesses_file, env_with_fakes):

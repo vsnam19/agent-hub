@@ -84,6 +84,20 @@ def test_env_is_exact(tmp_path: Path):
     assert "OMITTED_VAR" not in out_env
 
 
+def test_pwd_is_the_work_dir_not_inherited(tmp_path: Path):
+    attempt_dir = tmp_path / "attempt"
+    attempt_dir.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    script = tmp_path / "script.py"
+    script.write_text("import os, sys; sys.stdout.write(os.environ.get('PWD', ''))")
+
+    inv = Invocation(argv=[sys.executable, str(script)], stdin_path=None)
+    run(inv, cwd=work, env={"PWD": "/somewhere/else"}, attempt_dir=attempt_dir, timeout=timedelta(seconds=5))
+
+    assert (attempt_dir / "stdout").read_text() == str(work)
+
+
 def test_timeout_kills_group(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("agenthub.process.KILL_GRACE_S", 0.1)
     attempt_dir = tmp_path / "attempt"
