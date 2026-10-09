@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+import sys
+import os
+
+print("System-wide memory free percentage: 42%")
+print("vm.swapusage: total = 2048.00M  used = 10.50M  free = 2037.50M  (encrypted)")
+sys.exit(0)

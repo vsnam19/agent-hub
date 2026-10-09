@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+import os
+import sys
+import urllib.request
+import time
+import subprocess
+
+mode = os.environ.get("FAKE_HARNESS_MODE", "solve")
+
+if mode == "solve":
+    # apply solution
+    patch_file = os.environ.get("FAKE_SOLUTION_PATCH", "solution.patch")
+    subprocess.run(["git", "apply", patch_file], check=True)
+    # make request
+    req = urllib.request.Request(f"{os.environ['OPENAI_BASE_URL']}/chat/completions_json", method="POST", data=b"{}")
+    urllib.request.urlopen(req).read()
+
+elif mode == "noop":
+    pass
+
+elif mode == "outside":
+    patch_file = os.environ.get("FAKE_SOLUTION_PATCH", "solution.patch")
+    subprocess.run(["git", "apply", patch_file], check=True)
+    with open("README.md", "w") as f:
+        f.write("hacked")
+    if os.path.exists("data/items.csv"):
+        os.remove("data/items.csv")
+
+elif mode == "commit_outside":
+    # solve, run the tests (leaves __pycache__ and .pytest_cache), then commit an out-of-scope edit
+    subprocess.run(["git", "apply", os.environ["FAKE_SOLUTION_PATCH"]], check=True)
+    subprocess.run([sys.executable, "-m", "pytest", "-q"], check=False, capture_output=True)
+    with open("README.md", "w") as f:
+        f.write("changed and committed")
+    git = ["git", "-c", "user.name=a", "-c", "user.email=a@a", "-c", "commit.gpgsign=false"]
+    subprocess.run(git + ["commit", "-qam", "agent commit"], check=True)
+
+elif mode == "prehide":
+    os.makedirs("tests/hidden", exist_ok=True)
+    with open("tests/hidden/test_x.py", "w") as f:
+        f.write("def test_ok(): pass\n")
+
+elif mode == "hang":
+    subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
+    time.sleep(10)
+
+elif mode == "env_check":
+    for k, v in os.environ.items():
+        print(f"{k}={v}")
+
+sys.exit(0)

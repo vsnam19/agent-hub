@@ -1,0 +1,3 @@
+title = "top_words"
+paths_allowed = ["src/minilib/textstats.py", "tests/test_textstats.py"]
+visible_tests = ["tests/test_textstats.py"]

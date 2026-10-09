@@ -1,0 +1,57 @@
+diff --git a/src/minilib/cli.py b/src/minilib/cli.py
+index f60aae0..a2ed1e9 100644
+--- a/src/minilib/cli.py
++++ b/src/minilib/cli.py
+@@ -1,7 +1,7 @@
+ import argparse
+ import sys
+ 
+-from minilib.inventory import load_items
++from minilib.inventory import read_items
+ from minilib.textstats import word_count
+ 
+ 
+@@ -24,7 +24,7 @@ def main(argv: list[str] | None = None) -> int:
+         print(f"words: {word_count(text)}")
+         print(f"chars: {len(text)}")
+     elif args.cmd == "inventory":
+-        items = load_items(args.file)
++        items = read_items(args.file)
+         for item in items:
+             if item.qty < args.min_qty:
+                 print(f"{item.name} {item.qty}")
+diff --git a/src/minilib/inventory.py b/src/minilib/inventory.py
+index 023ff67..10d249a 100644
+--- a/src/minilib/inventory.py
++++ b/src/minilib/inventory.py
+@@ -9,7 +9,7 @@ class Item:
+     price: float
+ 
+ 
+-def load_items(path: str) -> list[Item]:
++def read_items(path: str) -> list[Item]:
+     items = []
+     with open(path, encoding="utf-8") as f:
+         reader = csv.DictReader(f)
+diff --git a/tests/test_inventory.py b/tests/test_inventory.py
+index 888c4c1..81fa48a 100644
+--- a/tests/test_inventory.py
++++ b/tests/test_inventory.py
+@@ -1,4 +1,4 @@
+-from minilib.inventory import Item, load_items, low_stock, total_value
++from minilib.inventory import Item, low_stock, read_items, total_value
+ 
+ 
+ def test_total_value():
+@@ -11,9 +11,9 @@ def test_low_stock():
+     assert low_stock(items, 5) == [items[0]]
+ 
+ 
+-def test_load_items(tmp_path):
++def test_read_items(tmp_path):
+     p = tmp_path / "items.csv"
+     p.write_text("name,qty,price\nA,2,1.5\n")
+-    items = load_items(str(p))
++    items = read_items(str(p))
+     assert len(items) == 1
+     assert items[0] == Item("A", 2, 1.5)

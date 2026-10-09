@@ -1,0 +1,3 @@
+title = "Fix the off-by-one in paginate()"
+paths_allowed = ["src/minilib/paging.py", "tests/test_paging.py"]
+visible_tests = ["tests/test_paging.py"]
