@@ -10,6 +10,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+from bench.gwen.awake import KeepAwake
 from bench.gwen.memsample import MemSampler
 from bench.gwen.proxy import RecordingProxy
 from bench.gwen.tasks import Task, install_hidden, load_tasks, prepare
@@ -256,6 +257,15 @@ def main(argv: list[str] | None = None) -> int:
 
     ssh_target = None if args.no_mem else args.ssh
 
+    with KeepAwake(ssh_target):
+        return _run_batch(
+            args, selected_harnesses, selected_tasks, tasks_dict, api_key, out_root, results_file, ssh_target
+        )
+
+
+def _run_batch(
+    args, selected_harnesses, selected_tasks, tasks_dict, api_key, out_root, results_file, ssh_target
+) -> int:
     for _ in range(args.repeat):
         for h in selected_harnesses:
             for m in args.model:
