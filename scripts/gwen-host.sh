@@ -16,7 +16,7 @@ shift
 case "$COMMAND" in
   install)
     # create ~/.config/gwen (700), ~/Library/Logs/gwen
-    ssh "$TARGET" 'uv tool install rapid-mlx@latest; mkdir -p ~/.config/gwen ~/Library/Logs/gwen; chmod 700 ~/.config/gwen'
+    ssh "$TARGET" 'export PATH="$HOME/.local/bin:$PATH"; uv tool install rapid-mlx@latest; mkdir -p ~/.config/gwen ~/Library/Logs/gwen; chmod 700 ~/.config/gwen'
     # copy key (stdin, never argv) to ~/.config/gwen/api-key (600)
     ssh "$TARGET" 'cat > ~/.config/gwen/api-key; chmod 600 ~/.config/gwen/api-key' < "$KEY_FILE"
     # copy gwen-serve to ~/.local/bin/ (755)
@@ -54,6 +54,10 @@ EOF
     ;;
   logs)
     N="${1:-50}"
+    if [[ ! "$N" =~ ^[0-9]+$ ]]; then
+      echo "Usage: $0 logs [lines]" >&2
+      exit 2
+    fi
     # shellcheck disable=SC2029
     ssh "$TARGET" "tail -n $N ~/Library/Logs/gwen/serve.log"
     ;;

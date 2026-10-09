@@ -64,6 +64,19 @@ def test_switch_rejects_bad_model(tmp_path):
     assert len(logs) == 0
 
 
+def test_logs_rejects_non_numeric(tmp_path):
+    res = run_host_script("logs", "5; id")
+    assert res.returncode == 2
+    assert get_fake_logs(tmp_path) == []
+
+
+def test_install_puts_local_bin_on_path(tmp_path):
+    res = run_host_script("install")
+    assert res.returncode == 0
+    first = get_fake_logs(tmp_path)[0]["argv"][-1]
+    assert first.index(".local/bin") < first.index("uv tool install")
+
+
 def test_install_sends_key_on_stdin_not_argv(tmp_path):
     res = run_host_script("install")
     assert res.returncode == 0
