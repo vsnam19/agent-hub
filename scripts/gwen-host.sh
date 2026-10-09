@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
+# Rapid-MLX is pinned so bench results stay comparable; bump deliberately with GWEN_RAPID_MLX=<version>.
 TARGET="${GWEN_SSH:-sammy@sammys-macbook-air}"
 KEY_FILE="${GWEN_KEY_FILE:-$HOME/.config/gwen/api-key}"
 HTTP_HOST="${GWEN_HTTP_HOST:-100.86.30.90}"
@@ -16,18 +17,32 @@ shift
 case "$COMMAND" in
   install)
     # create ~/.config/gwen (700), ~/Library/Logs/gwen
-    ssh "$TARGET" 'export PATH="$HOME/.local/bin:$PATH"; uv tool install rapid-mlx@latest; mkdir -p ~/.config/gwen ~/Library/Logs/gwen; chmod 700 ~/.config/gwen'
+    VERSION="${GWEN_RAPID_MLX:-0.15.7}"
+    if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+      echo "Invalid GWEN_RAPID_MLX version" >&2
+      exit 2
+    fi
+    # shellcheck disable=SC2029,SC2016
+    ssh "$TARGET" 'export PATH="$HOME/.local/bin:$PATH"; uv tool install --force "rapid-mlx=='"$VERSION"'"; mkdir -p ~/.config/gwen ~/Library/Logs/gwen; chmod 700 ~/.config/gwen'
     # copy key (stdin, never argv) to ~/.config/gwen/api-key (600)
     ssh "$TARGET" 'cat > ~/.config/gwen/api-key; chmod 600 ~/.config/gwen/api-key' < "$KEY_FILE"
     # copy gwen-serve to ~/.local/bin/ (755)
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     ssh "$TARGET" 'cat > ~/.local/bin/gwen-serve; chmod 755 ~/.local/bin/gwen-serve' < "$SCRIPT_DIR/gwen-host/gwen-serve"
-    # rewrite plist and copy
-    ssh "$TARGET" 'sed "s|/Users/sammy|$HOME|g" > ~/Library/LaunchAgents/dev.vsn.gwen.plist' < "$SCRIPT_DIR/gwen-host/dev.vsn.gwen.plist"
+    # gwen-tap (public listener that logs the model's output) and gwen-watch (live stats)
+    for tool in gwen-tap gwen-watch; do
+      # shellcheck disable=SC2029
+      ssh "$TARGET" "cat > ~/.local/bin/$tool; chmod 755 ~/.local/bin/$tool" < "$SCRIPT_DIR/gwen-host/$tool"
+    done
+    # rewrite plists and copy
+    for agent in dev.vsn.gwen dev.vsn.gwen-tap; do
+      # shellcheck disable=SC2029,SC2016
+      ssh "$TARGET" "sed \"s|/Users/sammy|\$HOME|g\" > ~/Library/LaunchAgents/$agent.plist" < "$SCRIPT_DIR/gwen-host/$agent.plist"
+    done
     # write model if absent
     ssh "$TARGET" 'if [ ! -f ~/.config/gwen/model ]; then echo "qwen3.5-4b-4bit" > ~/.config/gwen/model; fi'
     # launchctl bootout and bootstrap
-    ssh "$TARGET" 'launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/dev.vsn.gwen.plist 2>/dev/null || true; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.vsn.gwen.plist'
+    ssh "$TARGET" 'for a in dev.vsn.gwen dev.vsn.gwen-tap; do launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/$a.plist 2>/dev/null || true; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/$a.plist; done'
     ;;
   switch)
     if [ "$#" -eq 0 ]; then
@@ -50,7 +65,7 @@ header = "Authorization: Bearer $(cat "$KEY_FILE")"
 EOF
     ;;
   stop)
-    ssh "$TARGET" 'launchctl bootout gui/$(id -u)/dev.vsn.gwen'
+    ssh "$TARGET" 'launchctl bootout gui/$(id -u)/dev.vsn.gwen-tap; launchctl bootout gui/$(id -u)/dev.vsn.gwen'
     ;;
   logs)
     N="${1:-50}"

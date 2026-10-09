@@ -1,9 +1,10 @@
 #!/bin/bash
-# Started by launchd (dev.vsn.gwen). Serves one model, bound to the Tailscale address only.
+# Started by launchd (dev.vsn.gwen). Serves one model, bound to loopback behind gwen-tap.
 set -euo pipefail
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 # shellcheck disable=SC2155
 export RAPID_MLX_API_KEY="$(cat "$HOME/.config/gwen/api-key")"
 MODEL="$(head -n1 "$HOME/.config/gwen/model")"
-HOST="${GWEN_HOST:-100.86.30.90}"
-exec rapid-mlx serve "$MODEL" --host "$HOST" --port 8642 --yes --idle-unload-seconds 1800 --lazy-load
+# Clients reach the server through gwen-tap (dev.vsn.gwen-tap) on the Tailscale address; this binds loopback only.
+HOST="127.0.0.1"
+exec rapid-mlx serve "$MODEL" --host "$HOST" --port 8643 --yes --idle-unload-seconds 1800 --lazy-load

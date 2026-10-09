@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""gwen-tap: forward every request to the Rapid-MLX server and copy the generated text to a log on the Mac.
+
+Started by launchd (dev.vsn.gwen-tap). Listens where clients connect (the Tailscale address, port 8642) and
+forwards to Rapid-MLX on 127.0.0.1:8643, streaming responses through unchanged. Authentication stays with
+Rapid-MLX: the tap passes headers through and never logs them or the request body.
+
+Watch the model's output live on the Mac:  tail -f ~/Library/Logs/gwen/output.log
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import threading
+import time
+from http.client import HTTPConnection
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+LISTEN_HOST = os.environ.get("GWEN_HOST", "100.86.30.90")
+LISTEN_PORT = int(os.environ.get("GWEN_PORT", "8642"))
+UPSTREAM_PORT = int(os.environ.get("GWEN_UPSTREAM_PORT", "8643"))
+OUTPUT_LOG = os.path.expanduser(os.environ.get("GWEN_OUTPUT_LOG", "~/Library/Logs/gwen/output.log"))
+
+_lock = threading.Lock()
+_HOP = {"host", "content-length", "transfer-encoding", "connection", "keep-alive"}
+
+
+def write_out(text: str) -> None:
+    with _lock, open(OUTPUT_LOG, "a", encoding="utf-8") as f:
+        f.write(text)
+
+
+def pieces(event: dict) -> list[tuple[str, str]]:
+    """(kind, text) pieces of generated output in one streamed event or one whole JSON response."""
+    out: list[tuple[str, str]] = []
+    for choice in event.get("choices") or []:  # OpenAI chat completions
+        d = choice.get("delta") or choice.get("message") or {}
+        if d.get("reasoning_content") or d.get("reasoning"):
+            out.append(("think", d.get("reasoning_content") or d.get("reasoning")))
+        if d.get("content"):
+            out.append(("text", d["content"]))
+        for tc in d.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            if fn.get("name"):
+                out.append(("tool", f"\n[tool call] {fn['name']} "))
+            if fn.get("arguments"):
+                out.append(("tool", fn["arguments"]))
+    t = event.get("type", "")
+    if t == "content_block_start":  # Anthropic messages
+        block = event.get("content_block") or {}
+        if block.get("type") == "tool_use":
+            out.append(("tool", f"\n[tool call] {block.get('name', '')} "))
+    elif t == "content_block_delta":
+        d = event.get("delta") or {}
+        kind = {"text_delta": "text", "thinking_delta": "think", "input_json_delta": "tool"}.get(d.get("type"))
+        val = d.get("text") or d.get("thinking") or d.get("partial_json")
+        if kind and val:
+            out.append((kind, val))
+    elif t in ("response.output_text.delta", "response.reasoning_text.delta", "response.function_call_arguments.delta"):
+        kind = {"response.output_text.delta": "text", "response.reasoning_text.delta": "think"}.get(t, "tool")
+        if event.get("delta"):
+            out.append((kind, event["delta"]))
+    elif t == "message" and isinstance(event.get("content"), list):  # Anthropic non-streaming
+        for block in event["content"]:
+            if block.get("type") == "text":
+                out.append(("text", block.get("text", "")))
+            elif block.get("type") == "tool_use":
+                out.append(("tool", f"\n[tool call] {block.get('name')} {json.dumps(block.get('input'))}"))
+    return out
+
+
+class Recorder:
+    """Turns pieces into readable log text: a marker whenever the kind changes, think in brackets."""
+
+    def __init__(self) -> None:
+        self.kind = ""
+
+    def feed(self, kind: str, text: str) -> None:
+        prefix = ""
+        if kind != self.kind:
+            prefix = {"think": "\n<think> ", "text": "\n", "tool": ""}[kind]
+            if self.kind == "think":
+                prefix = " </think>" + prefix
+            self.kind = kind
+        write_out(prefix + text)
+
+    def close(self, summary: str) -> None:
+        write_out((" </think>" if self.kind == "think" else "") + f"\n--- {summary}\n")
+
+
+class Tap(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *args) -> None:  # quiet: launchd log stays for errors
+        pass
+
+    def do_GET(self) -> None:
+        self._forward()
+
+    def do_POST(self) -> None:
+        self._forward()
+
+    def _forward(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else None
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in _HOP}
+        model = ""
+        if body and self.command == "POST":
+            try:
+                model = json.loads(body).get("model", "")
+            except (ValueError, AttributeError):
+                pass
+        conn = HTTPConnection("127.0.0.1", UPSTREAM_PORT, timeout=3600)
+        try:
+            conn.request(self.command, self.path, body=body, headers=headers)
+            resp = conn.getresponse()
+        except OSError as e:
+            msg = json.dumps({"error": {"message": f"gwen-tap: upstream unavailable: {e}"}}).encode()
+            self.send_response(502)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(msg)))
+            self.end_headers()
+            self.wfile.write(msg)
+            return
+
+        record = self.command == "POST" and resp.status == 200
+        started = time.time()
+        if record:
+            write_out(f"\n=== {time.strftime('%H:%M:%S')} {self.path} {model} ({length // 1024} KB prompt) ===")
+        rec = Recorder()
+        self.send_response(resp.status)
+        for k, v in resp.getheaders():
+            if k.lower() not in _HOP:
+                self.send_header(k, v)
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        streaming = "text/event-stream" in (resp.getheader("Content-Type") or "")
+        try:
+            if streaming:
+                while True:
+                    line = resp.readline()
+                    if not line:
+                        break
+                    self.wfile.write(line)
+                    self.wfile.flush()
+                    if record and line.startswith(b"data:"):
+                        data = line[5:].strip()
+                        if data and data != b"[DONE]":
+                            try:
+                                for kind, text in pieces(json.loads(data)):
+                                    rec.feed(kind, text)
+                            except ValueError:
+                                pass
+            else:
+                data = resp.read()
+                self.wfile.write(data)
+                if record:
+                    try:
+                        for kind, text in pieces(json.loads(data)):
+                            rec.feed(kind, text)
+                    except ValueError:
+                        pass
+        except (BrokenPipeError, ConnectionResetError):
+            if record:
+                rec.close("client disconnected")
+            return
+        finally:
+            conn.close()
+        if record:
+            rec.close(f"{time.time() - started:.0f}s")
+
+
+def main() -> int:
+    os.makedirs(os.path.dirname(OUTPUT_LOG), exist_ok=True)
+    server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Tap)
+    server.daemon_threads = True
+    print(f"gwen-tap {LISTEN_HOST}:{LISTEN_PORT} -> 127.0.0.1:{UPSTREAM_PORT}, output -> {OUTPUT_LOG}", flush=True)
+    server.serve_forever()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

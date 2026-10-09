@@ -1,0 +1,27 @@
+#!/bin/bash
+# Live view of the gwen server on the Mac: one line per request (prompt size, cache hit, speed), errors, and memory.
+# Usage: gwen-watch          (Ctrl-C to quit)
+set -euo pipefail
+LOG="$HOME/Library/Logs/gwen/serve.log"
+echo "model: $(head -n1 "$HOME/.config/gwen/model")   log: $LOG"
+(
+  while sleep 30; do
+    free=$(memory_pressure -Q 2>/dev/null | awk -F': ' '/free percentage/ {print $2}')
+    swap=$(sysctl -n vm.swapusage | awk '{print $6}')
+    printf '\033[2m%s  mem free %s  swap used %s\033[0m\n' "$(date +%H:%M:%S)" "$free" "$swap"
+  done
+) &
+trap 'kill $! 2>/dev/null' EXIT
+tail -n 0 -F "$LOG" | while IFS= read -r line; do
+  now=$(date +%H:%M:%S)
+  case "$line" in
+    *cache_fetch*)
+      p=$(sed -E 's/.*prompt_tokens=([0-9]+).*/\1/' <<<"$line")
+      c=$(sed -E 's/.*cached=([0-9]+).*/\1/' <<<"$line")
+      printf '%s  request  prompt %6s tok  cached %6s\n' "$now" "$p" "$c" ;;
+    *tok/s*)
+      printf '%s  reply    %s\n' "$now" "${line##*: }" ;;
+    *ERROR*|*Traceback*|*model_load_failed*|*"Loading model"*|*unload*)
+      printf '%s  \033[33m%.160s\033[0m\n' "$now" "$line" ;;
+  esac
+done

@@ -78,6 +78,19 @@ def test_install_puts_local_bin_on_path(tmp_path):
     assert cmds[0].index(".local/bin") < cmds[0].index("uv tool install")
 
 
+def test_install_pins_rapid_mlx_version(tmp_path, monkeypatch):
+    monkeypatch.setenv("GWEN_RAPID_MLX", "0.16.0")
+    assert run_host_script("install").returncode == 0
+    cmds = [log["argv"][-1] for log in get_fake_logs(tmp_path) if "uv tool install" in log["argv"][-1]]
+    assert '"rapid-mlx==0.16.0"' in cmds[0]
+
+
+def test_install_rejects_bad_version(tmp_path, monkeypatch):
+    monkeypatch.setenv("GWEN_RAPID_MLX", "1; rm -rf ~")
+    assert run_host_script("install").returncode == 2
+    assert get_fake_logs(tmp_path) == []
+
+
 def test_install_sends_key_on_stdin_not_argv(tmp_path):
     res = run_host_script("install")
     assert res.returncode == 0
