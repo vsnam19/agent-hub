@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 import tomllib
+import urllib.request
 import uuid
 from pathlib import Path
 
@@ -24,6 +25,19 @@ def _gate(cmd: list[str], repo: Path) -> tuple[int, str]:
     except subprocess.TimeoutExpired:
         return 124, f"timed out after {GATE_TIMEOUT}s"
     return res.returncode, "\n".join((res.stdout + res.stderr).splitlines()[-20:])
+
+
+def preflight(base_url: str, api_key: str, model: str, timeout: float = 10.0) -> str | None:
+    """None when the server answers and serves `model`, else a one-line reason."""
+    req = urllib.request.Request(f"{base_url}/v1/models", headers={"Authorization": f"Bearer {api_key}"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            ids = [m.get("id") for m in json.load(resp).get("data", [])]
+    except (OSError, ValueError) as e:
+        return f"gwen server not reachable at {base_url}: {e}"
+    if model not in ids:
+        return f"gwen server does not serve {model} (serves: {', '.join(i for i in ids if i)})"
+    return None
 
 
 def get_harnesses_file():
@@ -161,7 +175,10 @@ def run_one(
     }
     (run_dir / "gate.log").write_text("\n\n".join(f"== {k} rc={rc}\n{tail}" for k, (rc, tail) in gate.items()))
 
-    passed = all(rc == 0 for rc, _ in gate.values()) and not scope_violation
+    usage = proxy.summary()
+    # The model server vanished during the run (Mac asleep, network down): the run says nothing about the model.
+    infra_error = usage["upstream_failures"] > 0
+    passed = all(rc == 0 for rc, _ in gate.values()) and not scope_violation and not infra_error
 
     res = {
         "ts": ts,
@@ -169,13 +186,14 @@ def run_one(
         "model": model,
         "task": task.id,
         "pass": passed,
+        "infra_error": infra_error,
         "rc": p.returncode if not timed_out else None,
         "timed_out": timed_out,
         "wall_s": wall_s,
         "gate": {k: rc for k, (rc, _) in gate.items()},
         "scope_violation": scope_violation,
         "changed": changed,
-        "usage": proxy.summary(),
+        "usage": usage,
         "mem": mem_res,
         "run_dir": str(run_dir),
         "argv": argv_redacted,
@@ -242,6 +260,10 @@ def main(argv: list[str] | None = None) -> int:
         for h in selected_harnesses:
             for m in args.model:
                 for t in selected_tasks:
+                    reason = preflight(args.base_url, api_key, m)
+                    if reason:
+                        print(f"stopping: {reason}", file=sys.stderr)
+                        return 3
                     res = run_one(
                         h,
                         m,
@@ -257,8 +279,11 @@ def main(argv: list[str] | None = None) -> int:
                     with open(results_file, "a") as f:
                         f.write(json.dumps(res) + "\n")
 
-                    status = "PASS" if res["pass"] else "FAIL"
+                    status = "INFRA" if res["infra_error"] else "PASS" if res["pass"] else "FAIL"
                     print(f"{t} {h} {m} {status} {int(res['wall_s'])}s")
+                    if res["infra_error"]:
+                        print("stopping: the model server dropped out during the run", file=sys.stderr)
+                        return 3
 
     return 0
 

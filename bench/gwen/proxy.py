@@ -179,6 +179,8 @@ class RecordingProxy:
             "completion_tokens": 0,
             "cached_tokens": 0,
             "max_prompt_tokens": 0,
+            "ok_responses": 0,
+            "upstream_failures": 0,
         }
         if not self.log_path.exists():
             return summary
@@ -190,6 +192,10 @@ class RecordingProxy:
                     summary["requests"] += 1
                     if "error" in entry:
                         summary["errors"] += 1
+                    if entry.get("error") == "Upstream connection failed":
+                        summary["upstream_failures"] += 1
+                    if 200 <= (entry.get("status") or 0) < 300:
+                        summary["ok_responses"] += 1
                     usage = entry.get("usage")
                     if usage:
                         summary["prompt_tokens"] += usage.get("prompt_tokens", 0)

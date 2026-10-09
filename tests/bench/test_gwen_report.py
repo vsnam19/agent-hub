@@ -53,3 +53,14 @@ def test_render_handles_missing_usage_and_mem():  # noqa: E501
     out = render(records)  # noqa: E501
     assert "mod1" in out  # noqa: E501
     assert "h1" in out  # noqa: E501
+
+
+def test_render_skips_infra_errors():
+    base = {"harness": "h", "model": "m", "wall_s": 10, "usage": None, "mem": None}
+    records = [
+        {**base, "task": "t1", "pass": True, "infra_error": False},
+        {**base, "task": "t1", "pass": False, "infra_error": True},
+    ]
+    out = render(records)
+    assert "1/1" in out
+    assert "1/2" not in out

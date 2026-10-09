@@ -7,6 +7,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E50
 # noqa: E501
 # noqa: E501
 class FakeUpstreamHandler(BaseHTTPRequestHandler):  # noqa: E501
+    def do_GET(self):
+        if self.path == "/v1/models":
+            body = json.dumps({"data": [{"id": "model1"}, {"id": "org/model1"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
     def do_POST(self):  # noqa: E501
         content_length = int(self.headers.get("Content-Length", 0))  # noqa: E501
         body = self.rfile.read(content_length)  # noqa: E501

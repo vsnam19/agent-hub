@@ -225,7 +225,7 @@ def test_main_cross_product_appends_jsonl(tmp_path, fake_upstream, harnesses_fil
     results = tmp_path / "results.jsonl"
 
     with patch("bench.gwen.run.get_harnesses_file", return_value=harnesses_file):
-        main(
+        rc = main(
             [
                 "--harness",
                 "fake",
@@ -245,12 +245,61 @@ def test_main_cross_product_appends_jsonl(tmp_path, fake_upstream, harnesses_fil
                 "--api-key-file",
                 "/dev/null",
                 "--model",
-                "mod1",
+                "model1",
             ]
         )
 
+    assert rc == 0
     lines = results.read_text().splitlines()
     assert len(lines) == 4
+
+
+def _main_args(tmp_path, base_url, model="model1"):
+    return [
+        "--harness", "fake", "--task", "t1", "--task", "t2",
+        "--out-root", str(tmp_path / "runs"), "--results", str(tmp_path / "results.jsonl"),
+        "--base-url", base_url, "--no-mem", "--api-key-file", "/dev/null", "--model", model,
+    ]  # fmt: skip
+
+
+def test_preflight_unreachable_stops_with_exit_3(tmp_path, harnesses_file, env_with_fakes):
+    env_with_fakes.setenv("FAKE_HARNESS_MODE", "solve")
+    with patch("bench.gwen.run.get_harnesses_file", return_value=harnesses_file):
+        rc = main(_main_args(tmp_path, "http://127.0.0.1:9"))
+    assert rc == 3
+    assert not (tmp_path / "results.jsonl").exists() or (tmp_path / "results.jsonl").read_text() == ""
+    assert not (tmp_path / "runs").exists()
+
+
+def test_preflight_wrong_model_stops_with_exit_3(tmp_path, fake_upstream, harnesses_file, env_with_fakes, capsys):
+    env_with_fakes.setenv("FAKE_HARNESS_MODE", "solve")
+    with patch("bench.gwen.run.get_harnesses_file", return_value=harnesses_file):
+        rc = main(_main_args(tmp_path, fake_upstream.url, model="other-model"))
+    assert rc == 3
+    assert "does not serve other-model" in capsys.readouterr().err
+
+
+def test_server_gone_mid_batch_marks_infra_error_and_stops(tmp_path, fake_upstream, harnesses_file, env_with_fakes):
+    env_with_fakes.setenv("FAKE_HARNESS_MODE", "solve")
+    t1 = load_tasks()["t1"]
+    env_with_fakes.setenv("FAKE_SOLUTION_PATCH", str(t1.dir / "solution.patch"))
+
+    def run_then_server_dies(*args, **kwargs):
+        kwargs["base_url"] = "http://127.0.0.1:9"  # preflight passed, then the upstream vanished
+        return run_one(*args, **kwargs)
+
+    with (
+        patch("bench.gwen.run.get_harnesses_file", return_value=harnesses_file),
+        patch("bench.gwen.run.run_one", side_effect=run_then_server_dies),
+    ):
+        rc = main(_main_args(tmp_path, fake_upstream.url))
+
+    assert rc == 3
+    records = [json.loads(line) for line in (tmp_path / "results.jsonl").read_text().splitlines()]
+    assert len(records) == 1  # stopped after the first task instead of running t2
+    assert records[0]["infra_error"] is True
+    assert records[0]["pass"] is False
+    assert records[0]["usage"]["upstream_failures"] >= 1
 
 
 def test_unknown_harness_exit_2(tmp_path, harnesses_file):

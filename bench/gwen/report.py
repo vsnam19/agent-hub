@@ -12,6 +12,8 @@ def render(records: list[dict]) -> str:
     data = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
 
     for r in records:
+        if r.get("infra_error"):
+            continue
         data[r["model"]][r["harness"]][r["task"]].append(r)
 
     out = []
