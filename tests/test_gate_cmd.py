@@ -177,3 +177,44 @@ def test_gate_job_falls_back_to_worktree_config_when_base_has_none(env_sandbox, 
     assert out["repo_gates_source"] == "worktree"
     assert [g["cmd"] for g in out["gate"]] == ["test -f README.md"]
     assert {"file": ".agent-hub/config.toml", "kind": "gate-config-changed", "lines": [1]} in out["gate_touched"]
+
+
+def test_gate_runs_base_gates_when_head_removed_config(env_sandbox, repo, capsys):
+    set_repo_gates(repo, ["test -f README.md"])
+    subprocess.run(["git", "branch", "-f", "master"], cwd=repo, check=True)
+    base = git_head(repo)
+    subprocess.run(["git", "rm", "-q", "-r", ".agent-hub"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "drop gates"], cwd=repo, check=True)
+
+    rc = main(["gate", "-d", str(repo), "--json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["status"] == "ok"
+    assert out["repo_gates_source"] == base
+    assert out["repo_gates"] == ["test -f README.md"]
+    assert [g["cmd"] for g in out["gate"]] == ["test -f README.md"]
+    assert [g["rc"] for g in out["gate"]] == [0]
+    assert list_jobs(paths(), 10)[0]["id"] == out["id"]
+
+
+def test_gate_refuses_only_when_no_gates_anywhere(env_sandbox, repo, capsys):
+    subprocess.run(["git", "branch", "-f", "master"], cwd=repo, check=True)
+    (repo / "feature.txt").write_text("x\n")
+    subprocess.run(["git", "add", "feature.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feature"], cwd=repo, check=True)
+
+    rc = main(["gate", "-d", str(repo), "--gate", "true"])
+
+    assert rc == 2
+    assert "no repo gates: set gates in .agent-hub/config.toml" in capsys.readouterr().err
+    assert list_jobs(paths(), 10) == []
+
+    set_repo_gates(repo, ["test -f feature.txt"])
+
+    rc = main(["gate", "-d", str(repo), "--json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["repo_gates_source"] == "worktree"
+    assert [g["cmd"] for g in out["gate"]] == ["test -f feature.txt"]

@@ -73,8 +73,12 @@ def base_repo_gates(repo: guards.Repo, since: str) -> tuple[list[str], str]:
     try:
         text = guards._run_git(repo.root, "show", spec)
     except subprocess.CalledProcessError:
-        return repo_gates(repo.root), "worktree"
-    return _parse_gates(text, spec), since
+        text = None
+    if text is not None:
+        gates = _parse_gates(text, spec)
+        if gates:
+            return gates, since
+    return repo_gates(repo.root), "worktree"
 
 
 def _parse_gates(text: str, where: object) -> list[str]:
@@ -140,7 +144,6 @@ def run_gates(gates: list[str], workdir: Path, gate_dir: Path, sha: str) -> tupl
 def run_gate_job(
     p: Paths,
     repo: guards.Repo,
-    worktree_defaults: list[str],
     cli_gates: list[str],
     base: str,
     since: str,
@@ -148,12 +151,14 @@ def run_gate_job(
 ) -> dict:
     """Run the repo's default gates, then `cli_gates`, on the committed HEAD of a clean work tree and record them
     as a `gate` job, with what the diff from `since` (the merge base with `base`) touched.
-    The default gates come from the merge base, never from `worktree_defaults` (the work tree's config, which HEAD
-    can edit; the caller still passes it, and it is not read)."""
+    The default gates come from the merge base, falling back to the work tree's config when the base has none.
+    Refuses (ConfigError, before any job is recorded) when neither has gates."""
+    defaults, source = base_repo_gates(repo, since)
+    if not defaults:
+        raise ConfigError("no repo gates: set gates in .agent-hub/config.toml")
     started = now()
     job = new_job(p, "gate", started)
     head = guards.head(repo)
-    defaults, source = base_repo_gates(repo, since)
     record: dict = {
         "id": job.id,
         "role": "gate",

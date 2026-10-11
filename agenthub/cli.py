@@ -14,7 +14,7 @@ from agenthub.agents import registry
 from agenthub.brief import BriefError, order_table
 from agenthub.config import ConfigError, load_pool, parse_duration, paths, role_kind
 from agenthub.jobs import get_job, list_jobs
-from agenthub.orchestrate import EXIT, RunArgs, readiness, repo_gates, run_gate_job, run_job, touched_findings
+from agenthub.orchestrate import EXIT, RunArgs, readiness, run_gate_job, run_job, touched_findings
 from agenthub.plan import PlanError
 from agenthub.plan import load as load_plan
 from agenthub.planrun import run_plan
@@ -367,15 +367,12 @@ def _cmd_gate(args) -> int:
         raise UsageError(str(e)) from None
     if guards._run_git(repo.root, "status", "--porcelain"):
         raise UsageError("commit first; gate runs on HEAD")
-    defaults = repo_gates(repo.root)
-    if not defaults:
-        raise UsageError("no repo gates: set gates in .agent-hub/config.toml")
     base = args.base or repo.default_branch
     try:
         since = guards._run_git(repo.root, "merge-base", "HEAD", base)
     except subprocess.CalledProcessError:
         raise UsageError(f"no merge base of HEAD and {base}") from None
-    result = run_gate_job(paths(), repo, defaults, args.gates or [], base, since, _now)
+    result = run_gate_job(paths(), repo, args.gates or [], base, since, _now)
     if args.json:
         print(json.dumps(result, indent=2))
     else:
