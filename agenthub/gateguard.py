@@ -1,3 +1,4 @@
+import ast
 import re
 import subprocess
 from dataclasses import dataclass
@@ -74,6 +75,39 @@ def _is_gate_config(path_str: str) -> bool:
     }
 
 
+def _is_assertion(node: ast.AST) -> bool:
+    if isinstance(node, ast.Assert):
+        return True
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            name = func.attr
+            dotted = ast.unparse(func)
+        elif isinstance(func, ast.Name):
+            name = func.id
+            dotted = func.id
+        else:
+            return False
+        return name.startswith("assert") or dotted.endswith(("raises", "warns", "fail"))
+    return False
+
+
+def _assertion_free_test_lines(source: str, added_lines: set[int]) -> list[int]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    lines = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not node.name.startswith("test_") or node.lineno not in added_lines:
+            continue
+        if not any(_is_assertion(inner) for stmt in node.body for inner in ast.walk(stmt)):
+            lines.append(node.lineno)
+    return lines
+
+
 def _get_sections(content: str) -> dict[int, str]:
     mapping = {}
     current_section = None
@@ -131,6 +165,22 @@ def inspect_diff(repo: guards.Repo, since: str) -> list[dict]:
                 pass  # Handled separately below
             else:
                 findings.append({"file": c.path, "kind": "gate-config-changed", "line": c.line_num})
+
+    # New test functions (def line added in this diff) whose body asserts nothing
+    added_by_file: dict[str, set[int]] = {}
+    for c in changes:
+        if c.kind == "added" and _is_test_file(c.path) and c.path.endswith(".py"):
+            added_by_file.setdefault(c.path, set()).add(c.line_num)
+    for path, added_lines in added_by_file.items():
+        file_path = repo.root / path
+        if not file_path.is_file():
+            continue
+        try:
+            source = file_path.read_text()
+        except UnicodeDecodeError:
+            continue
+        for def_line in _assertion_free_test_lines(source, added_lines):
+            findings.append({"file": path, "kind": "assertion-free-test", "line": def_line})
 
     # Process pyproject.toml separately
     pyproject_changes = [c for c in changes if c.path == "pyproject.toml"]
