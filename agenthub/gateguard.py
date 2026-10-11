@@ -6,6 +6,9 @@ from pathlib import Path
 
 from agenthub import guards
 
+# Repo-relative `.agent-hub/` files that set how the gates run (repo gates, standing orders).
+AGENT_HUB_GATE_CONFIG = {".agent-hub/config.toml", ".agent-hub/standing-orders.md"}
+
 
 @dataclass
 class Change:
@@ -61,6 +64,8 @@ def _is_test_file(path_str: str) -> bool:
 
 
 def _is_gate_config(path_str: str) -> bool:
+    if path_str in AGENT_HUB_GATE_CONFIG:
+        return True
     name = Path(path_str).name
     return name in {
         "justfile",
@@ -108,6 +113,12 @@ def _assertion_free_test_lines(source: str, added_lines: set[int]) -> list[int]:
     return lines
 
 
+def _test_def(content: str) -> str | None:
+    """The test function a diff line defines; a commented-out or quoted `def test_x` defines none."""
+    m = re.match(r"\s*(?:async\s+)?def\s+(test_\w*)", content)
+    return m.group(1) if m else None
+
+
 def _get_sections(content: str) -> dict[int, str]:
     mapping = {}
     current_section = None
@@ -150,6 +161,15 @@ def inspect_diff(repo: guards.Repo, since: str) -> list[dict]:
 
     findings = []
 
+    # Test names added per file: a removed test whose name is re-added (e.g. a signature change) was not deleted.
+    # Known limit: this is per file, so a test moved to another file is still reported as deleted.
+    added_test_names: dict[str, set[str]] = {}
+    for c in changes:
+        if c.kind == "added" and _is_test_file(c.path):
+            name = _test_def(c.content)
+            if name:
+                added_test_names.setdefault(c.path, set()).add(name)
+
     # Process changes
     for c in changes:
         if _is_test_file(c.path):
@@ -157,7 +177,8 @@ def inspect_diff(repo: guards.Repo, since: str) -> list[dict]:
                 findings.append({"file": c.path, "kind": "assert-removed", "line": c.line_num})
             if c.kind == "added" and re.search(r"\b(?:skip|xfail)\b|--ignore|--deselect", c.content):
                 findings.append({"file": c.path, "kind": "skip-added", "line": c.line_num})
-            if c.kind == "removed" and re.search(r"def\s+test_", c.content):
+            name = _test_def(c.content) if c.kind == "removed" else None
+            if name and name not in added_test_names.get(c.path, set()):
                 findings.append({"file": c.path, "kind": "test-deleted", "line": c.line_num})
 
         if _is_gate_config(c.path):

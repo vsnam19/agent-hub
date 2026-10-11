@@ -74,6 +74,30 @@ def test_test_function_deleted(repo):
     assert res == [{"file": "test_d.py", "kind": "test-deleted", "lines": [1]}]
 
 
+def test_signature_change_is_not_test_deleted(repo):
+    test_file = repo / "test_e.py"
+    test_file.write_text("def test_x(a):\n    assert a\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("def test_x(a, b):\n    assert a\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == []
+
+
+def test_renamed_away_test_is_test_deleted(repo):
+    test_file = repo / "test_f.py"
+    test_file.write_text("def test_old():\n    assert 1\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("def test_new():\n    assert 1\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == [{"file": "test_f.py", "kind": "test-deleted", "lines": [1]}]
+
+
 def test_justfile_change_flagged(repo):
     f = repo / "justfile"
     f.write_text("test:\n  pytest\n")
@@ -229,3 +253,35 @@ def test_existing_test_not_flagged(repo):
     test_file.write_text("def test_old():\n    x = 1\n")
     res = gateguard.inspect_diff(guards.inspect(repo), since)
     assert not [r for r in res if r["kind"] == "assertion-free-test"]
+
+
+def test_commented_def_test_ignored(repo):
+    (repo / "test_c.py").write_text("# def test_old():\n    pass\n")
+    (repo / "test_d.py").write_text("def test_x():\n    assert 1\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add")
+    since = guards.head(guards.inspect(repo))
+
+    # removing a commented-out def is not a removal of a test
+    (repo / "test_c.py").write_text("\n")
+    # a commented-out def re-added does not count as re-adding test_x
+    (repo / "test_d.py").write_text("# def test_x():\n    assert 1\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == [{"file": "test_d.py", "kind": "test-deleted", "lines": [1]}]
+
+
+def test_agent_hub_config_is_gate_config(repo):
+    cfg = repo / ".agent-hub" / "config.toml"
+    cfg.parent.mkdir()
+    cfg.write_text('gates = ["true"]\n')
+    orders = repo / ".agent-hub" / "standing-orders.md"
+    orders.write_text("1. Be kind.\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add")
+    since = guards.head(guards.inspect(repo))
+
+    cfg.write_text('gates = ["false"]\n')
+    orders.write_text("1. Be unkind.\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert {"file": ".agent-hub/config.toml", "kind": "gate-config-changed", "lines": [1]} in res
+    assert {"file": ".agent-hub/standing-orders.md", "kind": "gate-config-changed", "lines": [1]} in res

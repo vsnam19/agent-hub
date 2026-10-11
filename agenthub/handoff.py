@@ -22,12 +22,21 @@ unit-test-verified | type-check-only | not-verified | inconclusive
 - <tasks you suggest; "(none)" if nothing>
 """
 
-REVIEW_FOOTER = """---
-When you are done, end your review with this section as your final message:
+REVIEW_FOOTER = (
+    """---
+Your final message is the only part of your answer that is kept, so put the whole review in it:
+
+## Findings
+- <severity high|medium|low> — <path:line> — <what is wrong> — <a concrete failure scenario> — """
+    """<evidence: what you read or ran>
+(or "(none)")
 
 ## Verdict
 approve | request-changes
+
+Use request-changes only for a high or medium finding.
 """
+)
 
 
 def parse_verdict(reply: str) -> str | None:

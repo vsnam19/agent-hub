@@ -5,6 +5,7 @@ import fnmatch
 import json
 import os
 import signal
+import subprocess
 import threading
 import tomllib
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 from agenthub import brief as briefmod
-from agenthub import env, guards, handoff, process
+from agenthub import env, gateguard, guards, handoff, process
 from agenthub.agents import Classified, Outcome, Request, registry
 from agenthub.config import ConfigError, Paths, Pool
 from agenthub.jobs import Job, new_job
@@ -61,13 +62,33 @@ def repo_gates(root: Path) -> list[str]:
     path = root / REPO_CONFIG
     if not path.is_file():
         return []
+    return _parse_gates(path.read_text(), path)
+
+
+def base_repo_gates(repo: guards.Repo, since: str) -> tuple[list[str], str]:
+    """Default gates as committed at `since` (the merge base with the base branch), so a HEAD that edits its own
+    gate config cannot change the gates it is judged by. Falls back to the work tree's config when the base has none.
+    Returns the gates and their source: the merge base sha, or "worktree"."""
+    spec = f"{since}:{REPO_CONFIG.as_posix()}"
     try:
-        data = tomllib.loads(path.read_text())
+        text = guards._run_git(repo.root, "show", spec)
+    except subprocess.CalledProcessError:
+        text = None
+    if text is not None:
+        gates = _parse_gates(text, spec)
+        if gates:
+            return gates, since
+    return repo_gates(repo.root), "worktree"
+
+
+def _parse_gates(text: str, where: object) -> list[str]:
+    try:
+        data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
-        raise ConfigError(f"{path}: {e}") from e
+        raise ConfigError(f"{where}: {e}") from e
     gates = data.get("gates", [])
     if not isinstance(gates, list) or not all(isinstance(g, str) for g in gates):
-        raise ConfigError(f"{path}: gates must be a list of strings")
+        raise ConfigError(f"{where}: gates must be a list of strings")
     return gates
 
 
@@ -78,6 +99,90 @@ def merge_gates(repo: list[str], cli: list[str]) -> list[str]:
         if cmd not in merged:
             merged.append(cmd)
     return merged
+
+
+def run_gates(gates: list[str], workdir: Path, gate_dir: Path, sha: str) -> tuple[list[dict], bool]:
+    """Run gate commands in order in `workdir`, logs under `gate_dir`, stopping at the first failure.
+    Returns the gate records, each stamped with `sha`, and whether every gate passed."""
+    gate_env, _ = env.child_env(os.environ, ())
+    gate_dir.mkdir(exist_ok=True)
+
+    records: list[dict] = []
+    for n, cmd in enumerate(gates, start=1):
+        attempt_dir = gate_dir / str(n)
+        attempt_dir.mkdir(exist_ok=True)
+
+        inv = process.Invocation(argv=["bash", "-c", cmd], stdin_path=None)
+        ran = process.run(inv, workdir, gate_env, attempt_dir, timedelta(seconds=GATE_TIMEOUT_S))
+
+        stdout_text = (attempt_dir / "stdout").read_text(errors="replace")
+        stderr_text = (attempt_dir / "stderr").read_text(errors="replace")
+        log_content = stdout_text + stderr_text
+        log_path = gate_dir / f"{n}.log"
+        log_path.write_text(log_content)
+
+        lines = log_content.splitlines()
+        tail = "\n".join(lines[-40:])
+
+        rc = ran.rc if not ran.timed_out else (ran.rc if ran.rc != 0 else -15)
+        records.append(
+            {
+                "cmd": cmd,
+                "rc": rc,
+                "duration_s": round(ran.duration_s, 3),
+                "tail": tail,
+                "log": str(log_path),
+                "sha": sha,
+            }
+        )
+
+        if rc != 0:
+            return records, False
+    return records, True
+
+
+def run_gate_job(
+    p: Paths,
+    repo: guards.Repo,
+    cli_gates: list[str],
+    base: str,
+    since: str,
+    now: Callable[[], datetime],
+) -> dict:
+    """Run the repo's default gates, then `cli_gates`, on the committed HEAD of a clean work tree and record them
+    as a `gate` job, with what the diff from `since` (the merge base with `base`) touched.
+    The default gates come from the merge base, falling back to the work tree's config when the base has none.
+    Refuses (ConfigError, before any job is recorded) when neither has gates."""
+    defaults, source = base_repo_gates(repo, since)
+    if not defaults:
+        raise ConfigError("no repo gates: set gates in .agent-hub/config.toml")
+    started = now()
+    job = new_job(p, "gate", started)
+    head = guards.head(repo)
+    record: dict = {
+        "id": job.id,
+        "role": "gate",
+        "kind": "gate",
+        "status": "running",
+        "exit_code": None,
+        "agent": "agent-hub",
+        "model": "gate",
+        "workdir": str(repo.root),
+        "repo": str(repo.common_dir),
+        "head": head,
+        "base": base,
+        "repo_gates": defaults,
+        "repo_gates_source": source,
+        "started": started.isoformat(),
+        "ended": None,
+        "duration_s": None,
+        "changed_files": [],
+        "diffstat": "",
+        "reply_path": None,
+    }
+    record["gate"], passed = run_gates(merge_gates(defaults, cli_gates), repo.root, job.dir / "gate", head)
+    record["gate_touched"] = gateguard.inspect_diff(repo, since)
+    return _finish(job, record, "ok" if passed else "gate-failed", now, started)
 
 
 class _Cancel:
@@ -301,46 +406,11 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
 
     record["gate"] = []
     if status == "ok" and kind == "implement" and gates:
-        gate_env, _ = env.child_env(os.environ, ())
-        gate_dir = job.dir / "gate"
-        gate_dir.mkdir(exist_ok=True)
-
-        gate_sha = guards.head(repo)
-        for n, cmd in enumerate(gates, start=1):
-            attempt_dir = gate_dir / str(n)
-            attempt_dir.mkdir(exist_ok=True)
-
-            inv = process.Invocation(argv=["bash", "-c", cmd], stdin_path=None)
-            ran = process.run(inv, workdir, gate_env, attempt_dir, timedelta(seconds=GATE_TIMEOUT_S))
-
-            stdout_text = (attempt_dir / "stdout").read_text(errors="replace")
-            stderr_text = (attempt_dir / "stderr").read_text(errors="replace")
-            log_content = stdout_text + stderr_text
-            log_path = gate_dir / f"{n}.log"
-            log_path.write_text(log_content)
-
-            lines = log_content.splitlines()
-            tail = "\n".join(lines[-40:])
-
-            rc = ran.rc if not ran.timed_out else (ran.rc if ran.rc != 0 else -15)
-            record["gate"].append(
-                {
-                    "cmd": cmd,
-                    "rc": rc,
-                    "duration_s": round(ran.duration_s, 3),
-                    "tail": tail,
-                    "log": str(log_path),
-                    "sha": gate_sha,
-                }
-            )
-
-            if rc != 0:
-                status = "gate-failed"
-                break
+        record["gate"], passed = run_gates(gates, workdir, job.dir / "gate", guards.head(repo))
+        if not passed:
+            status = "gate-failed"
 
     if kind == "implement" and status in ("ok", "gate-failed"):
-        from agenthub import gateguard
-
         record["gate_touched"] = gateguard.inspect_diff(repo, start_head)
     else:
         record["gate_touched"] = []
@@ -361,25 +431,26 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     return _finish(job, record, status or "exhausted", now, started)
 
 
-def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
-    """What still blocks a merge of `workdir` at `head`; empty when ready. `jobs` are result records, newest first."""
+def readiness(jobs: list[dict], workdir: Path, head: str, accept_touched: bool = False) -> list[str]:
+    """What still blocks a merge of `workdir` at `head`; empty when ready. `jobs` are result records, newest first.
+    `accept_touched` lifts the block on gate_touched findings once the director has read them."""
     mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == workdir.resolve()]
 
     def who(j: dict) -> str:
         return f"{j.get('agent')}:{j.get('model')}"
 
-    gated = [
-        j
-        for j in mine
-        if j.get("kind") == "implement"
-        and j.get("head") == head
-        and j.get("gate")
-        and all(g.get("rc") == 0 and g.get("sha") == head for g in j["gate"])
-    ]
+    gated = [j for j in mine if _passed_gate(j, head)]
+    implementers = {who(j) for j in mine if j.get("kind") == "implement" and j.get("status") in ("ok", "gate-failed")}
     reviews = [j for j in mine if j.get("kind") == "review" and j.get("status") == "ok" and j.get("verdict")]
     problems = []
     if not gated:
-        problems.append(f"no gated implement job on {head}")
+        problems.append(f"no passing gate on {head}")
+    elif not accept_touched:
+        touched = touched_findings(jobs, workdir, head)
+        if touched:
+            problems.append(f"gate touched: {len(touched)} findings — inspect before merging")
+    if not implementers:
+        problems.append("no implementer recorded: cannot check reviewer independence")
     if not reviews:
         problems.append("no review")
         return problems
@@ -390,9 +461,27 @@ def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
     approved = [r for r in on_head if r["verdict"] == "approve"]
     if not approved:
         problems.append(f"review verdict {on_head[0]['verdict']}")
-    elif gated and all(who(r) in {who(g) for g in gated} for r in approved):
+    elif all(who(r) in implementers for r in approved):
         problems.append("reviewer is the implementer")
     return problems
+
+
+def touched_findings(jobs: list[dict], workdir: Path, head: str) -> list[dict]:
+    """The gate_touched findings of the first passing gate on `head` for `workdir`; empty when none."""
+    mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == workdir.resolve()]
+    return next((j["gate_touched"] for j in mine if _passed_gate(j, head) and j.get("gate_touched")), [])
+
+
+def _passed_gate(j: dict, head: str) -> bool:
+    """Whether job `j` is a gate that passed on `head`; a gate job must also have run every repo default gate."""
+    if j.get("kind") not in ("implement", "gate") or j.get("head") != head or not j.get("gate"):
+        return False
+    if not all(g.get("rc") == 0 and g.get("sha") == head for g in j["gate"]):
+        return False
+    if j["kind"] == "gate":
+        ran = {g.get("cmd") for g in j["gate"]}
+        return bool(j.get("repo_gates")) and set(j["repo_gates"]) <= ran
+    return True
 
 
 def _rel(job: Job, attempt_dir: Path, name: str) -> str:

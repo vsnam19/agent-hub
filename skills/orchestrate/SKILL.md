@@ -74,8 +74,9 @@ Read the leaf skill in full for any principle you apply.
    never escalates by itself: after a failure, re-run at the role's `escalate` target (see `agent-hub pool`).
 7. **Verify yourself** in the worktree: run the gate, read the whole diff, and scan every new test for missing
    assertions. Check the diff for edits to the gate itself (tests, justfile, lint config) and pass the repository's
-   lint and tests as `--gate`. The agent's claims are not evidence. Read every hunk listed in `gate_touched` before
-   accepting. Once verified, commit the work yourself if the agent did not (some agents cannot commit by design).
+   lint and tests as `--gate`. The agent's claims are not evidence. Read every `gate_touched` hunk; if they are
+   intended, pass `--accept-touched` to `agent-hub ready`. Once verified, commit the work yourself if the agent did not (some agents cannot commit by design).
+   After committing, run `agent-hub gate -d <worktree>`, then review, then `agent-hub ready`.
 8. **Review every change you merge:** start it the same way (background + `wait`):
    `agent-hub run --role review -d <worktree> --base <default branch>`.
    The CLI computes `git diff <base>...HEAD` into the job's `diff.patch` and the reviewer reads that file; the
