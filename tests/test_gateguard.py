@@ -185,3 +185,47 @@ def test_findings_grouped_per_file_and_kind(repo):
     test_file.write_text("def test_foo():\n    pass\n    pass\n")
     res = gateguard.inspect_diff(guards.inspect(repo), since)
     assert res == [{"file": "test_grouping.py", "kind": "assert-removed", "lines": [2, 3]}]
+
+
+def test_assertion_free_test_flagged(repo):
+    since = guards.head(guards.inspect(repo))
+
+    test_file = repo / "test_g.py"
+    test_file.write_text("def test_nothing():\n    pass\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert {"file": "test_g.py", "kind": "assertion-free-test", "lines": [1]} in res
+
+
+def test_pytest_raises_counts_as_assertion(repo):
+    since = guards.head(guards.inspect(repo))
+
+    test_file = repo / "test_h.py"
+    test_file.write_text(
+        "import pytest\n\n\ndef test_raises():\n    with pytest.raises(ValueError):\n        int('a')\n"
+    )
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert not [r for r in res if r["kind"] == "assertion-free-test"]
+
+
+def test_unittest_assert_method_counts(repo):
+    since = guards.head(guards.inspect(repo))
+
+    test_file = repo / "test_i.py"
+    test_file.write_text(
+        "import unittest\n\n\n"
+        "class TestA(unittest.TestCase):\n    def test_equal(self):\n        self.assertEqual(1, 1)\n"
+    )
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert not [r for r in res if r["kind"] == "assertion-free-test"]
+
+
+def test_existing_test_not_flagged(repo):
+    test_file = repo / "test_j.py"
+    test_file.write_text("def test_old():\n    pass\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("def test_old():\n    x = 1\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert not [r for r in res if r["kind"] == "assertion-free-test"]
