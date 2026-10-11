@@ -39,6 +39,30 @@ def _reviewers_besides(role: str, implementer: str) -> list[str]:
     return [link for link in load_pool().roles[role].chain if link != implementer]
 
 
+def _autocommit(worktree: str, slug: str, task_name: str, job_result: dict) -> None:
+    """Commit work a gated task's agent left uncommitted, so dependent tasks start from it. No-op on a clean tree."""
+    status = subprocess.run(
+        _git_argv("status", "--porcelain"), cwd=worktree, capture_output=True, text=True, check=True
+    ).stdout
+    if not status.strip():
+        return
+    subprocess.run(_git_argv("add", "-A"), cwd=worktree, capture_output=True, text=True, check=True)
+    # Fall back to a placeholder identity per key only when the repository configures none.
+    identity = []
+    for key, fallback in (("user.name", "agent-hub"), ("user.email", "agent-hub@localhost")):
+        if subprocess.run(_git_argv("config", "--get", key), cwd=worktree, capture_output=True).returncode != 0:
+            identity += ["-c", f"{key}={fallback}"]
+    agent_label = f"{job_result.get('agent', '?')}:{job_result.get('model', '?')}"
+    message = f"orch: {slug}/{task_name} — work left uncommitted by {agent_label} (gate passed)"
+    subprocess.run(
+        _git_argv(*identity, "-c", "commit.gpgsign=false", "commit", "-m", message),
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
 def compose_brief(plan: Plan, task: Task, state: State, attempt_note: str) -> str:
     parts = []
     parts.append("## Goal (whole plan)\n\n" + plan.goal.strip())
@@ -329,8 +353,16 @@ def run_plan(
                                 tstate.status = "scope-violation"
                                 tstate.reason = "files outside scope: " + ", ".join(violations)
                             else:
-                                tstate.status = "done"
-                                tstate.reason = ""
+                                try:
+                                    # A task resumed without a recorded worktree has no tree to commit.
+                                    if tstate.worktree:
+                                        _autocommit(tstate.worktree, plan.slug, name, job_result)
+                                except subprocess.CalledProcessError as exc:
+                                    tstate.status = "failed"
+                                    tstate.reason = f"autocommit failed: {(exc.stderr or '').strip()}"
+                                else:
+                                    tstate.status = "done"
+                                    tstate.reason = ""
                         else:
                             apply_retry(tstate, task, job_status, job_result)
                     else:  # review
