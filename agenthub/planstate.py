@@ -26,6 +26,9 @@ class TaskState:
     start_ref: str = ""
     reason: str = ""
     handoff: str = ""
+    role: str = ""  # effective role after escalation; empty = the task's own role
+    escalated_from: str = ""
+    visited_roles: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -56,6 +59,9 @@ class State:
                     "start_ref": t.start_ref,
                     "reason": t.reason,
                     "handoff": t.handoff,
+                    "role": t.role,
+                    "escalated_from": t.escalated_from,
+                    "visited_roles": t.visited_roles,
                 }
                 for name, t in self.tasks.items()
             },
@@ -127,6 +133,9 @@ def load_or_init(plan: Plan) -> State:
                 start_ref=v.get("start_ref", ""),
                 reason=v.get("reason", ""),
                 handoff=v.get("handoff", ""),
+                role=v.get("role", ""),
+                escalated_from=v.get("escalated_from", ""),
+                visited_roles=v.get("visited_roles", []),
             )
 
         state = State(

@@ -215,7 +215,7 @@ def run_plan(
                     "agenthub",
                     "run",
                     "--role",
-                    task.role,
+                    tstate.role or task.role,
                     "--brief",
                     str(brief_file),
                     "-d",
@@ -333,6 +333,8 @@ def run_plan(
                                 tstate.reason = ""
                         else:
                             apply_retry(tstate, task, job_status, job_result)
+                            if tstate.status == "failed" and job_status in ESCALATING:
+                                escalate(tstate, task, job_result, job_status)
                     else:  # review
                         if job_status == "ok":
                             tstate.status = "done"
@@ -382,6 +384,9 @@ def apply_retry(tstate: TaskState, task: Task, job_status: str, job_result: dict
     elif job_status in ("exhausted", "refused", "modified-tree", "cancelled"):
         can_retry = False
 
+    if tstate.escalated_from:
+        can_retry = False  # an escalated role gets one run
+
     if can_retry and attempts_so_far < task.max_attempts:
         tstate.status = "pending"
         tstate.reason = note
@@ -390,3 +395,35 @@ def apply_retry(tstate: TaskState, task: Task, job_status: str, job_result: dict
             tstate.status = "blocked"
         else:
             tstate.status = "failed"
+
+
+ESCALATING = ("gate-failed", "failed", "timeout", "empty", "interrupted")
+
+
+def escalate(tstate: TaskState, task: Task, job_result: dict, job_status: str) -> None:
+    """Move a failed implement task one tier up: wipe its work tree and requeue it at the role's `escalate` role."""
+    current = tstate.role or task.role
+    target = load_pool().roles[current].escalate
+    if not target:
+        return
+    visited = tstate.visited_roles or [current]
+    if target in visited:
+        return  # cycle guard
+
+    cwd = Path(tstate.worktree)
+    subprocess.run(_git_argv("reset", "--hard", tstate.start_ref), cwd=cwd, check=True, capture_output=True)
+    subprocess.run(_git_argv("clean", "-fdx"), cwd=cwd, check=True, capture_output=True)
+
+    failure = ""
+    for g in job_result.get("gate", []):
+        if g.get("rc") != 0:
+            failure = f"{g.get('cmd', '')}\n{g.get('tail', '')}"
+            break
+    if not failure:
+        failure = job_result.get("reason") or job_status
+
+    tstate.visited_roles = [*visited, target]
+    tstate.escalated_from = current
+    tstate.role = target
+    tstate.status = "pending"
+    tstate.reason = f"## Previous attempt failed\n{failure}"
