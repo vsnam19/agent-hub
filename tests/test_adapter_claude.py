@@ -4,7 +4,7 @@ from datetime import timedelta
 import pytest
 
 from agenthub.agents import Outcome, Request, registry
-from agenthub.agents.claude import ClaudeAdapter
+from agenthub.agents.claude import WORKER_PROMPT, ClaudeAdapter
 from agenthub.process import run
 
 
@@ -35,6 +35,10 @@ def test_claude_build_implement_argv(tmp_path):
         "--output-format",
         "json",
         "--no-session-persistence",
+        "--setting-sources",
+        "project,local",
+        "--append-system-prompt",
+        WORKER_PROMPT,
         "--permission-mode",
         "bypassPermissions",
     ]
@@ -68,6 +72,10 @@ def test_claude_build_review_argv(tmp_path):
         "--output-format",
         "json",
         "--no-session-persistence",
+        "--setting-sources",
+        "project,local",
+        "--append-system-prompt",
+        WORKER_PROMPT,
         "--allowedTools",
         "Read,Grep,Glob",
         "--add-dir",
@@ -76,6 +84,40 @@ def test_claude_build_review_argv(tmp_path):
     assert inv.stdin_path == brief
     for arg in inv.argv:
         assert '"' not in arg
+
+
+def _build_for(tmp_path, role):
+    adapter = ClaudeAdapter()
+    adapter.config = type("C", (), {"binary": "claude"})()
+    brief = tmp_path / "b.md"
+    brief.write_text("hello")
+    attempt = tmp_path / "attempts" / "1-claude-m"
+    attempt.mkdir(parents=True)
+    req = Request(
+        role=role,
+        model="m",
+        workdir=tmp_path,
+        brief_path=brief,
+        attempt_dir=attempt,
+        git_common_dir=tmp_path / ".git",
+    )
+    return adapter.build(req).argv
+
+
+@pytest.mark.parametrize("role", ["implement", "review"])
+def test_claude_ignores_user_settings(tmp_path, role):
+    argv = _build_for(tmp_path, role)
+    i = argv.index("--setting-sources")
+    assert argv[i + 1] == "project,local"
+
+
+@pytest.mark.parametrize("role", ["implement", "review"])
+def test_claude_worker_prompt_appended(tmp_path, role):
+    argv = _build_for(tmp_path, role)
+    i = argv.index("--append-system-prompt")
+    assert argv[i + 1] == WORKER_PROMPT
+    assert "English" in WORKER_PROMPT
+    assert "background" in WORKER_PROMPT
 
 
 def test_claude_review_has_no_shell_tool(tmp_path):
