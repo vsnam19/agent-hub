@@ -10,6 +10,8 @@ Name the files to read, the current behaviour, and the interfaces the change mus
 
 ## Expected output
 
+Done means: the checks that prove the task is finished (exact test names, commands and their expected results).
+
 Name the files to create or change, the exact test names that must pass, and the exact commands with their expected result.
 
 ## Constraints

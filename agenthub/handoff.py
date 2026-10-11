@@ -1,6 +1,9 @@
 import re
 
 FOOTER = """---
+If you cannot meet the brief's checks, stop: do not weaken a test, a gate or the brief's conditions to get green.
+Report Status "blocked" and say exactly what stopped you.
+
 When you are done, end with this handoff as your final message, exactly these headings:
 
 ## Status
@@ -10,7 +13,7 @@ success | partial | blocked
 - <one line per change>
 
 ## Verification
-unit-test-verified | type-check-only | not-verified
+unit-test-verified | type-check-only | not-verified | inconclusive
 
 ## Notes
 - <assumptions, surprises, anything the orchestrator must know; "(none)" if nothing>
@@ -64,7 +67,7 @@ def parse(reply: str) -> dict | None:
         line = line.strip()
         if line:
             word = line.split()[0].lower().rstrip(".,;:'\"!?")
-            if word in ("unit-test-verified", "type-check-only", "not-verified"):
+            if word in ("unit-test-verified", "type-check-only", "not-verified", "inconclusive"):
                 verification = word
             break
 
