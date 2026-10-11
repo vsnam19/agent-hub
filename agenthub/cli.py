@@ -9,8 +9,9 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agenthub import guards
 from agenthub.agents import registry
-from agenthub.brief import BriefError
+from agenthub.brief import BriefError, order_table
 from agenthub.config import ConfigError, load_pool, parse_duration, paths, role_kind
 from agenthub.jobs import get_job, list_jobs
 from agenthub.orchestrate import EXIT, RunArgs, run_job
@@ -95,6 +96,10 @@ def _build_parser() -> argparse.ArgumentParser:
     plan_wait.add_argument("--timeout", help="e.g. 9m")
     plan_wait.add_argument("--json", action="store_true")
 
+    orders = sub.add_parser("orders", help="list standing orders and what enforces each (exit 1 if one has none)")
+    orders.add_argument("-d", "--dir", default=".", dest="workdir", help="repo whose standing orders to list")
+    orders.add_argument("--json", action="store_true")
+
     return parser
 
 
@@ -110,6 +115,7 @@ def main(argv: list[str] | None = None) -> int:
             "cancel": _cmd_cancel,
             "wait": _cmd_wait,
             "plan": _cmd_plan,
+            "orders": _cmd_orders,
         }[args.command]
         return handler(args)
     except SystemExit as e:  # --help
@@ -253,6 +259,37 @@ def _cmd_pool(args) -> int:
                 parts.append(f"cooldown until {e['cooldown_until']}")
             print(_safe("  " + "  ".join(parts)))
     return 0
+
+
+def _cmd_orders(args) -> int:
+    try:
+        repo_root = guards.inspect(Path(args.workdir)).root
+    except guards.GuardError:
+        repo_root = None
+        note = f"agent-hub: {args.workdir} is not a git work tree; no repo standing orders"
+        print(_safe(note, sys.stderr), file=sys.stderr)
+
+    orders = order_table(paths().config_dir, repo_root)
+    missing = [o for o in orders if o.enforced_by is None]
+    for o in missing:
+        warning = f"agent-hub: no '— enforced by:' on order {o.number} in {o.source}: {o.rule}"
+        print(_safe(warning, sys.stderr), file=sys.stderr)
+
+    if args.json:
+        rows = [
+            {"number": o.number, "rule": o.rule, "enforced_by": o.enforced_by, "source": str(o.source)} for o in orders
+        ]
+        print(json.dumps({"orders": rows}, indent=2))
+        return 1 if missing else 0
+
+    if not orders:
+        print("no standing orders")
+        return 0
+    width = max(len(o.enforced_by or "MISSING") for o in orders)
+    print(_safe(f"{'#':>3}  {'enforced by':<{width}}  rule  (source)"))
+    for o in orders:
+        print(_safe(f"{o.number:>3}  {o.enforced_by or 'MISSING':<{width}}  {o.rule}  ({o.source})"))
+    return 1 if missing else 0
 
 
 def _cmd_profile(args) -> int:

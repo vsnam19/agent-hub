@@ -552,6 +552,60 @@ def test_wait_ignores_record_without_workdir(env_sandbox, repo, tmp_path, monkey
     assert "agent-hub: no job for ." in err
 
 
+def test_orders_table_lists_rules_and_mechanisms(env_sandbox, repo, capsys):
+    user_file = env_sandbox.config / "standing-orders.md"
+    user_file.write_text(
+        "1. Run the lint — enforced by: gate\n"
+        "2. Never edit gate config — enforced by: gate-guard\n"
+        "3. No network from tests — enforced by: none\n"
+    )
+    repo_file = repo / ".agent-hub" / "standing-orders.md"
+    repo_file.parent.mkdir()
+    repo_file.write_text("1. Only touch the brief's files — enforced by: scope\n")
+
+    assert main(["orders", "-d", str(repo)]) == 0
+    out, err = capsys.readouterr()
+    assert "Run the lint" in out and "gate" in out
+    assert "Never edit gate config" in out and "gate-guard" in out
+    assert "No network from tests" in out and "none" in out
+    assert "Only touch the brief's files" in out and "scope" in out
+    assert str(user_file) in out and str(repo_file) in out
+    assert out.index("Run the lint") < out.index("Only touch the brief's files")
+    assert err == ""
+
+
+def test_orders_exit_1_on_bare_line(env_sandbox, repo, capsys):
+    (env_sandbox.config / "standing-orders.md").write_text("1. Enforced — enforced by: gate\n2. Bare rule\n")
+
+    assert main(["orders", "-d", str(repo)]) == 1
+    out, err = capsys.readouterr()
+    assert "Bare rule" in out
+    assert "order 2" in err and "Bare rule" in err
+
+
+def test_orders_json_has_null_enforced_by_for_bare_line(env_sandbox, repo, capsys):
+    (env_sandbox.config / "standing-orders.md").write_text("1. Enforced — enforced by: gate\n2. Bare rule\n")
+
+    assert main(["orders", "-d", str(repo), "--json"]) == 1
+    out, err = capsys.readouterr()
+    rows = json.loads(out)["orders"]
+    assert [(r["number"], r["rule"], r["enforced_by"]) for r in rows] == [
+        (1, "Enforced", "gate"),
+        (2, "Bare rule", None),
+    ]
+
+
+def test_orders_outside_repo_lists_user_file(env_sandbox, tmp_path, capsys):
+    (env_sandbox.config / "standing-orders.md").write_text("1. Run the lint — enforced by: gate\n")
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+
+    assert main(["orders", "-d", str(not_a_repo)]) == 0
+    out, err = capsys.readouterr()
+    assert "Run the lint" in out
+    assert "not a git work tree" in err
+
+
 def test_suite_uses_temp_state(tmp_path):
     import os
 

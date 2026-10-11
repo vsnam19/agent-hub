@@ -1,20 +1,44 @@
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+
+# `N. <rule> — enforced by: <mechanism>` (em dash or ` -- `); the mechanism is a named check or `none`.
+ENFORCED_BY = re.compile(r"\s+(?:—|--)\s+enforced by:\s*(?P<mechanism>\S.*?)\s*$")
+NUMBERED = re.compile(r"^\s*(?P<number>\d+)\.\s+(?P<text>\S.*)$")
 
 
 class BriefError(Exception):
     pass
 
 
-def standing_orders(config_dir: Path, repo_root: Path | None) -> str:
-    """The `## Standing orders` section: user file, then project file; each only if non-empty after strip."""
+@dataclass(frozen=True)
+class Order:
+    number: int
+    rule: str
+    enforced_by: str | None  # None: the line has no `— enforced by:` suffix
+    source: Path
+
+
+def split_order(line: str) -> tuple[str, str | None]:
+    """A standing-orders line as (rule text, mechanism); the mechanism is None when the suffix is missing."""
+    match = ENFORCED_BY.search(line)
+    if match is None:
+        return line, None
+    return line[: match.start()], match.group("mechanism")
+
+
+def _sources(config_dir: Path, repo_root: Path | None) -> list[Path]:
     sources = [config_dir / "standing-orders.md"]
     if repo_root is not None:
         sources.append(repo_root / ".agent-hub" / "standing-orders.md")
+    return sources
 
+
+def _bodies(config_dir: Path, repo_root: Path | None) -> list[tuple[Path, str]]:
+    """The non-empty standing-orders files, user first, each stripped."""
     bodies = []
-    for source in sources:
+    for source in _sources(config_dir, repo_root):
         if not source.is_file():
             continue
         try:
@@ -23,11 +47,35 @@ def standing_orders(config_dir: Path, repo_root: Path | None) -> str:
             print(f"agent-hub: skipping standing orders {source}: {e}", file=sys.stderr)
             continue
         if body:
-            bodies.append(body)
+            bodies.append((source, body))
+    return bodies
+
+
+def standing_orders(config_dir: Path, repo_root: Path | None) -> str:
+    """The `## Standing orders` section: user file, then project file; each only if non-empty after strip.
+
+    The `— enforced by:` suffix is for our bookkeeping only, so it is stripped from every line sent.
+    """
+    bodies = []
+    for _, body in _bodies(config_dir, repo_root):
+        bodies.append("\n".join(split_order(line)[0] for line in body.splitlines()))
 
     if not bodies:
         return ""
     return "## Standing orders\n\n" + "\n\n".join(bodies)
+
+
+def order_table(config_dir: Path, repo_root: Path | None) -> list[Order]:
+    """Every numbered line of the standing-orders files, user file first; `enforced_by` is None when missing."""
+    orders = []
+    for source, body in _bodies(config_dir, repo_root):
+        for line in body.splitlines():
+            match = NUMBERED.match(line)
+            if match is None:
+                continue
+            rule, enforced_by = split_order(match.group("text"))
+            orders.append(Order(int(match.group("number")), rule.strip(), enforced_by, source))
+    return orders
 
 
 def validate(kind: str, text: str) -> None:
