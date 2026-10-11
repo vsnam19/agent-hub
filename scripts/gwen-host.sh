@@ -46,19 +46,31 @@ case "$COMMAND" in
     ;;
   switch)
     if [ "$#" -eq 0 ]; then
-      echo "Usage: $0 switch <model>" >&2
+      echo "Usage: $0 switch <model> [flag ...]" >&2
       exit 2
     fi
     MODEL="$1"
+    shift
     if [[ ! "$MODEL" =~ ^[A-Za-z0-9._/-]+$ ]]; then
       echo "Invalid model name" >&2
       exit 2
     fi
+    # validate every flag before any ssh call
+    FLAG_TEXT=""
+    for FLAG in "$@"; do
+      if [[ ! "$FLAG" =~ ^[A-Za-z0-9._=/:,+-]+$ ]]; then
+        echo "Invalid flag: $FLAG" >&2
+        exit 2
+      fi
+      FLAG_TEXT+="$FLAG"$'\n'
+    done
+    # flags travel on stdin, one per line (empty input clears the file). The remote command
+    # is passed as two words; ssh joins them with a space, so the model command stays intact.
     # shellcheck disable=SC2029
-    ssh "$TARGET" "echo '$MODEL' > ~/.config/gwen/model; launchctl kickstart -k gui/\$(id -u)/dev.vsn.gwen"
+    printf '%s' "$FLAG_TEXT" | ssh "$TARGET" "cat > ~/.config/gwen/flags;" "echo '$MODEL' > ~/.config/gwen/model; launchctl kickstart -k gui/\$(id -u)/dev.vsn.gwen"
     ;;
   status)
-    ssh "$TARGET" 'cat ~/.config/gwen/model; launchctl print gui/$(id -u)/dev.vsn.gwen | grep state; tail -n 5 ~/Library/Logs/gwen/serve.log' || true
+    ssh "$TARGET" 'cat ~/.config/gwen/model; echo "flags:"; cat ~/.config/gwen/flags 2>/dev/null || echo "(none)"; launchctl print gui/$(id -u)/dev.vsn.gwen | grep state; tail -n 5 ~/Library/Logs/gwen/serve.log' || true
     # locally curl
     curl -sS -m 5 -K - "http://$HTTP_HOST:8642/v1/models" <<EOF
 header = "Authorization: Bearer $(cat "$KEY_FILE")"

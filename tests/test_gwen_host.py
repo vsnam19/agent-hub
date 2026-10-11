@@ -127,3 +127,99 @@ def test_unknown_command_usage_exit_2():
     res = run_host_script("unknown")
     assert res.returncode == 2
     assert "Usage:" in res.stderr
+
+
+FLAGS = ["--cache-memory-mb", "512", "--context-length", "14000", "--max-num-seqs", "1"]
+
+
+def test_switch_writes_flags_via_stdin(tmp_path):
+    res = run_host_script("switch", "my-model-name", *FLAGS)
+    assert res.returncode == 0
+    logs = get_fake_logs(tmp_path)
+    assert len(logs) == 1
+    assert logs[0]["stdin"].splitlines() == FLAGS
+    joined = " ".join(logs[0]["argv"])
+    for flag in ("--cache-memory-mb", "--context-length", "--max-num-seqs", "14000"):
+        assert flag not in joined
+    assert "512" not in joined
+    assert "~/.config/gwen/flags" in joined
+
+
+def test_switch_without_flags_clears_them(tmp_path):
+    res = run_host_script("switch", "my-model-name")
+    assert res.returncode == 0
+    logs = get_fake_logs(tmp_path)
+    assert len(logs) == 1
+    assert logs[0]["stdin"] == ""
+    assert "~/.config/gwen/flags" in " ".join(logs[0]["argv"])
+
+
+def test_switch_rejects_bad_flag(tmp_path):
+    res = run_host_script("switch", "my-model-name", "--x;rm")
+    assert res.returncode == 2
+    assert get_fake_logs(tmp_path) == []
+
+
+def test_gwen_serve_reads_flags_file(tmp_path):
+    home = tmp_path / "home"
+    config = home / ".config" / "gwen"
+    config.mkdir(parents=True)
+    (config / "model").write_text("my-model-name\n")
+    (config / "api-key").write_text("fake-api-key-123")
+    (config / "flags").write_text(
+        "# per-model flags\n--cache-memory-mb\n512\n\n--context-length\n14000\n# trailing comment\n"
+    )
+    fake_bin = home / ".local" / "bin"
+    fake_bin.mkdir(parents=True)
+    fake = fake_bin / "rapid-mlx"
+    fake.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
+    fake.chmod(0o755)
+
+    env = {**os.environ, "HOME": str(home)}
+    res = subprocess.run(["bash", "scripts/gwen-host/gwen-serve"], env=env, capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.splitlines() == [
+        "serve",
+        "my-model-name",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8643",
+        "--yes",
+        "--idle-unload-seconds",
+        "1800",
+        "--lazy-load",
+        "--cache-memory-mb",
+        "512",
+        "--context-length",
+        "14000",
+    ]
+
+
+def test_gwen_serve_without_flags_file(tmp_path):
+    home = tmp_path / "home"
+    config = home / ".config" / "gwen"
+    config.mkdir(parents=True)
+    (config / "model").write_text("my-model-name\n")
+    (config / "api-key").write_text("fake-api-key-123")
+    fake_bin = home / ".local" / "bin"
+    fake_bin.mkdir(parents=True)
+    fake = fake_bin / "rapid-mlx"
+    fake.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
+    fake.chmod(0o755)
+
+    env = {**os.environ, "HOME": str(home)}
+    res = subprocess.run(["bash", "scripts/gwen-host/gwen-serve"], env=env, capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.splitlines() == [
+        "serve",
+        "my-model-name",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8643",
+        "--yes",
+        "--idle-unload-seconds",
+        "1800",
+        "--lazy-load",
+    ]
