@@ -1,6 +1,7 @@
 import json
 
 import agenthub.planrun
+from agenthub.config import load_pool, paths
 from agenthub.plan import Plan, Task
 from agenthub.planrun import compose_brief, run_plan
 from agenthub.planstate import load_or_init
@@ -362,3 +363,44 @@ def test_gate_touched_in_task_state(tmp_path, monkeypatch):
         data = json.load(f)
 
     assert data["tasks"]["t1"]["attempts"][0]["gate_touched"] == [{"file": "x", "kind": "y", "lines": [1]}]
+
+
+def _record_job(job_id, agent, model):
+    job_dir = paths().jobs_dir / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "result.json").write_text(json.dumps({"id": job_id, "status": "ok", "agent": agent, "model": model}))
+
+
+def test_review_skips_implementing_model(tmp_path):
+    implementer = "agy:claude-opus-4-6-thinking"
+    assert implementer in load_pool().roles["review"].chain
+    plan = make_plan(
+        tmp_path, [{"name": "t1"}, {"name": "r1", "role": "review", "verifies": "t1", "depends_on": ["t1"]}]
+    )
+    state = load_or_init(plan)
+    _record_job("j1", "agy", "claude-opus-4-6-thinking")
+    spawn = FakeSpawner({"t1": [{"status": "ok", "id": "j1"}], "r1": [{"status": "ok"}]})
+
+    rc = run_plan(plan, state, spawn)
+    assert rc == 0
+    assert state.task("r1").status == "done"
+    r1_argv = spawn.spawns[1][0]
+    assert r1_argv[r1_argv.index("--exclude") + 1] == implementer
+
+
+def test_review_blocked_when_only_implementing_model_left(tmp_path):
+    config_dir = paths().config_dir
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "pool.toml").write_text('[roles.review]\nkind = "review"\nchain = ["claude:haiku"]\n')
+    plan = make_plan(
+        tmp_path, [{"name": "t1"}, {"name": "r1", "role": "review", "verifies": "t1", "depends_on": ["t1"]}]
+    )
+    state = load_or_init(plan)
+    _record_job("j1", "claude", "haiku")
+    spawn = FakeSpawner({"t1": [{"status": "ok", "id": "j1"}]})
+
+    rc = run_plan(plan, state, spawn)
+    assert rc == 1
+    assert state.task("r1").status == "blocked"
+    assert state.task("r1").reason == "no reviewer different from claude:haiku"
+    assert len(spawn.spawns) == 1

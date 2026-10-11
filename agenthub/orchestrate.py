@@ -48,6 +48,7 @@ class RunArgs:
     gates: list[str] = dataclasses.field(default_factory=list)
     jev: bool = False
     kind: str = ""
+    exclude: list[str] = dataclasses.field(default_factory=list)  # agent:model links to skip (e.g. the implementer)
 
 
 class _Cancel:
@@ -77,7 +78,9 @@ class _Cancel:
 def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) -> dict:
     kind = args.kind or args.role
     adapters = registry()
-    for link in args.links:
+    excluded = set(args.exclude)
+    links = [link for link in args.links if str(link) not in excluded]
+    for link in links:
         if link.agent not in adapters:
             raise ConfigError(f"unknown agent in chain: {link.agent}")
     briefmod.validate(kind, args.brief)
@@ -110,7 +113,8 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         "request.json",
         {
             "role": args.role,
-            "links": [str(link) for link in args.links],
+            "links": [str(link) for link in links],
+            "exclude": sorted(excluded),
             "workdir": str(workdir),
             "base": base,
             "timeout_s": int(args.timeout.total_seconds()),
@@ -161,7 +165,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     status: str | None = None
 
     with _Cancel() as cancel:
-        for n, link in enumerate(args.links, start=1):
+        for n, link in enumerate(links, start=1):
             if cancel.cancelled:
                 status = "cancelled"
                 break

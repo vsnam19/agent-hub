@@ -51,6 +51,9 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--base", help="review only: ref to compare against (default: the default branch)")
     run.add_argument("--timeout", help="e.g. 30m (default: the role's timeout)")
     run.add_argument("--gate", action="append", dest="gates", help="gate command to run (repeatable)")
+    run.add_argument(
+        "--exclude", action="append", default=[], metavar="AGENT:MODEL", help="skip this link (repeatable)"
+    )
     run.add_argument("--jev", action="store_true", help="use jev fallback for missing handoffs")
     run.add_argument("--json", action="store_true")
 
@@ -189,6 +192,7 @@ def _cmd_run(args) -> int:
         base=args.base,
         gates=args.gates or [],
         jev=args.jev or os.environ.get("AGENT_HUB_JEV") == "1",
+        exclude=args.exclude,
     )
     result = run_job(run_args, p, pool, _now)
     if args.json:
