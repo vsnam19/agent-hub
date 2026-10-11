@@ -90,7 +90,7 @@ def render(records: list[dict]) -> str:
 
         out.append("")
 
-    return "\\n".join(out)
+    return "\n".join(out)
 
 
 def main(argv: list[str] | None = None) -> int:

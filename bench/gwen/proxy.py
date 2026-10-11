@@ -95,6 +95,10 @@ class RecordingProxyHandler(BaseHTTPRequestHandler):
                         elif isinstance(usage, dict) and isinstance(data["message"]["usage"], dict):
                             for k, v in data["message"]["usage"].items():
                                 usage[k] = usage.get(k, 0) + v
+                    elif data.get("type") == "response.completed" and isinstance(data.get("response"), dict):
+                        # OpenAI Responses API: usage arrives once, nested, in the final event.
+                        if usage is None and isinstance(data["response"].get("usage"), dict):
+                            usage = data["response"]["usage"]
                 except json.JSONDecodeError:
                     pass
 
