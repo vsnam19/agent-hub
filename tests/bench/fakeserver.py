@@ -77,6 +77,19 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):  # noqa: E501
                 self.wfile.flush()  # noqa: E501
                 time.sleep(0.3)  # noqa: E501
         # noqa: E501
+        elif self.path == "/v1/responses_sse":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            events = [
+                b'event: response.created\ndata: {"type":"response.created","response":{"id":"r1","status":"in_progress"}}\n\n',  # noqa: E501
+                b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hi"}\n\n',
+                b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":120,"output_tokens":30,"input_tokens_details":{"cached_tokens":80}}}}\n\n',  # noqa: E501
+            ]
+            for ev in events:
+                self.wfile.write(ev)
+                self.wfile.flush()
+        # noqa: E501
         elif self.path == "/v1/messages_sse":  # noqa: E501
             self.send_response(200)  # noqa: E501
             self.send_header("Content-Type", "text/event-stream")  # noqa: E501

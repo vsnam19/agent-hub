@@ -64,3 +64,14 @@ def test_render_skips_infra_errors():
     out = render(records)
     assert "1/1" in out
     assert "1/2" not in out
+
+
+def test_render_uses_real_newlines():
+    records = [
+        {"model": "m", "harness": "h", "task": "t1", "pass": True, "wall_s": 10, "usage": None, "mem": None},
+    ]
+    out = render(records)
+    assert "\\n" not in out
+    lines = out.splitlines()
+    assert len(lines) > 3
+    assert any(line.startswith("| Harness") for line in lines)

@@ -176,3 +176,20 @@ def test_client_disconnect_mid_stream_is_logged_not_raised(tmp_path, fake_upstre
     logs = [json.loads(line) for line in log_path.read_text().splitlines()]
     assert logs[-1]["error"] == "client disconnected"
     assert "Traceback" not in capsys.readouterr().err
+
+
+def test_responses_api_usage_recorded(tmp_path, fake_upstream):
+    log_path = tmp_path / "proxy.jsonl"
+    proxy = RecordingProxy(fake_upstream.url, log_path)
+    url = proxy.start()
+
+    req = urllib.request.Request(f"{url}/v1/responses_sse", method="POST", data=b"{}")
+    with urllib.request.urlopen(req) as resp:
+        resp.read()
+
+    proxy.stop()
+
+    logs = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert len(logs) == 1
+    assert logs[0]["usage"] == {"prompt_tokens": 120, "completion_tokens": 30, "cached_tokens": 80}
+    assert proxy.summary()["prompt_tokens"] == 120
