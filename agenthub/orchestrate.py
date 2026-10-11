@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import threading
+import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -34,6 +35,7 @@ EXIT = {
 }
 
 GATE_TIMEOUT_S = 600
+REPO_CONFIG = Path(".agent-hub") / "config.toml"
 
 FALLBACK = (Outcome.QUOTA, Outcome.AUTH, Outcome.MODEL_UNAVAILABLE)
 TERMINAL = {Outcome.EMPTY: "empty", Outcome.TIMEOUT: "timeout", Outcome.FAILED: "failed"}
@@ -52,6 +54,30 @@ class RunArgs:
     kind: str = ""
     exclude: list[str] = dataclasses.field(default_factory=list)  # agent:model links to skip (e.g. the implementer)
     allow: list[str] = dataclasses.field(default_factory=list)  # repo-relative globs the run may change
+
+
+def repo_gates(root: Path) -> list[str]:
+    """Default gates from `<repo root>/.agent-hub/config.toml`; none when the file is absent."""
+    path = root / REPO_CONFIG
+    if not path.is_file():
+        return []
+    try:
+        data = tomllib.loads(path.read_text())
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"{path}: {e}") from e
+    gates = data.get("gates", [])
+    if not isinstance(gates, list) or not all(isinstance(g, str) for g in gates):
+        raise ConfigError(f"{path}: gates must be a list of strings")
+    return gates
+
+
+def merge_gates(repo: list[str], cli: list[str]) -> list[str]:
+    """Repo gates first, then the command-line ones; a command in both runs once, at its first place."""
+    merged: list[str] = []
+    for cmd in [*repo, *cli]:
+        if cmd not in merged:
+            merged.append(cmd)
+    return merged
 
 
 class _Cancel:
@@ -103,6 +129,10 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
             diff = guards.review_diff(repo, base)
     except guards.GuardError as e:
         refusal = str(e)
+
+    gates = args.gates
+    if kind == "implement" and repo is not None:
+        gates = merge_gates(repo_gates(repo.root), args.gates)
 
     if kind == "review" and base is None:
         base = args.base or (repo.default_branch if repo else "HEAD")
@@ -259,12 +289,12 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         record["handoff_missing"] = False
 
     record["gate"] = []
-    if status == "ok" and kind == "implement" and args.gates:
+    if status == "ok" and kind == "implement" and gates:
         gate_env, _ = env.child_env(os.environ, ())
         gate_dir = job.dir / "gate"
         gate_dir.mkdir(exist_ok=True)
 
-        for n, cmd in enumerate(args.gates, start=1):
+        for n, cmd in enumerate(gates, start=1):
             attempt_dir = gate_dir / str(n)
             attempt_dir.mkdir(exist_ok=True)
 
