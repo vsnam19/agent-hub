@@ -320,6 +320,53 @@ def test_review_brief_has_no_footer(env_sandbox, repo):
     assert "## Status" not in (job_dir(result) / "brief.md").read_text()
 
 
+def test_standing_orders_user_and_repo_appended_in_order(env_sandbox, repo):
+    (env_sandbox.config / "standing-orders.md").write_text("USER RULE\n")
+    (repo / ".agent-hub").mkdir()
+    (repo / ".agent-hub" / "standing-orders.md").write_text("PROJECT RULE\n")
+    result = go(repo, ["codex:m1"])
+    sent = fake_calls(env_sandbox.fakelog, "codex")[0]["stdin"]
+    assert sent.index(BRIEF.strip()) < sent.index("## Standing orders") < sent.index("USER RULE")
+    assert sent.index("USER RULE") < sent.index("PROJECT RULE") < sent.index("## Status")
+    assert (job_dir(result) / "brief.md").read_text() == sent
+
+
+def test_no_standing_orders_when_files_absent_or_empty(env_sandbox, repo):
+    result = go(repo, ["codex:m1"])
+    sent = fake_calls(env_sandbox.fakelog, "codex")[0]["stdin"]
+    assert "## Standing orders" not in sent
+    assert "## Standing orders" not in (job_dir(result) / "brief.md").read_text()
+
+    (env_sandbox.config / "standing-orders.md").write_text("  \n\n")
+    (repo / ".agent-hub").mkdir()
+    (repo / ".agent-hub" / "standing-orders.md").write_text("")
+    result = go(repo, ["codex:m1"])
+    assert "## Standing orders" not in (job_dir(result) / "brief.md").read_text()
+
+
+def test_unreadable_standing_orders_warns_and_continues(env_sandbox, repo, capsys):
+    # Invalid UTF-8 cannot be read as text: the user file is skipped, the project file still applies.
+    (env_sandbox.config / "standing-orders.md").write_bytes(b"\xff\xfe\x00 not text")
+    (repo / ".agent-hub").mkdir()
+    (repo / ".agent-hub" / "standing-orders.md").write_text("PROJECT RULE\n")
+    result = go(repo, ["codex:m1"])
+    assert result["status"] == "ok"
+    sent = fake_calls(env_sandbox.fakelog, "codex")[0]["stdin"]
+    assert "PROJECT RULE" in sent
+    assert "## Status" in sent
+    assert "skipping standing orders" in capsys.readouterr().err
+
+
+def test_review_brief_gets_standing_orders_but_no_handoff_footer(env_sandbox, repo):
+    (env_sandbox.config / "standing-orders.md").write_text("USER RULE\n")
+    result = go(repo, ["codex:m1"], role="review", brief="Focus on locking.", base="master")
+    assert result["status"] == "ok"
+    sent = fake_calls(env_sandbox.fakelog, "codex")[0]["stdin"]
+    assert sent.index("Focus on locking.") < sent.index("## Standing orders") < sent.index("USER RULE")
+    assert "## Status" not in sent
+    assert "## Status" not in (job_dir(result) / "brief.md").read_text()
+
+
 def test_handoff_parsed_into_result(env_sandbox, repo, monkeypatch):
     scenario(monkeypatch, "agy", "handoff")
     result = go(repo, ["agy:m1"])
