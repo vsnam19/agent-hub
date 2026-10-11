@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from agenthub.agents import Outcome, Request
-from agenthub.agents.codex import CodexAdapter
+from agenthub.agents.codex import CodexAdapter, parse_try_again_at
 from agenthub.process import run
 
 
@@ -156,6 +156,26 @@ def test_codex_quota_reset_time_parsed(env_sandbox, adapter_codex, req_codex):
     diff = c.reset_at - now
     # 3600s
     assert abs(diff.total_seconds() - 3600) < 10
+
+
+def test_parse_try_again_at_real_message():
+    msg = (
+        "You've hit your usage limit. Upgrade to Plus to continue using Codex "
+        "(https://chatgpt.com/explore/plus), or try again at Nov 7th, 2026 2:18 AM."
+    )
+    assert parse_try_again_at(msg) == datetime(2026, 11, 7, 2, 18).astimezone().astimezone(timezone.utc)
+
+
+def test_parse_try_again_at_pm():
+    result = parse_try_again_at("try again at Dec 1st, 2026 11:05 PM.")
+    assert result is not None
+    local = result.astimezone()
+    assert local.hour == 23
+    assert local.minute == 5
+
+
+def test_parse_try_again_at_absent():
+    assert parse_try_again_at("You've hit your usage limit.") is None
 
 
 def test_codex_classify_auth(env_sandbox, adapter_codex, req_codex):

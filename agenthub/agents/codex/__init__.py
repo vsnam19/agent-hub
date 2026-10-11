@@ -6,6 +6,19 @@ from pathlib import Path
 from agenthub.agents import Adapter, Classified, Invocation, Outcome, Request, common_stderr_text
 
 
+def parse_try_again_at(message: str) -> datetime | None:
+    """'... try again at Nov 7th, 2026 2:18 AM.' -> that local time as an aware UTC datetime; None if absent."""
+    m = re.search(
+        r"try again at ([A-Z][a-z]{2}) (\d{1,2})(?:st|nd|rd|th)?, (\d{4}) (\d{1,2}):(\d{2}) ?(AM|PM)",
+        message,
+    )
+    if m is None:
+        return None
+    mon, day, year, hh, mm, ampm = m.groups()
+    local = datetime.strptime(f"{mon} {day} {year} {hh}:{mm} {ampm}", "%b %d %Y %I:%M %p")
+    return local.astimezone().astimezone(timezone.utc)
+
+
 class CodexAdapter(Adapter):
     def build(self, req: Request) -> Invocation:
         argv = [
@@ -66,6 +79,8 @@ class CodexAdapter(Adapter):
             reset_at = None
             if reset_seconds is not None:
                 reset_at = datetime.now(timezone.utc) + timedelta(seconds=int(reset_seconds))
+            else:
+                reset_at = parse_try_again_at(" ".join(error_messages))
             return Classified(Outcome.QUOTA, reply=reply, reset_at=reset_at, detail=diag)
 
         if any(x in diag for x in ["not logged in", "login", "401", "unauthorized"]):
