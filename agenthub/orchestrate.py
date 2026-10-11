@@ -47,6 +47,7 @@ class RunArgs:
     base: str | None
     gates: list[str] = dataclasses.field(default_factory=list)
     jev: bool = False
+    kind: str = ""
 
 
 class _Cancel:
@@ -74,11 +75,12 @@ class _Cancel:
 
 
 def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) -> dict:
+    kind = args.kind or args.role
     adapters = registry()
     for link in args.links:
         if link.agent not in adapters:
             raise ConfigError(f"unknown agent in chain: {link.agent}")
-    briefmod.validate(args.role, args.brief)
+    briefmod.validate(kind, args.brief)
 
     started = now()
     workdir = args.workdir
@@ -88,7 +90,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     diff = ""
     try:
         repo = guards.inspect(workdir)
-        if args.role == "implement":
+        if kind == "implement":
             guards.check_implement(repo)
         else:
             base = args.base or repo.default_branch
@@ -96,7 +98,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     except guards.GuardError as e:
         refusal = str(e)
 
-    if args.role == "review" and base is None:
+    if kind == "review" and base is None:
         base = args.base or (repo.default_branch if repo else "HEAD")
 
     removed: set[str] = set()
@@ -116,11 +118,11 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         },
     )
     text = args.brief
-    if args.role == "review":
+    if kind == "review":
         diff_path = job.dir / "diff.patch"
         diff_path.write_text(diff)
         text = briefmod.review_text(base, args.brief, diff_path)
-    elif args.role == "implement":
+    elif kind == "implement":
         text += "\n" + handoff.FOOTER
     (job.dir / "brief.md").write_text(text)
     pid = os.getpid()
@@ -174,7 +176,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
 
             attempt_dir = job.attempt_dir(n, link.agent, link.model)
             req = Request(
-                role=args.role,
+                role=kind,
                 model=link.model,
                 workdir=workdir,
                 brief_path=job.dir / "brief.md",
@@ -208,7 +210,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
             if cl.outcome == Outcome.QUOTA:
                 cooldowns.set(link, cl.reset_at or (now() + pool.quota_cooldown))
 
-            if args.role == "review" and guards.fingerprint(repo) != before:
+            if kind == "review" and guards.fingerprint(repo) != before:
                 status = "modified-tree"
                 break
             if cl.outcome == Outcome.OK:
@@ -223,7 +225,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
             break
 
     record["handoff_inferred"] = None
-    if args.role == "implement":
+    if kind == "implement":
         reply_path = record.get("reply_path")
         parsed = None
         if reply_path and Path(reply_path).is_file():
@@ -240,7 +242,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         record["handoff_missing"] = False
 
     record["gate"] = []
-    if status == "ok" and args.role != "review" and args.gates:
+    if status == "ok" and kind == "implement" and args.gates:
         gate_env, _ = env.child_env(os.environ, ())
         gate_dir = job.dir / "gate"
         gate_dir.mkdir(exist_ok=True)
@@ -270,7 +272,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
                 status = "gate-failed"
                 break
 
-    if args.role == "implement" and status in ("ok", "gate-failed"):
+    if kind == "implement" and status in ("ok", "gate-failed"):
         from agenthub import gateguard
 
         record["gate_touched"] = gateguard.inspect_diff(repo, start_head)

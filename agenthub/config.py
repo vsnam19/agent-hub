@@ -80,10 +80,26 @@ def parse_duration(text: str) -> timedelta:
 
 
 @dataclass(frozen=True)
+class Role:
+    name: str
+    kind: str
+    chain: list[str]
+    escalate: str | None = None
+
+
+@dataclass(frozen=True)
 class Pool:
-    roles: dict[str, list[str]]
+    roles: dict[str, Role]
     quota_cooldown: timedelta
     timeouts: dict[str, timedelta]
+
+
+def role_kind(pool: Pool, role_name: str) -> str:
+    try:
+        return pool.roles[role_name].kind
+    except KeyError:
+        available = ", ".join(pool.roles)
+        raise ConfigError(f"unknown role {role_name!r}; available roles: {available}") from None
 
 
 def load_pool(p: Paths | None = None) -> Pool:
@@ -104,13 +120,40 @@ def load_pool(p: Paths | None = None) -> Pool:
         except Exception as e:
             raise ConfigError(f"{user_file}: {e}") from e
 
-    # Merge rules
-    roles = {}
+    # A user role replaces the corresponding built-in role.  Legacy roles infer
+    # their kind from their well-known name so pre-kind pool.toml files work.
+    role_data_by_name = {}
     for role, role_data in default_data.get("roles", {}).items():
-        roles[role] = role_data.get("chain", [])
+        role_data_by_name[role] = role_data
 
     for role, role_data in user_data.get("roles", {}).items():
-        roles[role] = role_data.get("chain", [])
+        role_data_by_name[role] = role_data
+
+    roles: dict[str, Role] = {}
+    for role_name, role_data in role_data_by_name.items():
+        if not isinstance(role_data, dict):
+            raise ConfigError(f"role {role_name!r} must be a table")
+        kind = role_data.get("kind", role_name if role_name in ("implement", "review") else None)
+        if kind not in ("implement", "review"):
+            raise ConfigError(f'role {role_name!r} must declare kind = "implement" or "review"')
+        chain = role_data.get("chain", [])
+        if not isinstance(chain, list) or not all(isinstance(link, str) for link in chain):
+            raise ConfigError(f"role {role_name!r} chain must be a list of agent:model strings")
+        escalate = role_data.get("escalate")
+        if escalate is not None and not isinstance(escalate, str):
+            raise ConfigError(f"role {role_name!r} escalate must name a role")
+        roles[role_name] = Role(name=role_name, kind=kind, chain=chain, escalate=escalate)
+
+    for role in roles.values():
+        if role.escalate is None:
+            continue
+        if role.kind != "implement":
+            raise ConfigError(f"review role {role.name!r} cannot escalate")
+        target = roles.get(role.escalate)
+        if target is None:
+            raise ConfigError(f"role {role.name!r} escalates to unknown role {role.escalate!r}")
+        if target.kind != "implement":
+            raise ConfigError(f"role {role.name!r} can only escalate to an implement role")
 
     defaults = default_data.get("defaults", {})
     user_defaults = user_data.get("defaults", {})
@@ -132,9 +175,9 @@ def load_pool(p: Paths | None = None) -> Pool:
         except ConfigError as e:
             raise ConfigError(f"{user_file}: {e}") from e
 
-    # Ensure every role has a timeout (fallback to 60m)
-    for role in roles:
-        if role not in timeouts:
-            timeouts[role] = timedelta(minutes=60)
+    # A role-specific timeout wins; otherwise its kind's timeout applies.
+    for role_name, role in roles.items():
+        if role_name not in timeouts:
+            timeouts[role_name] = timeouts.get(role.kind, timedelta(minutes=60))
 
     return Pool(roles=roles, quota_cooldown=quota_cooldown, timeouts=timeouts)

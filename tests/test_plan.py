@@ -63,7 +63,7 @@ def test_load_reports_all_problems(tmp_path):
     assert "slug must be [a-z0-9-]+" in msg
     assert "repo is not an existing git work tree" in msg
     assert "task 0: name must be [a-z0-9-]+" in msg
-    assert "role must be implement or review" in msg
+    assert "unknown role 'magic'" in msg
 
 
 def test_load_rejects_cycle(tmp_path):
@@ -160,3 +160,30 @@ def test_load_bad_slug_and_names(tmp_path):
         load(plan_file)
     assert "slug must be [a-z0-9-]+" in str(exc.value)
     assert "task 0: name must be [a-z0-9-]+" in str(exc.value)
+
+
+def test_plan_task_custom_role(monkeypatch, tmp_path):
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    (conf / "pool.toml").write_text('[roles.quick]\nkind = "implement"\nchain = ["claude:haiku"]\n')
+    monkeypatch.setenv("AGENT_HUB_CONFIG", str(conf))
+    repo_dir = make_repo(tmp_path / "repo")
+    plan_dir = tmp_path / "plan"
+    plan_dir.mkdir()
+    (plan_dir / "brief.md").write_text("brief")
+    plan_file = plan_dir / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "goal": "custom role",
+                "repo": str(repo_dir),
+                "base": "master",
+                "slug": "custom-role",
+                "tasks": [{"name": "fast", "role": "quick", "brief": "brief.md"}],
+            }
+        )
+    )
+
+    task = load(plan_file).tasks[0]
+    assert task.role == "quick"
+    assert task.kind == "implement"

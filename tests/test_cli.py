@@ -97,7 +97,8 @@ def test_pool_output_and_clear(env_sandbox, capsys):
     Cooldowns(paths().cooldowns_file).set(Link("agy", "claude-sonnet-4-6"), until)
     assert main(["pool"]) == 0
     out = capsys.readouterr().out
-    assert "implement:" in out and "review:" in out
+    assert "implement (implement, escalate → implement-hard):" in out
+    assert "review (review):" in out
     sonnet = next(line for line in out.splitlines() if "agy:claude-sonnet-4-6" in line)
     assert line_has(sonnet, "installed", "9.9.9", "cooldown until")
     opus = next(line for line in out.splitlines() if "agy:claude-opus-4-6-thinking" in line)
@@ -119,14 +120,44 @@ def test_pool_json(env_sandbox, capsys):
     )
     assert main(["pool", "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
-    assert set(data["roles"]) == {"implement", "review"}
-    entry = data["roles"]["review"][0]
+    assert set(data["roles"]) == {"implement-small", "implement", "implement-hard", "review"}
+    entry = next(e for e in data["roles"]["review"]["chain"] if e["link"] == "codex:gpt-5.6-terra")
     assert set(entry) == {"link", "installed", "version", "cooldown_until"}
     assert entry["link"] == "codex:gpt-5.6-terra"
     assert entry["installed"] is True and entry["version"] == "codex 9.9.9"
     assert entry["cooldown_until"] is not None
-    other = data["roles"]["review"][1]
+    other = next(e for e in data["roles"]["review"]["chain"] if e["link"] == "agy:gemini-3.1-pro-high")
     assert other["cooldown_until"] is None
+
+
+def test_run_accepts_custom_implement_role(env_sandbox, repo, tmp_path, capsys):
+    write_pool(
+        env_sandbox,
+        '[roles.quick]\nkind = "implement"\nchain = ["claude:haiku"]\n',
+    )
+    brief = write_brief(tmp_path, "missing headings")
+
+    assert main(["run", "--role", "quick", "--brief", str(brief), "-d", str(repo)]) == 2
+    assert "Input" in capsys.readouterr().err
+
+    brief = write_brief(tmp_path)
+    assert main(["run", "--role", "quick", "--brief", str(brief), "-d", str(repo), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["role"] == "quick"
+
+
+def test_run_unknown_role_exit_2(env_sandbox, repo, tmp_path, capsys):
+    rc = main(["run", "--role", "missing", "--brief", str(write_brief(tmp_path)), "-d", str(repo)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "unknown role 'missing'" in err
+    assert "implement-small" in err and "review" in err
+
+
+def test_pool_shows_kind_and_escalate(env_sandbox, capsys):
+    assert main(["pool"]) == 0
+    out = capsys.readouterr().out
+    assert "implement-small (implement, escalate → implement):" in out
+    assert "implement-hard (implement):" in out
 
 
 def test_profile_prints_and_unknown_exit_2(env_sandbox, capsys):
@@ -348,10 +379,12 @@ def test_wait_times_out_with_124(env_sandbox, repo, tmp_path, monkeypatch, capsy
     import sys
 
     monkeypatch.setenv("FAKE_AGY_SCENARIO", "slow")
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "slow")
     write_brief(repo)
 
     env = os.environ.copy()
     env["FAKE_AGY_SCENARIO"] = "slow"
+    env["FAKE_CLAUDE_SCENARIO"] = "slow"
     p = subprocess.Popen(
         [
             sys.executable,
@@ -384,6 +417,7 @@ def test_wait_follows_job_to_completion(env_sandbox, repo, tmp_path, capsys):
     import sys
 
     write_brief(repo)
+    write_pool(env_sandbox, '[roles.implement]\nchain = ["agy:claude-sonnet-4-6"]\n')
 
     env = os.environ.copy()
     env["FAKE_AGY_SCENARIO"] = "slow2"
@@ -437,6 +471,7 @@ def test_wait_json_output(env_sandbox, repo, tmp_path, monkeypatch, capsys):
 
 def test_wait_picks_newest_job_for_dir(env_sandbox, repo, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("FAKE_AGY_SCENARIO", "ok,empty")
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "ok,empty")
     write_brief(repo)
 
     # Run first job (status: ok)
