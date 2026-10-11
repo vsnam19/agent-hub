@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from agenthub.config import load_pool, paths
 from agenthub.guards import _git_argv
 from agenthub.plan import Plan, Task
 from agenthub.planstate import AttemptState, State, TaskState
@@ -18,6 +19,24 @@ PLAN_POLL_S = float(os.environ.get("AGENT_HUB_PLAN_POLL_S", "2.0"))
 def _kind(task: Task) -> str:
     """Keep programmatically constructed legacy tasks working in tests and integrations."""
     return task.kind or task.role
+
+
+def _implementer(vstate: TaskState) -> str | None:
+    """The agent:model that produced the verified task's final successful attempt, from its job record."""
+    ok = [a for a in vstate.attempts if a.status == "ok" and a.job]
+    if not ok:
+        return None
+    result_path = paths().jobs_dir / ok[-1].job / "result.json"
+    if not result_path.is_file():
+        return None
+    record = json.loads(result_path.read_text())
+    if not record.get("agent") or not record.get("model"):
+        return None
+    return f"{record['agent']}:{record['model']}"
+
+
+def _reviewers_besides(role: str, implementer: str) -> list[str]:
+    return [link for link in load_pool().roles[role].chain if link != implementer]
 
 
 def compose_brief(plan: Plan, task: Task, state: State, attempt_note: str) -> str:
@@ -111,6 +130,7 @@ def run_plan(
                 attempt_num = len(tstate.attempts) + 1
                 attempt_note = tstate.reason
 
+                exclude = None
                 if _kind(task) == "implement":
                     worktree_path = plan.repo.parent / f"{plan.repo.name}/.worktrees/{plan.slug}-{task.name}"
                     worktree_abs = worktree_path.resolve()
@@ -171,6 +191,12 @@ def run_plan(
                     tstate.worktree = vstate.worktree
                     tstate.branch = vstate.branch
                     tstate.start_ref = vstate.start_ref
+                    exclude = _implementer(vstate)
+                    if exclude and not _reviewers_besides(task.role, exclude):
+                        tstate.status = "blocked"
+                        tstate.reason = f"no reviewer different from {exclude}"
+                        changed = True
+                        continue
 
                 brief_text = compose_brief(plan, task, state, attempt_note)
 
@@ -204,6 +230,8 @@ def run_plan(
                     argv.extend(["--gate", g])
                 if _kind(task) == "review":
                     argv.extend(["--base", tstate.start_ref])
+                if exclude:
+                    argv.extend(["--exclude", exclude])
                 if plan.jev:
                     argv.append("--jev")
 
