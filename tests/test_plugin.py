@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -9,6 +10,25 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+AGENTS_DIR = REPO_ROOT / "agents"
+ORCHESTRATE_SKILL = REPO_ROOT / "skills" / "orchestrate" / "SKILL.md"
+MODELS = {"haiku", "sonnet", "opus"}
+
+
+def _split_agent(text):
+    match = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.DOTALL)
+    assert match, "agent file must start with YAML frontmatter"
+    fields = {}
+    for line in match.group(1).splitlines():
+        key, _, value = line.partition(":")
+        fields[key.strip()] = value.strip()
+    return fields, match.group(2)
+
+
+def _agent_files():
+    files = sorted(AGENTS_DIR.glob("*.md"))
+    assert files, "agents/ must ship at least one agent"
+    return files
 
 
 def test_plugin_manifest_fields():
@@ -78,3 +98,40 @@ def test_bin_wrapper_without_uv_exits_127(tmp_path):
     result = subprocess.run([str(bin_path), "--help"], cwd=tmp_path, env=env, capture_output=True, text=True)
     assert result.returncode == 127
     assert "agent-hub: uv is required (https://docs.astral.sh/uv/)" in result.stderr
+
+
+def test_agents_have_valid_frontmatter():
+    for path in _agent_files():
+        fields, _ = _split_agent(path.read_text(encoding="utf-8"))
+        assert fields["name"] == path.stem, f"{path.name} name must match its file stem"
+        assert fields["description"].startswith("Use when"), f"{path.name} description must start with 'Use when'"
+        assert fields["model"] in MODELS, f"{path.name} model must be one of {sorted(MODELS)}"
+        assert fields["tools"], f"{path.name} must list tools"
+
+
+def test_reviewers_cannot_edit():
+    read_only = [p for p in _agent_files() if p.stem == "explorer" or p.stem.startswith("reviewer-")]
+    assert {p.stem for p in read_only} == {
+        "explorer",
+        "reviewer-correctness",
+        "reviewer-evidence",
+        "reviewer-design",
+    }
+    for path in read_only:
+        fields, _ = _split_agent(path.read_text(encoding="utf-8"))
+        tools = {tool.strip() for tool in fields["tools"].split(",")}
+        assert not tools & {"Edit", "Write"}, f"{path.name} must not be able to edit files"
+
+
+def test_orchestrate_mentions_every_agent():
+    text = ORCHESTRATE_SKILL.read_text(encoding="utf-8")
+    for path in _agent_files():
+        assert f"agent-hub:{path.stem}" in text, f"orchestrate skill must mention agent-hub:{path.stem}"
+
+
+def test_implementer_has_handoff_headings():
+    path = AGENTS_DIR / "implementer.md"
+    _, body = _split_agent(path.read_text(encoding="utf-8"))
+    for heading in ("## Status", "## What I did", "## Verification"):
+        assert heading in body, f"implementer must end with {heading}"
+    assert "inconclusive" in body
