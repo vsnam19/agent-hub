@@ -105,6 +105,15 @@ verified `orch/<slug>/*` branches yourself.
 - **Review other-model.** A `verifies` task skips the link that implemented the task it checks; if no other
   reviewer exists the task is blocked with a reason instead of a self-review.
 
+## Claude Code agents
+
+The plugin ships role agents for Claude Code's Agent tool. Use them for work that needs no job record:
+
+- `agent-hub:implementer` for a trivial change whose checks the brief states, where a job's overhead is not worth it. You still verify it (step 7).
+- Anything that needs gates, records or fallback is an agent-hub job (step 5). That is the default.
+- `agent-hub:explorer` for any read that would otherwise pull many files into your context. It returns a digest with `path:line` citations.
+- `agent-hub:reviewer-correctness`, `agent-hub:reviewer-evidence` and `agent-hub:reviewer-design` form a panel for a risky change. Use the panel as the second lens of step 8 when the review chain is unavailable. Start the seats in one message so they run in parallel.
+
 ## Long sessions
 
 Every request re-reads the whole conversation, so a long session gets expensive with each tool call. At a phase
