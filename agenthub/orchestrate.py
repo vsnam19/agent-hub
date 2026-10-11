@@ -5,6 +5,7 @@ import fnmatch
 import json
 import os
 import signal
+import subprocess
 import threading
 import tomllib
 from dataclasses import dataclass
@@ -61,13 +62,29 @@ def repo_gates(root: Path) -> list[str]:
     path = root / REPO_CONFIG
     if not path.is_file():
         return []
+    return _parse_gates(path.read_text(), path)
+
+
+def base_repo_gates(repo: guards.Repo, since: str) -> tuple[list[str], str]:
+    """Default gates as committed at `since` (the merge base with the base branch), so a HEAD that edits its own
+    gate config cannot change the gates it is judged by. Falls back to the work tree's config when the base has none.
+    Returns the gates and their source: the merge base sha, or "worktree"."""
+    spec = f"{since}:{REPO_CONFIG.as_posix()}"
     try:
-        data = tomllib.loads(path.read_text())
+        text = guards._run_git(repo.root, "show", spec)
+    except subprocess.CalledProcessError:
+        return repo_gates(repo.root), "worktree"
+    return _parse_gates(text, spec), since
+
+
+def _parse_gates(text: str, where: object) -> list[str]:
+    try:
+        data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
-        raise ConfigError(f"{path}: {e}") from e
+        raise ConfigError(f"{where}: {e}") from e
     gates = data.get("gates", [])
     if not isinstance(gates, list) or not all(isinstance(g, str) for g in gates):
-        raise ConfigError(f"{path}: gates must be a list of strings")
+        raise ConfigError(f"{where}: gates must be a list of strings")
     return gates
 
 
@@ -123,17 +140,20 @@ def run_gates(gates: list[str], workdir: Path, gate_dir: Path, sha: str) -> tupl
 def run_gate_job(
     p: Paths,
     repo: guards.Repo,
-    repo_defaults: list[str],
+    worktree_defaults: list[str],
     cli_gates: list[str],
     base: str,
     since: str,
     now: Callable[[], datetime],
 ) -> dict:
     """Run the repo's default gates, then `cli_gates`, on the committed HEAD of a clean work tree and record them
-    as a `gate` job, with what the diff from `since` (the merge base with `base`) touched."""
+    as a `gate` job, with what the diff from `since` (the merge base with `base`) touched.
+    The default gates come from the merge base, never from `worktree_defaults` (the work tree's config, which HEAD
+    can edit; the caller still passes it, and it is not read)."""
     started = now()
     job = new_job(p, "gate", started)
     head = guards.head(repo)
+    defaults, source = base_repo_gates(repo, since)
     record: dict = {
         "id": job.id,
         "role": "gate",
@@ -146,7 +166,8 @@ def run_gate_job(
         "repo": str(repo.common_dir),
         "head": head,
         "base": base,
-        "repo_gates": repo_defaults,
+        "repo_gates": defaults,
+        "repo_gates_source": source,
         "started": started.isoformat(),
         "ended": None,
         "duration_s": None,
@@ -154,7 +175,7 @@ def run_gate_job(
         "diffstat": "",
         "reply_path": None,
     }
-    record["gate"], passed = run_gates(merge_gates(repo_defaults, cli_gates), repo.root, job.dir / "gate", head)
+    record["gate"], passed = run_gates(merge_gates(defaults, cli_gates), repo.root, job.dir / "gate", head)
     record["gate_touched"] = gateguard.inspect_diff(repo, since)
     return _finish(job, record, "ok" if passed else "gate-failed", now, started)
 

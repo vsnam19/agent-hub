@@ -6,6 +6,9 @@ from pathlib import Path
 
 from agenthub import guards
 
+# Repo-relative `.agent-hub/` files that set how the gates run (repo gates, standing orders).
+AGENT_HUB_GATE_CONFIG = {".agent-hub/config.toml", ".agent-hub/standing-orders.md"}
+
 
 @dataclass
 class Change:
@@ -61,6 +64,8 @@ def _is_test_file(path_str: str) -> bool:
 
 
 def _is_gate_config(path_str: str) -> bool:
+    if path_str in AGENT_HUB_GATE_CONFIG:
+        return True
     name = Path(path_str).name
     return name in {
         "justfile",

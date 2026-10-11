@@ -125,3 +125,55 @@ def test_gate_cmd_repo_gates_run_before_cli_gates(env_sandbox, repo, capsys):
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert [g["cmd"] for g in out["gate"]] == ["test -f README.md", "true"]
+
+
+def test_gate_job_uses_repo_gates_from_merge_base(env_sandbox, repo, capsys):
+    set_repo_gates(repo, ["test -f README.md"])
+    subprocess.run(["git", "branch", "-f", "master"], cwd=repo, check=True)
+    base = git_head(repo)
+    (repo / "feature.txt").write_text("x\n")
+    subprocess.run(["git", "add", "feature.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feature"], cwd=repo, check=True)
+
+    rc = main(["gate", "-d", str(repo), "--gate", "true", "--json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["repo_gates"] == ["test -f README.md"]
+    assert out["repo_gates_source"] == base
+    assert [g["cmd"] for g in out["gate"]] == ["test -f README.md", "true"]
+    assert out["gate_touched"] == []
+
+
+def test_weakened_config_in_head_is_ignored_and_flagged(env_sandbox, repo, capsys):
+    set_repo_gates(repo, ["test -f README.md"])
+    subprocess.run(["git", "branch", "-f", "master"], cwd=repo, check=True)
+    base = git_head(repo)
+    set_repo_gates(repo, ["true"])
+
+    rc = main(["gate", "-d", str(repo), "--json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["repo_gates_source"] == base
+    assert [g["cmd"] for g in out["gate"]] == ["test -f README.md"]
+    assert {"file": ".agent-hub/config.toml", "kind": "gate-config-changed", "lines": [1]} in out["gate_touched"]
+
+    rc = main(["ready", "-d", str(repo), "--json"])
+
+    ready_out = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert "gate touched: 1 findings — inspect before merging" in ready_out["problems"]
+
+
+def test_gate_job_falls_back_to_worktree_config_when_base_has_none(env_sandbox, repo, capsys):
+    set_repo_gates(repo, ["test -f README.md"])
+
+    rc = main(["gate", "-d", str(repo), "--json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["repo_gates"] == ["test -f README.md"]
+    assert out["repo_gates_source"] == "worktree"
+    assert [g["cmd"] for g in out["gate"]] == ["test -f README.md"]
+    assert {"file": ".agent-hub/config.toml", "kind": "gate-config-changed", "lines": [1]} in out["gate_touched"]

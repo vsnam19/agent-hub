@@ -268,3 +268,20 @@ def test_commented_def_test_ignored(repo):
     (repo / "test_d.py").write_text("# def test_x():\n    assert 1\n")
     res = gateguard.inspect_diff(guards.inspect(repo), since)
     assert res == [{"file": "test_d.py", "kind": "test-deleted", "lines": [1]}]
+
+
+def test_agent_hub_config_is_gate_config(repo):
+    cfg = repo / ".agent-hub" / "config.toml"
+    cfg.parent.mkdir()
+    cfg.write_text('gates = ["true"]\n')
+    orders = repo / ".agent-hub" / "standing-orders.md"
+    orders.write_text("1. Be kind.\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add")
+    since = guards.head(guards.inspect(repo))
+
+    cfg.write_text('gates = ["false"]\n')
+    orders.write_text("1. Be unkind.\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert {"file": ".agent-hub/config.toml", "kind": "gate-config-changed", "lines": [1]} in res
+    assert {"file": ".agent-hub/standing-orders.md", "kind": "gate-config-changed", "lines": [1]} in res
