@@ -1,6 +1,7 @@
 """The run loop: walk a role's chain, attempt, classify, fall back, write the result record."""
 
 import dataclasses
+import fnmatch
 import json
 import os
 import signal
@@ -28,6 +29,7 @@ EXIT = {
     "empty": 7,
     "interrupted": 8,
     "gate-failed": 9,
+    "scope-violation": 10,
     "cancelled": 130,
 }
 
@@ -49,6 +51,7 @@ class RunArgs:
     jev: bool = False
     kind: str = ""
     exclude: list[str] = dataclasses.field(default_factory=list)  # agent:model links to skip (e.g. the implementer)
+    allow: list[str] = dataclasses.field(default_factory=list)  # repo-relative globs the run may change
 
 
 class _Cancel:
@@ -295,6 +298,16 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
 
     files, stat = guards.changes(repo, start_head)
     record.update(changed_files=files, diffstat=stat)
+    if args.allow and kind == "implement" and status in ("ok", "gate-failed"):
+        outside = [
+            f
+            for f in files
+            if not any(fnmatch.fnmatch(f, g) or fnmatch.fnmatch(f, g.replace("**", "*")) for g in args.allow)
+        ]
+        if outside:
+            record["scope_violation"] = outside
+            if status == "ok":
+                status = "scope-violation"
     return _finish(job, record, status or "exhausted", now, started)
 
 

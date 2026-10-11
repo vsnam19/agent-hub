@@ -135,6 +135,7 @@ or data, and force operations. "Don't stop" or "run until done" from the user me
 | `empty` | 7 | The agent exited cleanly but returned nothing. | Inspect the tree; the work may still be done. Re-brief or escalate. |
 | `interrupted` | 8 | Quota, auth or model failure after the tree had changed; no fallback. | Inspect the half-done tree, then finish it yourself or re-brief a fresh run from a clean state. |
 | `gate-failed` | 9 | A gate command failed. | Read the gate tail; re-brief, escalate one tier, or fix. |
+| `scope-violation` | 10 | `--allow` was given and the run changed files outside the globs (`scope_violation` lists them). | Nothing is reverted; inspect the listed files, revert them or re-brief with a tighter scope. |
 | `cancelled` | 130 | `agent-hub cancel` or Ctrl-C. | Inspect the tree; start again only if still wanted. |
 
 Exit code 2 has no status: it means a usage or configuration error (bad flag, unknown agent or role, brief missing a

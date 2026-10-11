@@ -29,7 +29,15 @@ def make_pool(**kw):
 
 
 def args_for(
-    repo, links, role="implement", brief=BRIEF, timeout=timedelta(seconds=30), base=None, gates=None, jev=False
+    repo,
+    links,
+    role="implement",
+    brief=BRIEF,
+    timeout=timedelta(seconds=30),
+    base=None,
+    gates=None,
+    jev=False,
+    allow=None,
 ):
     return RunArgs(
         role=role,
@@ -40,6 +48,7 @@ def args_for(
         base=base,
         gates=gates or [],
         jev=jev,
+        allow=allow or [],
     )
 
 
@@ -479,3 +488,34 @@ def test_jev_off_by_default(env_sandbox, repo, monkeypatch, tmp_path):
     assert result["status"] == "ok"
     assert result.get("handoff_missing") is True
     assert result.get("handoff_inferred") is None
+
+
+def test_allow_scope_ok(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "agy", "write")
+    result = go(repo, ["agy:m1"], allow=["agent_*.txt"])
+    assert result["status"] == "ok"
+    assert result["exit_code"] == 0
+    assert "scope_violation" not in result
+
+
+def test_allow_scope_violation_exit_10(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "agy", "write")
+    result = go(repo, ["agy:m1"], allow=["src/**"], gates=["test -f agent_wrote.txt"])
+    assert result["status"] == "scope-violation"
+    assert result["exit_code"] == 10
+    assert result["scope_violation"] == ["agent_wrote.txt"]
+    assert result["gate"][0]["rc"] == 0
+
+
+def test_allow_scope_deleted_file_counts(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "agy", "delete")
+    result = go(repo, ["agy:m1"], allow=["src/**"])
+    assert result["status"] == "scope-violation"
+    assert result["scope_violation"] == ["README.md"]
+
+
+def test_no_allow_no_scope_check(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "agy", "write")
+    result = go(repo, ["agy:m1"])
+    assert result["status"] == "ok"
+    assert "scope_violation" not in result
