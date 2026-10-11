@@ -5,6 +5,13 @@ from pathlib import Path
 
 from agenthub.agents import Adapter, Classified, Invocation, Outcome, Request, common_stderr_text
 
+WORKER_PROMPT = (
+    "You are a non-interactive worker run by agent-hub. Write in English. "
+    "Do not run commands in the background and do not wait for notifications: "
+    "run every command in the foreground until it finishes. "
+    "Your final message is parsed by a program: end with the handoff exactly as the brief asks."
+)
+
 
 class ClaudeAdapter(Adapter):
     def build(self, req: Request) -> Invocation:
@@ -16,6 +23,10 @@ class ClaudeAdapter(Adapter):
             "--output-format",
             "json",
             "--no-session-persistence",
+            "--setting-sources",
+            "project,local",
+            "--append-system-prompt",
+            WORKER_PROMPT,
         ]
 
         if req.role == "implement":
