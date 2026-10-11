@@ -519,3 +519,42 @@ def test_no_allow_no_scope_check(env_sandbox, repo, monkeypatch):
     result = go(repo, ["agy:m1"])
     assert result["status"] == "ok"
     assert "scope_violation" not in result
+
+
+def commit_repo_config(repo, gates):
+    import subprocess
+
+    cfg = repo / ".agent-hub" / "config.toml"
+    cfg.parent.mkdir()
+    cfg.write_text("gates = [" + ", ".join(f'"{g}"' for g in gates) + "]\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "repo gates"], cwd=repo, check=True)
+
+
+def test_repo_default_gates_run(env_sandbox, repo, monkeypatch, tmp_path):
+    marker = tmp_path / "repo_gate_ran"
+    commit_repo_config(repo, [f"touch {marker}"])
+    scenario(monkeypatch, "agy", "write")
+    result = go(repo, ["agy:m1"])
+    assert result["status"] == "ok"
+    assert marker.is_file()
+    assert [g["cmd"] for g in result["gate"]] == [f"touch {marker}"]
+
+
+def test_repo_and_cli_gates_merged_once(env_sandbox, repo, monkeypatch, tmp_path):
+    log = tmp_path / "gate_order.log"
+    repo_cmds = [f"echo repo1 >> {log}", f"echo shared >> {log}"]
+    cli_cmds = [f"echo shared >> {log}", f"echo cli1 >> {log}"]
+    commit_repo_config(repo, repo_cmds)
+    scenario(monkeypatch, "agy", "write")
+    result = go(repo, ["agy:m1"], gates=cli_cmds)
+    assert result["status"] == "ok"
+    assert [g["cmd"] for g in result["gate"]] == [*repo_cmds, cli_cmds[1]]
+    assert log.read_text().splitlines() == ["repo1", "shared", "cli1"]
+
+
+def test_no_repo_config_no_extra_gates(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "agy", "write")
+    result = go(repo, ["agy:m1"], gates=["test -f agent_wrote.txt"])
+    assert result["status"] == "ok"
+    assert [g["cmd"] for g in result["gate"]] == ["test -f agent_wrote.txt"]
