@@ -190,24 +190,31 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
                 attempt_dir=attempt_dir,
                 git_common_dir=repo.common_dir,
             )
-            inv = adapter.build(req)
-            child_env, _ = env.child_env(os.environ, adapter.config.env_passthrough)
+            cl = adapter.preflight(req)
+            if cl is not None:
+                ran = None
+            else:
+                inv = adapter.build(req)
+                child_env, _ = env.child_env(os.environ, adapter.config.env_passthrough)
 
-            def on_start(pgid: int, n=n, link=link, attempt_dir=attempt_dir) -> None:
-                cancel.pgid = pgid
-                job.write_json(
-                    _rel(job, attempt_dir, "attempt.json"),
-                    {"n": n, "agent": link.agent, "model": link.model, "pgid": pgid, "started": now().isoformat()},
-                )
+                def on_start(pgid: int, n=n, link=link, attempt_dir=attempt_dir) -> None:
+                    cancel.pgid = pgid
+                    job.write_json(
+                        _rel(job, attempt_dir, "attempt.json"),
+                        {"n": n, "agent": link.agent, "model": link.model, "pgid": pgid, "started": now().isoformat()},
+                    )
 
-            ran = process.run(inv, workdir, child_env, attempt_dir, args.timeout, on_start=on_start)
-            cancel.pgid = None
+                ran = process.run(inv, workdir, child_env, attempt_dir, args.timeout, on_start=on_start)
+                cancel.pgid = None
 
-            cl = adapter.classify(ran.rc, attempt_dir)
-            if ran.timed_out:
-                cl = dataclasses.replace(cl, outcome=Outcome.TIMEOUT)
+                cl = adapter.classify(ran.rc, attempt_dir)
+                if ran.timed_out:
+                    cl = dataclasses.replace(cl, outcome=Outcome.TIMEOUT)
             _write_reply(attempt_dir, cl)
-            entry.update(outcome=str(cl.outcome), rc=ran.rc, duration_s=round(ran.duration_s, 3))
+            if ran is None:
+                entry.update(outcome=str(cl.outcome), reason=cl.detail)
+            else:
+                entry.update(outcome=str(cl.outcome), rc=ran.rc, duration_s=round(ran.duration_s, 3))
             record.update(agent=link.agent, model=link.model, reply_path=str(attempt_dir / "reply.md"))
 
             if cancel.cancelled:

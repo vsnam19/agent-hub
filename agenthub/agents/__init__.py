@@ -40,6 +40,7 @@ class Request:
 class Invocation:
     argv: list[str]
     stdin_path: Path | None
+    env: dict[str, str] | None = None  # extra child variables over the filtered env; never recorded
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,9 @@ class Adapter:
     name: str
     config: AgentConfig
     profile_path: Path
+
+    def preflight(self, req: Request) -> Classified | None:
+        return None
 
     def build(self, req: Request) -> Invocation:
         raise NotImplementedError

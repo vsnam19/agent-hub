@@ -5,8 +5,7 @@ timeout = { implement = "60m", review = "20m" }
 [roles.implement-small]
 kind = "implement"
 escalate = "implement"
-# chain = ["gwen:qwen2.5-coder-14b", "claude:haiku"]
-chain = ["claude:haiku"]
+chain = ["gwen:qwen3.5-9b-4bit", "claude:haiku"]
 
 [roles.implement]
 kind = "implement"
