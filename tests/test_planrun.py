@@ -63,6 +63,7 @@ def make_plan(tmp_path, tasks):
             name=t["name"],
             role=t.get("role", "implement"),
             kind=t.get("kind"),
+            agent=t.get("agent"),
             brief=brief_path if t.get("kind", t.get("role", "implement")) == "implement" else None,
             verifies=t.get("verifies"),
             depends_on=t.get("depends_on", []),
@@ -470,6 +471,31 @@ def test_escalation_resets_committed_work(tmp_path):
         ["git", "rev-parse", state.task("t1").start_ref], cwd=wt, capture_output=True, text=True
     ).stdout.strip()
     assert head == start
+
+
+def test_escalation_ignores_agent_pin(tmp_path):
+    plan = make_plan(
+        tmp_path, [{"name": "t1", "role": "implement-small", "kind": "implement", "agent": "claude:haiku"}]
+    )
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [_gate_failed(), _gate_failed(), {"status": "ok"}]})
+    assert run_plan(plan, state, spawn) == 0
+    assert [_role_of(a) for a, _ in spawn.spawns] == ["implement-small", "implement-small", "implement"]
+    pins = [a[a.index("--agent") + 1] if "--agent" in a else None for a, _ in spawn.spawns]
+    assert pins == ["claude:haiku", "claude:haiku", None]
+
+
+def test_pin_applies_before_escalation(tmp_path):
+    plan = make_plan(
+        tmp_path, [{"name": "t1", "role": "implement-small", "kind": "implement", "agent": "claude:haiku"}]
+    )
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [{"status": "ok"}]})
+    assert run_plan(plan, state, spawn) == 0
+    assert len(spawn.spawns) == 1
+    argv, _ = spawn.spawns[0]
+    assert argv[argv.index("--agent") + 1] == "claude:haiku"
+    assert state.task("t1").escalated_from == ""
 
 
 def test_exhausted_does_not_escalate(tmp_path):
