@@ -160,3 +160,19 @@ left its work uncommitted and every dependent task started from an upstream bran
 
 Tests: `test_done_task_with_uncommitted_work_is_committed`, `test_failed_gate_is_not_committed`,
 `test_dependent_starts_from_autocommitted_work`.
+
+---
+
+### Task 7: escalation drops the agent pin (`escalate-unpin`)
+
+Found 2026-10-11 in review of task 3: a task pinned with `"agent"` kept that agent after escalating, so the
+"stronger" attempt ran on the same model.
+
+**Files:** Modify `agenthub/planrun.py`; tests in `tests/test_planrun.py`.
+
+- When a task runs at an escalated role (`tstate.escalated_from` is set), the job uses the escalated role's chain:
+  do not pass the task's `agent` pin (`--agent`). Before escalation the pin applies as today.
+- `plan status` already shows `escalated from <role>`; no change there.
+
+Tests: `test_escalation_ignores_agent_pin` (a task pinned to `claude:haiku` at `implement-small` that fails its gate
+twice is re-run at `implement` with no `--agent` in argv), `test_pin_applies_before_escalation`.
