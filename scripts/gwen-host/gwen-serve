@@ -8,4 +8,4 @@ MODEL="$(head -n1 "$HOME/.config/gwen/model")"
 # Clients reach the server through gwen-tap (dev.vsn.gwen-tap) on the Tailscale address; this binds loopback only.
 HOST="127.0.0.1"
 exec rapid-mlx serve "$MODEL" --host "$HOST" --port 8643 --yes --idle-unload-seconds 1800 --lazy-load \
-  --cache-memory-mb 512 --context-length 14000
+  --cache-memory-mb 512 --context-length 14000 --max-num-seqs 1 --max-concurrent-requests 1
