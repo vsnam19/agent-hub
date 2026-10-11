@@ -106,3 +106,25 @@ Files: `agenthub/orchestrate.py`, `agenthub/handoff.py`, `agenthub/cli.py`, `age
 - Tests: `test_ready_when_gated_and_approved_on_head`, `test_not_ready_review_stale_after_commit`,
   `test_not_ready_request_changes`, `test_not_ready_reviewer_is_implementer`, `test_parse_review_verdict`,
   `test_result_records_head_and_gate_sha`.
+
+---
+
+### Task `scoped-cancel` (implement) — a project cancels only its own jobs (D-078); after the trust plan
+
+Files: `agenthub/orchestrate.py` (record `repo`), `agenthub/cli.py` (`cancel`, `cancel --all`, `jobs --all`,
+`plan cancel`), `agenthub/planrun.py` / `agenthub/planstate.py` (runner pid + start time); tests in
+`tests/test_cancel.py` (new), `tests/test_plan_cli.py`.
+- `request.json`/`result.json` gain `repo` = the resolved git common dir of the work tree at job start.
+- Ownership check: the caller's repository = git common dir of `-d <dir>` (default cwd); a job without `repo` (older
+  record) derives it from its `workdir` if that still exists, else it is treated as foreign.
+- `cancel <id>`: foreign job → exit 3, message `job <id> belongs to <repo>; run cancel from that repository`.
+  Own job → today's behaviour (verify pid start time, SIGTERM).
+- `cancel --all [-d <dir>]`: every running job of the caller's repository; prints one line per job; exit 0.
+- `jobs` lists only the caller's repository's jobs; `jobs --all` lists all (read-only).
+- `plan run` records `runner: {pid, start_time}` in the plan state; `plan cancel <plan.json>`: verifies the pid's start
+  time, SIGTERMs the runner (which already cancels its running job on SIGTERM — check; add if not), and cancels the
+  plan's running task jobs; state tasks running → `cancelled`.
+- Tests: `test_cancel_foreign_job_refused_exit_3`, `test_cancel_own_job_from_other_worktree_same_repo`,
+  `test_cancel_all_only_own_repo`, `test_jobs_default_scoped_all_flag_lists_everything`,
+  `test_legacy_job_without_repo_derived_from_workdir`, `test_plan_cancel_stops_runner_and_jobs`,
+  `test_plan_cancel_wrong_pid_start_time_not_signalled`.
