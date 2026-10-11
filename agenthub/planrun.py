@@ -246,7 +246,7 @@ def run_plan(
                     tstate.worktree,
                     "--json",
                 ]
-                if task.agent:
+                if task.agent and not tstate.escalated_from:
                     argv.extend(["--agent", task.agent])
                 if task.timeout:
                     argv.extend(["--timeout", task.timeout])
