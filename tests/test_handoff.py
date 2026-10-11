@@ -1,4 +1,4 @@
-from agenthub.handoff import FOOTER, parse, parse_verdict
+from agenthub.handoff import FOOTER, REVIEW_FOOTER, parse, parse_verdict
 
 
 def test_parse_full_handoff():
@@ -134,3 +134,10 @@ def test_parse_review_verdict():
     assert parse_verdict("## Verdict\napprove\n\n## Verdict\nrequest-changes\n") == "request-changes"
     assert parse_verdict("## Verdict\nmaybe\n") is None
     assert parse_verdict("no findings") is None
+
+
+def test_review_footer_asks_for_findings_and_verdict_in_final_message():
+    assert "## Findings" in REVIEW_FOOTER
+    assert "## Verdict" in REVIEW_FOOTER
+    assert "only part of your answer that is kept" in REVIEW_FOOTER
+    assert REVIEW_FOOTER.index("## Findings") < REVIEW_FOOTER.index("## Verdict")
