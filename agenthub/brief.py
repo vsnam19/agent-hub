@@ -1,9 +1,33 @@
 import re
+import sys
 from pathlib import Path
 
 
 class BriefError(Exception):
     pass
+
+
+def standing_orders(config_dir: Path, repo_root: Path | None) -> str:
+    """The `## Standing orders` section: user file, then project file; each only if non-empty after strip."""
+    sources = [config_dir / "standing-orders.md"]
+    if repo_root is not None:
+        sources.append(repo_root / ".agent-hub" / "standing-orders.md")
+
+    bodies = []
+    for source in sources:
+        if not source.is_file():
+            continue
+        try:
+            body = source.read_text().strip()
+        except (OSError, UnicodeDecodeError) as e:
+            print(f"agent-hub: skipping standing orders {source}: {e}", file=sys.stderr)
+            continue
+        if body:
+            bodies.append(body)
+
+    if not bodies:
+        return ""
+    return "## Standing orders\n\n" + "\n\n".join(bodies)
 
 
 def validate(role: str, text: str) -> None:

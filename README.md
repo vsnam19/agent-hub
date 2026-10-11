@@ -101,6 +101,14 @@ Run a graph of tasks with `agent-hub plan run <plan.json>`. The file defines the
 the answer goes to `handoff_inferred` and never changes the status. Setup: Ollama ≥ 0.35 with `nimble` pulled, and
 `jev-code` on PATH (or `AGENT_HUB_JEV_BIN`): `npm install --prefix ~/.local/share/jev-code @french-castle/jev-code`.
 
+### Standing orders
+
+Rules that every implement and review brief must carry. agent-hub appends `~/.config/agent-hub/standing-orders.md`
+(or `$AGENT_HUB_CONFIG/standing-orders.md`) and then `<repo>/.agent-hub/standing-orders.md`, each only if it exists and
+is non-empty, under `## Standing orders`, after the brief and before the handoff footer. An unreadable file is skipped
+with a warning on stderr. The text sent is recorded in the job's `brief.md`. A starting point is in
+`docs/standing-orders.example.md`.
+
 ## Exit codes
 
 | Exit | Status | Meaning |

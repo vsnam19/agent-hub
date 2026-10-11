@@ -120,7 +120,10 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         diff_path = job.dir / "diff.patch"
         diff_path.write_text(diff)
         text = briefmod.review_text(base, args.brief, diff_path)
-    elif args.role == "implement":
+    standing = briefmod.standing_orders(p.config_dir, repo.root if repo else None)
+    if standing:
+        text += "\n\n" + standing
+    if args.role == "implement":
         text += "\n" + handoff.FOOTER
     (job.dir / "brief.md").write_text(text)
     pid = os.getpid()
