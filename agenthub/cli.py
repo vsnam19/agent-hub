@@ -14,7 +14,7 @@ from agenthub.agents import registry
 from agenthub.brief import BriefError, order_table
 from agenthub.config import ConfigError, load_pool, parse_duration, paths, role_kind
 from agenthub.jobs import get_job, list_jobs
-from agenthub.orchestrate import EXIT, RunArgs, merge_gates, readiness, repo_gates, run_gate_job, run_job
+from agenthub.orchestrate import EXIT, RunArgs, readiness, repo_gates, run_gate_job, run_job
 from agenthub.plan import PlanError
 from agenthub.plan import load as load_plan
 from agenthub.planrun import run_plan
@@ -117,7 +117,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     gate = sub.add_parser("gate", help="run the gates on the committed HEAD and record them (exit 9 if one fails)")
     gate.add_argument("-d", "--dir", default=".", dest="workdir", help="clean work tree to gate")
-    gate.add_argument("--gate", action="append", dest="gates", help="gate command to run (repeatable)")
+    gate.add_argument("--gate", action="append", dest="gates", help="gate command to run after the repo gates")
+    gate.add_argument(
+        "--base", help="ref whose merge base with HEAD bounds the test check (default: the default branch)"
+    )
     gate.add_argument("--json", action="store_true")
 
     return parser
@@ -338,10 +341,15 @@ def _cmd_gate(args) -> int:
         raise UsageError(str(e)) from None
     if guards._run_git(repo.root, "status", "--porcelain"):
         raise UsageError("commit first; gate runs on HEAD")
-    gates = merge_gates(repo_gates(repo.root), args.gates or [])
-    if not gates:
-        raise UsageError("no gates: pass --gate or set .agent-hub/config.toml")
-    result = run_gate_job(paths(), repo, gates, _now)
+    defaults = repo_gates(repo.root)
+    if not defaults:
+        raise UsageError("no repo gates: set gates in .agent-hub/config.toml")
+    base = args.base or repo.default_branch
+    try:
+        since = guards._run_git(repo.root, "merge-base", "HEAD", base)
+    except subprocess.CalledProcessError:
+        raise UsageError(f"no merge base of HEAD and {base}") from None
+    result = run_gate_job(paths(), repo, defaults, args.gates or [], base, since, _now)
     if args.json:
         print(json.dumps(result, indent=2))
     else:
@@ -385,6 +393,14 @@ def _cmd_jobs(args) -> int:
         dur = f"{r['duration_s']:.0f}s" if r.get("duration_s") is not None else "-"
         print(_safe("  ".join([r["id"], r["role"], r["status"], agent, dur, r["workdir"]])))
     return 0
+
+
+def _repo_or_none(workdir: str) -> str | None:
+    """The repository identity of a work tree, or None when the path is not a git work tree."""
+    try:
+        return _repo_of(workdir)
+    except UsageError:
+        return None
 
 
 def _load_job(job_id: str):
@@ -531,8 +547,56 @@ def _claim_runner(state) -> None:
     state.save()
 
 
+def _cmd_plan_cancel(args, plan_file: Path) -> int:
+    """Stop the plan's runner and its running jobs. Reads only the plan's repo and slug, so cancel still works
+    after the plan's repository has been removed."""
+    try:
+        data = json.loads(plan_file.read_text())
+    except (OSError, ValueError) as e:
+        raise UsageError(f"cannot read plan: {e}") from None
+    if not isinstance(data, dict) or "repo" not in data or "slug" not in data:
+        raise UsageError("plan needs repo and slug")
+    repo = str(Path(str(data["repo"])).resolve())
+    slug = str(data["slug"])
+    state_file = plan_file.parent / "state.json"
+
+    code = 0
+    if _repo_or_none(repo) is None:
+        print(_safe(f"plan repository missing: {repo}", sys.stderr), file=sys.stderr)
+        code = 3
+    elif _repo_or_none(args.workdir) != _repo_or_none(repo):
+        print(
+            _safe(f"plan {slug} belongs to {repo}; run plan cancel from that repository", sys.stderr), file=sys.stderr
+        )
+        return 3
+
+    if not state_file.is_file():
+        raise UsageError("state.json not found")
+    state_data = json.loads(state_file.read_text())
+
+    runner = state_data.get("runner") or {}
+    if _terminate_verified(runner.get("pid"), runner.get("start_time")):
+        print(_safe(f"sent SIGTERM to runner {runner['pid']}"))
+    else:
+        print(_safe("runner not verified; nothing signalled"))
+
+    # The runner cancels its own children on SIGTERM; cancel the jobs still running in the plan's work trees.
+    tasks = state_data.get("tasks", {})
+    running = [name for name, t in tasks.items() if t.get("status") == "running"]
+    worktrees = {Path(tasks[name]["worktree"]).resolve() for name in running if tasks[name].get("worktree")}
+    for r in list_jobs(paths(), ALL_JOBS):
+        if r.get("status") == "running" and r.get("workdir") and Path(r["workdir"]).resolve() in worktrees:
+            print(_safe(_cancel_job(get_job(paths(), r["id"]))))
+    for name in running:
+        tasks[name].update(status="cancelled", reason="cancelled")
+    state_file.write_text(json.dumps(state_data, indent=2) + "\n")
+    return code
+
+
 def _cmd_plan(args) -> int:
     plan_file = Path(args.plan_file).resolve()
+    if args.plan_command == "cancel":
+        return _cmd_plan_cancel(args, plan_file)
     plan = load_plan(plan_file)
     plan_dir = plan.path.parent
     state_file = plan_dir / "state.json"
@@ -591,35 +655,6 @@ def _cmd_plan(args) -> int:
                     if parsed:
                         line += f" handoff={parsed['status']} · {parsed['verification']}"
             print(_safe(line))
-        return 0
-
-    elif args.plan_command == "cancel":
-        if _repo_of(args.workdir) != _repo_of(str(plan.repo)):
-            print(
-                _safe(f"plan {plan.slug} belongs to {plan.repo}; run plan cancel from that repository", sys.stderr),
-                file=sys.stderr,
-            )
-            return 3
-        if not state_file.is_file():
-            raise UsageError("state.json not found")
-        state_data = json.loads(state_file.read_text())
-
-        runner = state_data.get("runner") or {}
-        if _terminate_verified(runner.get("pid"), runner.get("start_time")):
-            print(_safe(f"sent SIGTERM to runner {runner['pid']}"))
-        else:
-            print(_safe("runner not verified; nothing signalled"))
-
-        # The runner cancels its own children on SIGTERM; cancel the jobs still running in the plan's work trees.
-        tasks = state_data.get("tasks", {})
-        running = [name for name, t in tasks.items() if t.get("status") == "running"]
-        worktrees = {Path(tasks[name]["worktree"]).resolve() for name in running if tasks[name].get("worktree")}
-        for r in list_jobs(paths(), ALL_JOBS):
-            if r.get("status") == "running" and r.get("workdir") and Path(r["workdir"]).resolve() in worktrees:
-                print(_safe(_cancel_job(get_job(paths(), r["id"]))))
-        for name in running:
-            tasks[name].update(status="cancelled", reason="cancelled")
-        state_file.write_text(json.dumps(state_data, indent=2) + "\n")
         return 0
 
     elif args.plan_command == "wait":

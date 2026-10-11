@@ -11,6 +11,13 @@ def git_head(repo):
     return res.stdout.strip()
 
 
+def set_repo_gates(repo, gates):
+    (repo / ".agent-hub").mkdir(exist_ok=True)
+    (repo / ".agent-hub" / "config.toml").write_text(f"gates = {json.dumps(gates)}\n")
+    subprocess.run(["git", "add", ".agent-hub"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "repo gates"], cwd=repo, check=True)
+
+
 def test_gate_cmd_refuses_dirty_tree(env_sandbox, repo, capsys):
     (repo / "dirty.txt").write_text("x\n")
 
@@ -22,6 +29,7 @@ def test_gate_cmd_refuses_dirty_tree(env_sandbox, repo, capsys):
 
 
 def test_gate_cmd_records_head_and_sha(env_sandbox, repo, capsys):
+    set_repo_gates(repo, ["test -f README.md"])
     head = git_head(repo)
 
     rc = main(["gate", "-d", str(repo), "--gate", "test -f README.md", "--json"])
@@ -43,7 +51,9 @@ def test_gate_cmd_records_head_and_sha(env_sandbox, repo, capsys):
 
 
 def test_gate_cmd_failure_exit_9(env_sandbox, repo, capsys):
-    rc = main(["gate", "-d", str(repo), "--gate", "echo nope; exit 4", "--gate", "true", "--json"])
+    set_repo_gates(repo, ["echo nope; exit 4"])
+
+    rc = main(["gate", "-d", str(repo), "--gate", "true", "--json"])
 
     out = json.loads(capsys.readouterr().out)
     assert rc == 9
@@ -57,8 +67,51 @@ def test_gate_cmd_no_gates_exit_2(env_sandbox, repo, capsys):
     rc = main(["gate", "-d", str(repo)])
 
     assert rc == 2
-    assert "no gates: pass --gate or set .agent-hub/config.toml" in capsys.readouterr().err
+    assert "no repo gates: set gates in .agent-hub/config.toml" in capsys.readouterr().err
     assert list_jobs(paths(), 10) == []
+
+
+def test_gate_requires_repo_gates(env_sandbox, repo, capsys):
+    rc = main(["gate", "-d", str(repo), "--gate", "true"])
+
+    assert rc == 2
+    assert "no repo gates: set gates in .agent-hub/config.toml" in capsys.readouterr().err
+    assert list_jobs(paths(), 10) == []
+
+
+def test_cli_gate_true_cannot_replace_repo_gates(env_sandbox, repo, capsys):
+    set_repo_gates(repo, ["test -f missing.txt"])
+
+    rc = main(["gate", "-d", str(repo), "--gate", "true", "--json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 9
+    assert out["status"] == "gate-failed"
+    assert [g["cmd"] for g in out["gate"]] == ["test -f missing.txt"]
+    assert out["gate"][0]["rc"] != 0
+
+
+def test_gate_job_records_gate_touched_and_ready_reports_it(env_sandbox, repo, capsys):
+    (repo / "test_a.py").write_text("def test_x():\n    assert 1\n")
+    subprocess.run(["git", "add", "test_a.py"], cwd=repo, check=True)
+    set_repo_gates(repo, ["true"])
+    subprocess.run(["git", "branch", "-f", "master"], cwd=repo, check=True)
+    (repo / "test_a.py").write_text("def test_x():\n    assert 2\n")
+    subprocess.run(["git", "commit", "-q", "-am", "weaken"], cwd=repo, check=True)
+    head = git_head(repo)
+
+    rc = main(["gate", "-d", str(repo), "--json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["head"] == head
+    assert out["gate_touched"] == [{"file": "test_a.py", "kind": "assert-removed", "lines": [2]}]
+
+    rc = main(["ready", "-d", str(repo), "--json"])
+
+    ready_out = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert "gate touched: 1 findings — inspect before merging" in ready_out["problems"]
 
 
 def test_gate_cmd_repo_gates_run_before_cli_gates(env_sandbox, repo, capsys):

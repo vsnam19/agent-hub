@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from agenthub import brief as briefmod
-from agenthub import env, guards, handoff, process
+from agenthub import env, gateguard, guards, handoff, process
 from agenthub.agents import Classified, Outcome, Request, registry
 from agenthub.config import ConfigError, Paths, Pool
 from agenthub.jobs import Job, new_job
@@ -120,8 +120,17 @@ def run_gates(gates: list[str], workdir: Path, gate_dir: Path, sha: str) -> tupl
     return records, True
 
 
-def run_gate_job(p: Paths, repo: guards.Repo, gates: list[str], now: Callable[[], datetime]) -> dict:
-    """Run `gates` on the committed HEAD of a clean work tree and record them as a `gate` job."""
+def run_gate_job(
+    p: Paths,
+    repo: guards.Repo,
+    repo_defaults: list[str],
+    cli_gates: list[str],
+    base: str,
+    since: str,
+    now: Callable[[], datetime],
+) -> dict:
+    """Run the repo's default gates, then `cli_gates`, on the committed HEAD of a clean work tree and record them
+    as a `gate` job, with what the diff from `since` (the merge base with `base`) touched."""
     started = now()
     job = new_job(p, "gate", started)
     head = guards.head(repo)
@@ -136,6 +145,8 @@ def run_gate_job(p: Paths, repo: guards.Repo, gates: list[str], now: Callable[[]
         "workdir": str(repo.root),
         "repo": str(repo.common_dir),
         "head": head,
+        "base": base,
+        "repo_gates": repo_defaults,
         "started": started.isoformat(),
         "ended": None,
         "duration_s": None,
@@ -143,7 +154,8 @@ def run_gate_job(p: Paths, repo: guards.Repo, gates: list[str], now: Callable[[]
         "diffstat": "",
         "reply_path": None,
     }
-    record["gate"], passed = run_gates(gates, repo.root, job.dir / "gate", head)
+    record["gate"], passed = run_gates(merge_gates(repo_defaults, cli_gates), repo.root, job.dir / "gate", head)
+    record["gate_touched"] = gateguard.inspect_diff(repo, since)
     return _finish(job, record, "ok" if passed else "gate-failed", now, started)
 
 
@@ -373,8 +385,6 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
             status = "gate-failed"
 
     if kind == "implement" and status in ("ok", "gate-failed"):
-        from agenthub import gateguard
-
         record["gate_touched"] = gateguard.inspect_diff(repo, start_head)
     else:
         record["gate_touched"] = []
@@ -402,19 +412,18 @@ def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
     def who(j: dict) -> str:
         return f"{j.get('agent')}:{j.get('model')}"
 
-    gated = [
-        j
-        for j in mine
-        if j.get("kind") in ("implement", "gate")
-        and j.get("head") == head
-        and j.get("gate")
-        and all(g.get("rc") == 0 and g.get("sha") == head for g in j["gate"])
-    ]
-    implementers = [j for j in mine if j.get("kind") == "implement" and j.get("status") == "ok"]
+    gated = [j for j in mine if _passed_gate(j, head)]
+    implementers = {who(j) for j in mine if j.get("kind") == "implement" and j.get("status") in ("ok", "gate-failed")}
     reviews = [j for j in mine if j.get("kind") == "review" and j.get("status") == "ok" and j.get("verdict")]
     problems = []
     if not gated:
-        problems.append(f"no gated implement job on {head}")
+        problems.append(f"no passing gate on {head}")
+    else:
+        touched = next((j["gate_touched"] for j in gated if j.get("gate_touched")), None)
+        if touched:
+            problems.append(f"gate touched: {len(touched)} findings — inspect before merging")
+    if not implementers:
+        problems.append("no implementer recorded: cannot check reviewer independence")
     if not reviews:
         problems.append("no review")
         return problems
@@ -425,9 +434,21 @@ def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
     approved = [r for r in on_head if r["verdict"] == "approve"]
     if not approved:
         problems.append(f"review verdict {on_head[0]['verdict']}")
-    elif implementers and all(who(r) == who(implementers[0]) for r in approved):
+    elif all(who(r) in implementers for r in approved):
         problems.append("reviewer is the implementer")
     return problems
+
+
+def _passed_gate(j: dict, head: str) -> bool:
+    """Whether job `j` is a gate that passed on `head`; a gate job must also have run every repo default gate."""
+    if j.get("kind") not in ("implement", "gate") or j.get("head") != head or not j.get("gate"):
+        return False
+    if not all(g.get("rc") == 0 and g.get("sha") == head for g in j["gate"]):
+        return False
+    if j["kind"] == "gate":
+        ran = {g.get("cmd") for g in j["gate"]}
+        return bool(j.get("repo_gates")) and set(j["repo_gates"]) <= ran
+    return True
 
 
 def _rel(job: Job, attempt_dir: Path, name: str) -> str:

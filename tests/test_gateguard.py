@@ -253,3 +253,18 @@ def test_existing_test_not_flagged(repo):
     test_file.write_text("def test_old():\n    x = 1\n")
     res = gateguard.inspect_diff(guards.inspect(repo), since)
     assert not [r for r in res if r["kind"] == "assertion-free-test"]
+
+
+def test_commented_def_test_ignored(repo):
+    (repo / "test_c.py").write_text("# def test_old():\n    pass\n")
+    (repo / "test_d.py").write_text("def test_x():\n    assert 1\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add")
+    since = guards.head(guards.inspect(repo))
+
+    # removing a commented-out def is not a removal of a test
+    (repo / "test_c.py").write_text("\n")
+    # a commented-out def re-added does not count as re-adding test_x
+    (repo / "test_d.py").write_text("# def test_x():\n    assert 1\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == [{"file": "test_d.py", "kind": "test-deleted", "lines": [1]}]

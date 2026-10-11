@@ -22,7 +22,7 @@ def commit(repo, name):
     subprocess.run(["git", "commit", "-q", "-m", name], cwd=repo, check=True)
 
 
-def add_job(repo, kind, head, *, model="m1", agent="codex", verdict=None, gate_sha=None, n=0):
+def add_job(repo, kind, head, *, model="m1", agent="codex", verdict=None, gate_sha=None, n=0, repo_gates=("true",)):
     when = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=n)
     job = new_job(paths(), kind, when)
     record = {
@@ -37,6 +37,8 @@ def add_job(repo, kind, head, *, model="m1", agent="codex", verdict=None, gate_s
         "verdict": verdict,
         "gate": [{"cmd": "true", "rc": 0, "sha": gate_sha or head}] if kind in ("implement", "gate") else [],
     }
+    if kind == "gate":
+        record["repo_gates"] = list(repo_gates)
     job.write_json("result.json", record)
 
 
@@ -62,7 +64,7 @@ def test_not_ready_review_stale_after_commit(env_sandbox, repo, capsys):
     new = git_head(repo)
     rc, out = ready(repo, capsys)
     assert rc == 1
-    assert f"no gated implement job on {new}" in out["problems"]
+    assert f"no passing gate on {new}" in out["problems"]
     assert f"review is stale (reviewed {old})" in out["problems"]
 
 
@@ -126,3 +128,37 @@ def test_ready_reviewer_is_implementer_with_gate_job(env_sandbox, repo, capsys):
     rc, out = ready(repo, capsys)
     assert rc == 1
     assert out["problems"] == ["reviewer is the implementer"]
+
+
+def test_reviewer_matching_any_implementer_is_rejected(env_sandbox, repo, capsys):
+    old = git_head(repo)
+    add_job(repo, "implement", old, model="m1", n=1)
+    commit(repo, "late.txt")
+    new = git_head(repo)
+    add_job(repo, "implement", new, model="m2", n=2)
+    add_job(repo, "gate", new, model="gate", agent="agent-hub", n=3)
+    add_job(repo, "review", new, model="m1", verdict="approve", n=4)
+    rc, out = ready(repo, capsys)
+    assert rc == 1
+    assert out["problems"] == ["reviewer is the implementer"]
+
+
+def test_ready_no_implementer_recorded(env_sandbox, repo, capsys):
+    head = git_head(repo)
+    add_job(repo, "gate", head, model="gate", agent="agent-hub", n=1)
+    add_job(repo, "review", head, model="m2", verdict="approve", n=2)
+    rc, out = ready(repo, capsys)
+    assert rc == 1
+    assert out["problems"] == ["no implementer recorded: cannot check reviewer independence"]
+
+
+def test_ready_gate_job_without_repo_gates_is_not_a_gate(env_sandbox, repo, capsys):
+    head = git_head(repo)
+    add_job(repo, "gate", head, model="gate", agent="agent-hub", n=1, repo_gates=["just lint"])
+    add_job(repo, "review", head, model="m2", verdict="approve", n=2)
+    rc, out = ready(repo, capsys)
+    assert rc == 1
+    assert out["problems"] == [
+        f"no passing gate on {head}",
+        "no implementer recorded: cannot check reviewer independence",
+    ]

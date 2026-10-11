@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -286,6 +287,46 @@ def test_plan_cancel_wrong_pid_start_time_not_signalled(env_sandbox, tmp_path, c
 
         assert runner.poll() is None
         assert "runner not verified; nothing signalled" in capsys.readouterr().out
+    finally:
+        runner.kill()
+        runner.wait()
+
+
+def test_plan_cancel_outside_repo_exit_3(env_sandbox, tmp_path, capsys):
+    repo = tmp_path / "repo"
+    make_repo(repo)
+    plan_file = make_plan_file(tmp_path, repo)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    runner = _sleeper()
+    try:
+        _write_state(plan_file, {"pid": runner.pid, "start_time": start_time(runner.pid)}, {})
+
+        assert main(["plan", "cancel", str(plan_file), "-d", str(outside)]) == 3
+
+        assert runner.poll() is None
+        assert f"plan plan-1 belongs to {repo.resolve()}; run plan cancel from that repository" in (
+            capsys.readouterr().err
+        )
+    finally:
+        runner.kill()
+        runner.wait()
+
+
+def test_plan_cancel_missing_plan_repo(env_sandbox, tmp_path, capsys):
+    repo = tmp_path / "repo"
+    make_repo(repo)
+    plan_file = make_plan_file(tmp_path, repo)
+    missing = repo.resolve()
+    shutil.rmtree(repo)
+    runner = _sleeper()
+    try:
+        _write_state(plan_file, {"pid": runner.pid, "start_time": start_time(runner.pid)}, {})
+
+        assert main(["plan", "cancel", str(plan_file), "-d", str(tmp_path)]) == 3
+
+        assert runner.wait(timeout=10) == -15
+        assert f"plan repository missing: {missing}" in capsys.readouterr().err
     finally:
         runner.kill()
         runner.wait()
