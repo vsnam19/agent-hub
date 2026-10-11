@@ -14,7 +14,7 @@ from agenthub.agents import registry
 from agenthub.brief import BriefError, order_table
 from agenthub.config import ConfigError, load_pool, parse_duration, paths, role_kind
 from agenthub.jobs import get_job, list_jobs
-from agenthub.orchestrate import EXIT, RunArgs, readiness, run_job
+from agenthub.orchestrate import EXIT, RunArgs, merge_gates, readiness, repo_gates, run_gate_job, run_job
 from agenthub.plan import PlanError
 from agenthub.plan import load as load_plan
 from agenthub.planrun import run_plan
@@ -115,6 +115,11 @@ def _build_parser() -> argparse.ArgumentParser:
     ready.add_argument("-d", "--dir", default=".", dest="workdir", help="work tree to check")
     ready.add_argument("--json", action="store_true")
 
+    gate = sub.add_parser("gate", help="run the gates on the committed HEAD and record them (exit 9 if one fails)")
+    gate.add_argument("-d", "--dir", default=".", dest="workdir", help="clean work tree to gate")
+    gate.add_argument("--gate", action="append", dest="gates", help="gate command to run (repeatable)")
+    gate.add_argument("--json", action="store_true")
+
     return parser
 
 
@@ -132,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
             "plan": _cmd_plan,
             "orders": _cmd_orders,
             "ready": _cmd_ready,
+            "gate": _cmd_gate,
         }[args.command]
         return handler(args)
     except SystemExit as e:  # --help
@@ -323,6 +329,24 @@ def _cmd_ready(args) -> int:
     else:
         print(f"ready: {head}")
     return 1 if problems else 0
+
+
+def _cmd_gate(args) -> int:
+    try:
+        repo = guards.inspect(Path(args.workdir))
+    except guards.GuardError as e:
+        raise UsageError(str(e)) from None
+    if guards._run_git(repo.root, "status", "--porcelain"):
+        raise UsageError("commit first; gate runs on HEAD")
+    gates = merge_gates(repo_gates(repo.root), args.gates or [])
+    if not gates:
+        raise UsageError("no gates: pass --gate or set .agent-hub/config.toml")
+    result = run_gate_job(paths(), repo, gates, _now)
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        _emit(_summary(result))
+    return EXIT[result["status"]]
 
 
 def _cmd_profile(args) -> int:

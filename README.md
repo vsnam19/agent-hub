@@ -53,6 +53,7 @@ agent-hub plan run <plan.json> [--max-parallel N]
 agent-hub plan status <plan.json> [--json]
 agent-hub plan wait <plan.json> [--timeout 9m]
 agent-hub orders [-d WORKDIR] [--json]
+agent-hub gate [-d WORKDIR] [--gate CMD]... [--json]
 ```
 
 - `wait` blocks until the newest job for that work directory ends (or until `--timeout`, default 9m), and prints its result like `show` (or `--json`).

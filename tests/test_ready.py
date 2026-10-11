@@ -22,7 +22,7 @@ def commit(repo, name):
     subprocess.run(["git", "commit", "-q", "-m", name], cwd=repo, check=True)
 
 
-def add_job(repo, kind, head, *, model="m1", verdict=None, gate_sha=None, n=0):
+def add_job(repo, kind, head, *, model="m1", agent="codex", verdict=None, gate_sha=None, n=0):
     when = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=n)
     job = new_job(paths(), kind, when)
     record = {
@@ -30,12 +30,12 @@ def add_job(repo, kind, head, *, model="m1", verdict=None, gate_sha=None, n=0):
         "role": kind,
         "kind": kind,
         "status": "ok",
-        "agent": "codex",
+        "agent": agent,
         "model": model,
         "workdir": str(repo),
         "head": head,
         "verdict": verdict,
-        "gate": [{"cmd": "true", "rc": 0, "sha": gate_sha or head}] if kind == "implement" else [],
+        "gate": [{"cmd": "true", "rc": 0, "sha": gate_sha or head}] if kind in ("implement", "gate") else [],
     }
     job.write_json("result.json", record)
 
@@ -102,3 +102,27 @@ def test_result_records_head_and_gate_sha(env_sandbox, repo, monkeypatch):
     assert result["status"] == "ok"
     assert result["head"] == git_head(repo)
     assert result["gate"][0]["sha"] == result["head"]
+
+
+def test_ready_with_gate_job_after_commit(env_sandbox, repo, capsys):
+    old = git_head(repo)
+    add_job(repo, "implement", old, model="m1", n=1)
+    commit(repo, "late.txt")
+    new = git_head(repo)
+    add_job(repo, "gate", new, model="gate", agent="agent-hub", n=2)
+    add_job(repo, "review", new, model="m2", verdict="approve", n=3)
+    rc, out = ready(repo, capsys)
+    assert rc == 0
+    assert out == {"ready": True, "head": new, "problems": []}
+
+
+def test_ready_reviewer_is_implementer_with_gate_job(env_sandbox, repo, capsys):
+    old = git_head(repo)
+    add_job(repo, "implement", old, model="m1", n=1)
+    commit(repo, "late.txt")
+    new = git_head(repo)
+    add_job(repo, "gate", new, model="gate", agent="agent-hub", n=2)
+    add_job(repo, "review", new, model="m1", verdict="approve", n=3)
+    rc, out = ready(repo, capsys)
+    assert rc == 1
+    assert out["problems"] == ["reviewer is the implementer"]

@@ -80,6 +80,73 @@ def merge_gates(repo: list[str], cli: list[str]) -> list[str]:
     return merged
 
 
+def run_gates(gates: list[str], workdir: Path, gate_dir: Path, sha: str) -> tuple[list[dict], bool]:
+    """Run gate commands in order in `workdir`, logs under `gate_dir`, stopping at the first failure.
+    Returns the gate records, each stamped with `sha`, and whether every gate passed."""
+    gate_env, _ = env.child_env(os.environ, ())
+    gate_dir.mkdir(exist_ok=True)
+
+    records: list[dict] = []
+    for n, cmd in enumerate(gates, start=1):
+        attempt_dir = gate_dir / str(n)
+        attempt_dir.mkdir(exist_ok=True)
+
+        inv = process.Invocation(argv=["bash", "-c", cmd], stdin_path=None)
+        ran = process.run(inv, workdir, gate_env, attempt_dir, timedelta(seconds=GATE_TIMEOUT_S))
+
+        stdout_text = (attempt_dir / "stdout").read_text(errors="replace")
+        stderr_text = (attempt_dir / "stderr").read_text(errors="replace")
+        log_content = stdout_text + stderr_text
+        log_path = gate_dir / f"{n}.log"
+        log_path.write_text(log_content)
+
+        lines = log_content.splitlines()
+        tail = "\n".join(lines[-40:])
+
+        rc = ran.rc if not ran.timed_out else (ran.rc if ran.rc != 0 else -15)
+        records.append(
+            {
+                "cmd": cmd,
+                "rc": rc,
+                "duration_s": round(ran.duration_s, 3),
+                "tail": tail,
+                "log": str(log_path),
+                "sha": sha,
+            }
+        )
+
+        if rc != 0:
+            return records, False
+    return records, True
+
+
+def run_gate_job(p: Paths, repo: guards.Repo, gates: list[str], now: Callable[[], datetime]) -> dict:
+    """Run `gates` on the committed HEAD of a clean work tree and record them as a `gate` job."""
+    started = now()
+    job = new_job(p, "gate", started)
+    head = guards.head(repo)
+    record: dict = {
+        "id": job.id,
+        "role": "gate",
+        "kind": "gate",
+        "status": "running",
+        "exit_code": None,
+        "agent": "agent-hub",
+        "model": "gate",
+        "workdir": str(repo.root),
+        "repo": str(repo.common_dir),
+        "head": head,
+        "started": started.isoformat(),
+        "ended": None,
+        "duration_s": None,
+        "changed_files": [],
+        "diffstat": "",
+        "reply_path": None,
+    }
+    record["gate"], passed = run_gates(gates, repo.root, job.dir / "gate", head)
+    return _finish(job, record, "ok" if passed else "gate-failed", now, started)
+
+
 class _Cancel:
     """Tracks SIGTERM/SIGINT; stops the running attempt's process group when one arrives."""
 
@@ -301,42 +368,9 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
 
     record["gate"] = []
     if status == "ok" and kind == "implement" and gates:
-        gate_env, _ = env.child_env(os.environ, ())
-        gate_dir = job.dir / "gate"
-        gate_dir.mkdir(exist_ok=True)
-
-        gate_sha = guards.head(repo)
-        for n, cmd in enumerate(gates, start=1):
-            attempt_dir = gate_dir / str(n)
-            attempt_dir.mkdir(exist_ok=True)
-
-            inv = process.Invocation(argv=["bash", "-c", cmd], stdin_path=None)
-            ran = process.run(inv, workdir, gate_env, attempt_dir, timedelta(seconds=GATE_TIMEOUT_S))
-
-            stdout_text = (attempt_dir / "stdout").read_text(errors="replace")
-            stderr_text = (attempt_dir / "stderr").read_text(errors="replace")
-            log_content = stdout_text + stderr_text
-            log_path = gate_dir / f"{n}.log"
-            log_path.write_text(log_content)
-
-            lines = log_content.splitlines()
-            tail = "\n".join(lines[-40:])
-
-            rc = ran.rc if not ran.timed_out else (ran.rc if ran.rc != 0 else -15)
-            record["gate"].append(
-                {
-                    "cmd": cmd,
-                    "rc": rc,
-                    "duration_s": round(ran.duration_s, 3),
-                    "tail": tail,
-                    "log": str(log_path),
-                    "sha": gate_sha,
-                }
-            )
-
-            if rc != 0:
-                status = "gate-failed"
-                break
+        record["gate"], passed = run_gates(gates, workdir, job.dir / "gate", guards.head(repo))
+        if not passed:
+            status = "gate-failed"
 
     if kind == "implement" and status in ("ok", "gate-failed"):
         from agenthub import gateguard
@@ -371,11 +405,12 @@ def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
     gated = [
         j
         for j in mine
-        if j.get("kind") == "implement"
+        if j.get("kind") in ("implement", "gate")
         and j.get("head") == head
         and j.get("gate")
         and all(g.get("rc") == 0 and g.get("sha") == head for g in j["gate"])
     ]
+    implementers = [j for j in mine if j.get("kind") == "implement" and j.get("status") == "ok"]
     reviews = [j for j in mine if j.get("kind") == "review" and j.get("status") == "ok" and j.get("verdict")]
     problems = []
     if not gated:
@@ -390,7 +425,7 @@ def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
     approved = [r for r in on_head if r["verdict"] == "approve"]
     if not approved:
         problems.append(f"review verdict {on_head[0]['verdict']}")
-    elif gated and all(who(r) in {who(g) for g in gated} for r in approved):
+    elif implementers and all(who(r) == who(implementers[0]) for r in approved):
         problems.append("reviewer is the implementer")
     return problems
 
