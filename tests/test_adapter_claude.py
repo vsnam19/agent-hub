@@ -234,12 +234,12 @@ def test_fake_records_call(env_sandbox, adapter_claude, req_claude):
     assert call["env"]["GH_TOKEN"] == "sekret"
 
 
-def test_registry_finds_three_agents():
+def test_registry_finds_four_agents():
     import agenthub.agents
 
     agenthub.agents._REGISTRY_CACHE = None
     reg = registry()
-    assert set(reg.keys()) == {"agy", "codex", "claude"}
+    assert set(reg.keys()) == {"agy", "claude", "codex", "gwen"}
     for _name, adapter in reg.items():
         assert adapter.profile_path.exists()
         lines = adapter.profile_path.read_text().splitlines()
