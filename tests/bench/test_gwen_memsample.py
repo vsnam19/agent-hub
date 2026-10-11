@@ -1,4 +1,5 @@
 import os
+import time
 
 from bench.gwen.memsample import MemSampler, parse_sample
 
@@ -16,7 +17,7 @@ def test_parse_garbage_returns_none():
     assert parse_sample("System-wide memory free percentage: %") == (None, None)
 
 
-def test_sampler_with_fake_ssh(tmp_path):
+def test_sampler_with_fake_ssh(tmp_path, monkeypatch):
     fake_ssh_dir = tmp_path / "bin"
     fake_ssh_dir.mkdir()
     fake_ssh = fake_ssh_dir / "ssh"
@@ -26,13 +27,14 @@ print("vm.swapusage: total = 2048.00M  used = 10.50M  free = 2037.50M  (encrypte
 """)
     fake_ssh.chmod(0o755)
 
-    os.environ["PATH"] = f"{fake_ssh_dir}:{os.environ.get('PATH', '')}"
+    monkeypatch.setenv("PATH", f"{fake_ssh_dir}{os.pathsep}{os.environ.get('PATH', '')}")
 
     sampler = MemSampler("fake@host", interval=0.05)
     sampler.start()
-    import time
-
-    time.sleep(0.15)
+    # A Python fake ssh takes a while to start, so wait for samples rather than sleeping a fixed time.
+    deadline = time.monotonic() + 10
+    while sampler.samples < 2 and time.monotonic() < deadline:
+        time.sleep(0.05)
     res = sampler.stop()
 
     assert res is not None
