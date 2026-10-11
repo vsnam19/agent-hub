@@ -52,6 +52,7 @@ agent-hub wait -d WORKDIR [--timeout TIMEOUT] [--json]
 agent-hub plan run <plan.json> [--max-parallel N]
 agent-hub plan status <plan.json> [--json]
 agent-hub plan wait <plan.json> [--timeout 9m]
+agent-hub orders [-d WORKDIR] [--json]
 ```
 
 - `wait` blocks until the newest job for that work directory ends (or until `--timeout`, default 9m), and prints its result like `show` (or `--json`).
@@ -108,6 +109,10 @@ Rules that every implement and review brief must carry. agent-hub appends `~/.co
 is non-empty, under `## Standing orders`, after the brief and before the handoff footer. An unreadable file is skipped
 with a warning on stderr. The text sent is recorded in the job's `brief.md`. A starting point is in
 `docs/standing-orders.example.md`.
+
+Each line is `N. <rule> — enforced by: <mechanism>` (`gate`, `gate-guard`, `scope`, `handoff-parser`, or `none`).
+The suffix is stripped from the text sent. `agent-hub orders [-d WORKDIR] [--json]` lists every numbered rule with
+its mechanism and source file (the user file, then the repo file) and exits 1 if a rule has no `— enforced by:`.
 
 ## Exit codes
 

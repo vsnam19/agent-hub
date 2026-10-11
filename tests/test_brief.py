@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from agenthub.brief import BriefError, review_text, validate
+from agenthub.brief import BriefError, order_table, review_text, standing_orders, validate
 
 
 def test_implement_brief_ok():
@@ -56,3 +56,28 @@ def test_review_text_points_at_diff_file_and_has_no_git_command():
     assert "git diff" not in text
     assert "git log" not in text
     assert "Do not modify any file" in text
+
+
+def test_orders_suffix_stripped_in_brief(tmp_path):
+    (tmp_path / "standing-orders.md").write_text(
+        "1. Run the lint — enforced by: gate\n2. Never edit gate config -- enforced by: gate-guard\n"
+    )
+    text = standing_orders(tmp_path, None)
+    assert text == "## Standing orders\n\n1. Run the lint\n2. Never edit gate config"
+
+
+def test_orders_mixed_lines_all_sent(tmp_path):
+    config = tmp_path / "config"
+    repo = tmp_path / "repo"
+    (repo / ".agent-hub").mkdir(parents=True)
+    config.mkdir()
+    (config / "standing-orders.md").write_text("1. Enforced rule — enforced by: gate\n2. Bare rule with no suffix\n")
+    (repo / ".agent-hub" / "standing-orders.md").write_text("3. Repo rule without suffix\n")
+
+    text = standing_orders(config, repo)
+    assert "1. Enforced rule\n2. Bare rule with no suffix" in text
+    assert text.index("2. Bare rule") < text.index("3. Repo rule without suffix")
+    assert "enforced by" not in text
+
+    orders = order_table(config, repo)
+    assert [(o.number, o.enforced_by) for o in orders] == [(1, "gate"), (2, None), (3, None)]
