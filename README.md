@@ -123,6 +123,7 @@ with a warning on stderr. The text sent is recorded in the job's `brief.md`. A s
 | 7 | `empty` | The agent exited cleanly but returned nothing. |
 | 8 | `interrupted` | Quota, auth or model failure after the tree had changed; no fallback. |
 | 9 | `gate-failed` | A gate command failed. |
+| 10 | `scope-violation` | `--allow` was given and files outside the globs changed. |
 | 130 | `cancelled` | `cancel` or Ctrl-C. |
 | 124 | | `wait` only: the job is still running when the timeout expires. |
 

@@ -59,6 +59,10 @@ def main():
         Path("agent_wrote.txt").write_text("hello")
         print(json.dumps({"status": "SUCCESS", "response": f"done: {trunc_prompt}"}))
         sys.exit(0)
+    elif scenario == "delete":
+        Path("README.md").unlink()
+        print(json.dumps({"status": "SUCCESS", "response": f"done: {trunc_prompt}"}))
+        sys.exit(0)
     elif scenario == "handoff":
         Path("agent_wrote.txt").write_text("hello")
         response = """done
