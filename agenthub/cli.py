@@ -25,6 +25,7 @@ WAIT_POLL_S = 1.0
 WAIT_APPEAR_S = 10.0
 PLAN_WAIT_POLL_S = 1.0
 PLAN_WAIT_APPEAR_S = float(os.environ.get("AGENT_HUB_PLAN_WAIT_APPEAR_S", "10.0"))
+ALL_JOBS = 100000  # every job record, for filters that must see past any --limit
 
 
 class UsageError(Exception):
@@ -68,15 +69,19 @@ def _build_parser() -> argparse.ArgumentParser:
     profile = sub.add_parser("profile", help="print an agent's profile")
     profile.add_argument("agent")
 
-    jobs = sub.add_parser("jobs", help="list recent jobs")
+    jobs = sub.add_parser("jobs", help="list recent jobs of this repository")
+    jobs.add_argument("-d", "--dir", default=".", dest="workdir", help="repository whose jobs to list")
+    jobs.add_argument("--all", action="store_true", help="list the jobs of every repository")
     jobs.add_argument("--limit", type=int, default=20)
 
     show = sub.add_parser("show", help="show a job")
     show.add_argument("id")
     show.add_argument("--json", action="store_true")
 
-    cancel = sub.add_parser("cancel", help="cancel a running job")
-    cancel.add_argument("id")
+    cancel = sub.add_parser("cancel", help="cancel a running job of this repository (exit 3 if it is another's)")
+    cancel.add_argument("id", nargs="?")
+    cancel.add_argument("--all", action="store_true", help="cancel every running job of this repository")
+    cancel.add_argument("-d", "--dir", default=".", dest="workdir", help="repository whose jobs to cancel")
 
     wait = sub.add_parser("wait", help="wait for a job to finish")
     wait.add_argument("-d", "--dir", required=True, dest="workdir")
@@ -96,6 +101,8 @@ def _build_parser() -> argparse.ArgumentParser:
     plan_wait.add_argument("plan_file", metavar="<plan.json>")
     plan_wait.add_argument("--timeout", help="e.g. 9m")
     plan_wait.add_argument("--json", action="store_true")
+    plan_cancel = plan_sub.add_parser("cancel", help="stop the plan's runner and its running jobs")
+    plan_cancel.add_argument("plan_file", metavar="<plan.json>")
 
     orders = sub.add_parser("orders", help="list standing orders and what enforces each (exit 1 if one has none)")
     orders.add_argument("-d", "--dir", default=".", dest="workdir", help="repo whose standing orders to list")
@@ -325,8 +332,30 @@ def _cmd_profile(args) -> int:
     return 0
 
 
+def _repo_of(workdir: str) -> str:
+    """The git common dir of a work tree: the identity of its repository, shared by all of its worktrees."""
+    try:
+        return str(guards.inspect(Path(workdir).expanduser().resolve()).common_dir)
+    except guards.GuardError as e:
+        raise UsageError(str(e)) from None
+
+
+def _job_repo(record: dict) -> str | None:
+    """The repository a job belongs to; a record without `repo` derives it from its work tree, if that still exists."""
+    if record.get("repo"):
+        return record["repo"]
+    if not record.get("workdir"):
+        return None
+    try:
+        return str(guards.inspect(Path(record["workdir"])).common_dir)
+    except guards.GuardError:
+        return None
+
+
 def _cmd_jobs(args) -> int:
-    for r in list_jobs(paths(), args.limit):
+    mine = None if args.all else _repo_of(args.workdir)
+    rows = [r for r in list_jobs(paths(), ALL_JOBS) if args.all or _job_repo(r) == mine][: args.limit]
+    for r in rows:
         agent = f"{r['agent']}:{r['model']}" if r.get("agent") else "-"
         dur = f"{r['duration_s']:.0f}s" if r.get("duration_s") is not None else "-"
         print(_safe("  ".join([r["id"], r["role"], r["status"], agent, dur, r["workdir"]])))
@@ -362,26 +391,56 @@ def _read_pid_file(path: Path) -> tuple[int | None, int | None]:
         return None, None
 
 
-def _cmd_cancel(args) -> int:
-    job = _load_job(args.id)
+def _read_result(job) -> dict:
     try:
-        result = job.read_json("result.json")
+        return job.read_json("result.json")
     except (OSError, ValueError):
-        result = {}
+        return {}
+
+
+def _terminate_verified(pid: int | None, recorded: int | None) -> bool:
+    """SIGTERM the pid only while its start time still matches the recorded one; a reused pid never matches."""
+    if pid is None or recorded is None or start_time(pid) != recorded:
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return False
+    return True
+
+
+def _cancel_job(job) -> str:
+    """Cancel one job of the caller's repository; returns the line to print about it."""
+    result = _read_result(job)
     if result.get("status") not in (None, "running"):
-        print(_safe(f"job already finished: {result['status']}"))
-        return 0
+        return f"job already finished: {result['status']}"
     pid, recorded = _read_pid_file(job.dir / "pid")
-    if pid is not None and recorded is not None and start_time(pid) == recorded:
-        try:
-            os.kill(pid, signal.SIGTERM)
-            print(_safe(f"sent SIGTERM to {pid}"))
-            return 0
-        except OSError:
-            pass
+    if _terminate_verified(pid, recorded):
+        return f"sent SIGTERM to {pid}"
     result.update(status="cancelled", exit_code=EXIT["cancelled"], ended=_now().isoformat())
     job.write_json("result.json", result)
-    print(_safe(f"cancelled {job.id} (process not verified; nothing signalled)"))
+    return f"cancelled {job.id} (process not verified; nothing signalled)"
+
+
+def _cmd_cancel(args) -> int:
+    if args.all == (args.id is not None):
+        raise UsageError("give a job id, or --all")
+    mine = _repo_of(args.workdir)
+    if args.all:
+        rows = [r for r in list_jobs(paths(), ALL_JOBS) if r.get("status") == "running" and _job_repo(r) == mine]
+        if not rows:
+            print("no running jobs")
+        for r in rows:
+            print(_safe(_cancel_job(get_job(paths(), r["id"]))))
+        return 0
+
+    job = _load_job(args.id)
+    owner = _job_repo(_read_result(job))
+    if owner != mine:
+        where = owner or "an unknown repository"
+        print(_safe(f"job {job.id} belongs to {where}; run cancel from that repository", sys.stderr), file=sys.stderr)
+        return 3
+    print(_safe(_cancel_job(job)))
     return 0
 
 
@@ -440,6 +499,13 @@ def _print_trail(trail_file: Path) -> int:
     return 0
 
 
+def _claim_runner(state) -> None:
+    """Record this process as the plan's runner with its start time, so `plan cancel` can verify it."""
+    pid = os.getpid()
+    state.runner = {"pid": pid, "start_time": start_time(pid)}
+    state.save()
+
+
 def _cmd_plan(args) -> int:
     plan_file = Path(args.plan_file).resolve()
     plan = load_plan(plan_file)
@@ -450,6 +516,7 @@ def _cmd_plan(args) -> int:
         from agenthub.planstate import load_or_init
 
         state = load_or_init(plan)
+        _claim_runner(state)
 
         def spawn(argv: list[str], log: Path) -> subprocess.Popen:
             f = open(log, "wb")
@@ -499,6 +566,29 @@ def _cmd_plan(args) -> int:
                     if parsed:
                         line += f" handoff={parsed['status']} · {parsed['verification']}"
             print(_safe(line))
+        return 0
+
+    elif args.plan_command == "cancel":
+        if not state_file.is_file():
+            raise UsageError("state.json not found")
+        state_data = json.loads(state_file.read_text())
+
+        runner = state_data.get("runner") or {}
+        if _terminate_verified(runner.get("pid"), runner.get("start_time")):
+            print(_safe(f"sent SIGTERM to runner {runner['pid']}"))
+        else:
+            print(_safe("runner not verified; nothing signalled"))
+
+        # The runner cancels its own children on SIGTERM; cancel the jobs still running in the plan's work trees.
+        tasks = state_data.get("tasks", {})
+        running = [name for name, t in tasks.items() if t.get("status") == "running"]
+        worktrees = {Path(tasks[name]["worktree"]).resolve() for name in running if tasks[name].get("worktree")}
+        for r in list_jobs(paths(), ALL_JOBS):
+            if r.get("status") == "running" and r.get("workdir") and Path(r["workdir"]).resolve() in worktrees:
+                print(_safe(_cancel_job(get_job(paths(), r["id"]))))
+        for name in running:
+            tasks[name].update(status="cancelled", reason="cancelled")
+        state_file.write_text(json.dumps(state_data, indent=2) + "\n")
         return 0
 
     elif args.plan_command == "wait":

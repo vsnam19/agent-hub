@@ -2,8 +2,13 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
+from agenthub.cli import main
+from agenthub.config import paths
+from agenthub.jobs import new_job
+from agenthub.procinfo import start_time
 from tests.gitrepo import make_repo
 
 
@@ -190,3 +195,76 @@ def test_plan_status_trail_prints(env_sandbox, tmp_path):
     # columns line up: the task names sit at the header's "task" offset in every row
     task_column = lines[0].index("task")
     assert {line[task_column:].split()[0] for line in lines[1:]} == {"t1", "t2"}
+
+
+def _sleeper():
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+
+
+def _write_state(plan_file, runner, tasks):
+    state = {
+        "slug": "plan-1",
+        "started": "2026-10-12T10:00:00+00:00",
+        "updated": "2026-10-12T10:00:00+00:00",
+        "runner": runner,
+        "tasks": tasks,
+    }
+    (plan_file.parent / "state.json").write_text(json.dumps(state))
+
+
+def test_plan_cancel_stops_runner_and_jobs(env_sandbox, tmp_path, capsys):
+    repo = tmp_path / "repo"
+    make_repo(repo)
+    plan_file = make_plan_file(tmp_path, repo)
+    worktree = tmp_path / "wt-t1"
+    worktree.mkdir()
+    runner = _sleeper()
+    job_proc = _sleeper()
+    try:
+        job = new_job(paths(), "implement", datetime.now(timezone.utc))
+        record = {"id": job.id, "role": "implement", "status": "running", "workdir": str(worktree)}
+        job.write_json("result.json", record)
+        (job.dir / "pid").write_text(json.dumps({"pid": job_proc.pid, "start_time": start_time(job_proc.pid)}))
+        _write_state(
+            plan_file,
+            {"pid": runner.pid, "start_time": start_time(runner.pid)},
+            {
+                "t1": {
+                    "status": "running",
+                    "attempts": [{"job": "", "status": "", "exit_code": -1}],
+                    "worktree": str(worktree),
+                },
+                "t2": {"status": "pending", "attempts": []},
+            },
+        )
+
+        assert main(["plan", "cancel", str(plan_file)]) == 0
+
+        assert runner.wait(timeout=10) == -15
+        assert job_proc.wait(timeout=10) == -15
+        state = json.loads((plan_file.parent / "state.json").read_text())
+        assert state["tasks"]["t1"]["status"] == "cancelled"
+        assert state["tasks"]["t2"]["status"] == "pending"
+    finally:
+        for proc in (runner, job_proc):
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+    assert "sent SIGTERM to runner" in capsys.readouterr().out
+
+
+def test_plan_cancel_wrong_pid_start_time_not_signalled(env_sandbox, tmp_path, capsys):
+    repo = tmp_path / "repo"
+    make_repo(repo)
+    plan_file = make_plan_file(tmp_path, repo)
+    runner = _sleeper()
+    try:
+        _write_state(plan_file, {"pid": runner.pid, "start_time": start_time(runner.pid) + 1}, {})
+
+        assert main(["plan", "cancel", str(plan_file)]) == 0
+
+        assert runner.poll() is None
+        assert "runner not verified; nothing signalled" in capsys.readouterr().out
+    finally:
+        runner.kill()
+        runner.wait()

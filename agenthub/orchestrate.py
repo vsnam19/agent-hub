@@ -142,6 +142,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         removed.update(env.child_env(os.environ, adapters[link.agent].config.env_passthrough)[1])
 
     job = new_job(p, args.role, started)
+    repo_id = str(repo.common_dir) if repo is not None else None
     job.write_json(
         "request.json",
         {
@@ -149,6 +150,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
             "links": [str(link) for link in links],
             "exclude": sorted(excluded),
             "workdir": str(workdir),
+            "repo": repo_id,
             "base": base,
             "timeout_s": int(args.timeout.total_seconds()),
             "removed_env": sorted(removed),
@@ -179,6 +181,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         "agent": None,
         "model": None,
         "workdir": str(workdir),
+        "repo": repo_id,
         "base": base,
         "started": started.isoformat(),
         "ended": None,

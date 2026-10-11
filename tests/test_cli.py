@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from agenthub import guards
 from agenthub.cli import main
 from agenthub.config import paths
 from agenthub.jobs import list_jobs
@@ -187,12 +188,12 @@ def test_jobs_and_show(env_sandbox, repo, tmp_path, capsys):
         )
         ids.append(json.loads(capsys.readouterr().out)["id"])
         time.sleep(1.1)  # job ids have one-second resolution
-    assert main(["jobs", "--limit", "5"]) == 0
+    assert main(["jobs", "-d", str(repo), "--limit", "5"]) == 0
     lines = capsys.readouterr().out.strip().splitlines()
     assert len(lines) == 2
     assert lines[0].startswith(max(ids)) and "claude:b" in lines[0] and "implement" in lines[0] and "ok" in lines[0]
     assert str(repo) in lines[0]
-    assert main(["jobs", "--limit", "1"]) == 0
+    assert main(["jobs", "-d", str(repo), "--limit", "1"]) == 0
     assert len(capsys.readouterr().out.strip().splitlines()) == 1
 
     assert main(["show", ids[0]]) == 0
@@ -209,13 +210,16 @@ def test_show_unknown_exit_2(env_sandbox, capsys):
     assert capsys.readouterr().err == "agent-hub: unknown job: nope\n"
 
 
-def test_cancel_marks_orphaned_running_job(env_sandbox, capsys):
+def test_cancel_marks_orphaned_running_job(env_sandbox, repo, capsys):
     from agenthub.jobs import new_job
 
     job = new_job(paths(), "implement", datetime.now(timezone.utc))
-    job.write_json("result.json", {"id": job.id, "role": "implement", "status": "running", "attempts": []})
+    job.write_json(
+        "result.json",
+        {"id": job.id, "role": "implement", "status": "running", "attempts": [], "repo": _repo_id(repo)},
+    )
     (job.dir / "pid").write_text("999999999\n")
-    assert main(["cancel", job.id]) == 0
+    assert main(["cancel", job.id, "-d", str(repo)]) == 0
     assert job.read_json("result.json")["status"] == "cancelled"
     assert job.read_json("result.json")["exit_code"] == 130
 
@@ -257,7 +261,7 @@ def test_cancel_running_job(env_sandbox, repo, tmp_path, monkeypatch, capsys):
         assert attempt is not None, "attempt never started"
         job_id = attempt.parents[2].name
         pgid = json.loads(attempt.read_text())["pgid"]
-        assert main(["cancel", job_id]) == 0
+        assert main(["cancel", job_id, "-d", str(repo)]) == 0
         out, _err = proc.communicate(timeout=30)
     finally:
         if proc.poll() is None:
@@ -275,11 +279,18 @@ def test_cancel_running_job(env_sandbox, repo, tmp_path, monkeypatch, capsys):
     assert not group_alive
 
 
-def _running_job_with_pid_file(content):
+def _repo_id(repo):
+    return str(guards.inspect(repo).common_dir)
+
+
+def _running_job_with_pid_file(repo, content):
     from agenthub.jobs import new_job
 
     job = new_job(paths(), "implement", datetime.now(timezone.utc))
-    job.write_json("result.json", {"id": job.id, "role": "implement", "status": "running", "attempts": []})
+    job.write_json(
+        "result.json",
+        {"id": job.id, "role": "implement", "status": "running", "attempts": [], "repo": _repo_id(repo)},
+    )
     (job.dir / "pid").write_text(content)
     return job
 
@@ -291,23 +302,23 @@ def _record_signals(monkeypatch):
     return calls
 
 
-def test_cancel_stale_pid_does_not_signal(env_sandbox, monkeypatch, capsys):
+def test_cancel_stale_pid_does_not_signal(env_sandbox, repo, monkeypatch, capsys):
     from agenthub.procinfo import start_time
 
     wrong = (start_time(os.getpid()) or 0) + 1
-    job = _running_job_with_pid_file(json.dumps({"pid": os.getpid(), "start_time": wrong}))
+    job = _running_job_with_pid_file(repo, json.dumps({"pid": os.getpid(), "start_time": wrong}))
     calls = _record_signals(monkeypatch)
-    assert main(["cancel", job.id]) == 0
+    assert main(["cancel", job.id, "-d", str(repo)]) == 0
     assert calls == []
     result = job.read_json("result.json")
     assert result["status"] == "cancelled"
     assert result["exit_code"] == 130
 
 
-def test_cancel_legacy_int_pid_does_not_signal(env_sandbox, monkeypatch, capsys):
-    job = _running_job_with_pid_file(f"{os.getpid()}\n")
+def test_cancel_legacy_int_pid_does_not_signal(env_sandbox, repo, monkeypatch, capsys):
+    job = _running_job_with_pid_file(repo, f"{os.getpid()}\n")
     calls = _record_signals(monkeypatch)
-    assert main(["cancel", job.id]) == 0
+    assert main(["cancel", job.id, "-d", str(repo)]) == 0
     assert calls == []
     assert job.read_json("result.json")["status"] == "cancelled"
 
@@ -407,7 +418,7 @@ def test_wait_times_out_with_124(env_sandbox, repo, tmp_path, monkeypatch, capsy
         assert "still running:" in out
 
         job_id = [r["id"] for r in list_jobs(paths(), 10)][0]
-        main(["cancel", job_id])
+        main(["cancel", job_id, "-d", str(repo)])
     finally:
         p.wait()
 
