@@ -14,7 +14,7 @@ from agenthub.agents import registry
 from agenthub.brief import BriefError, order_table
 from agenthub.config import ConfigError, load_pool, parse_duration, paths, role_kind
 from agenthub.jobs import get_job, list_jobs
-from agenthub.orchestrate import EXIT, RunArgs, readiness, repo_gates, run_gate_job, run_job
+from agenthub.orchestrate import EXIT, RunArgs, readiness, repo_gates, run_gate_job, run_job, touched_findings
 from agenthub.plan import PlanError
 from agenthub.plan import load as load_plan
 from agenthub.planrun import run_plan
@@ -114,6 +114,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ready.add_argument("-d", "--dir", default=".", dest="workdir", help="work tree to check")
     ready.add_argument("--json", action="store_true")
+    ready.add_argument(
+        "--accept-touched",
+        action="store_true",
+        help="accept the gate_touched findings of HEAD's gate after reading them (recorded)",
+    )
 
     gate = sub.add_parser("gate", help="run the gates on the committed HEAD and record them (exit 9 if one fails)")
     gate.add_argument("-d", "--dir", default=".", dest="workdir", help="clean work tree to gate")
@@ -323,15 +328,36 @@ def _cmd_ready(args) -> int:
     except guards.GuardError as e:
         raise UsageError(str(e)) from None
     head = guards.head(repo)
-    problems = readiness(list_jobs(paths(), 100000), repo.root, head)
+    jobs = list_jobs(paths(), 100000)
+    problems = readiness(jobs, repo.root, head, accept_touched=args.accept_touched)
+    accepted = touched_findings(jobs, repo.root, head) if args.accept_touched else []
+    if accepted:
+        _record_accepted_touched(head, accepted)
     if args.json:
-        print(json.dumps({"ready": not problems, "head": head, "problems": problems}, indent=2))
-    elif problems:
-        for problem in problems:
-            print(_safe(f"not ready: {problem}"))
+        out = {"ready": not problems, "head": head, "problems": problems}
+        if accepted:
+            out["accepted_touched"] = accepted
+        print(json.dumps(out, indent=2))
     else:
-        print(f"ready: {head}")
+        if accepted:
+            print(_safe(f"accepted gate touched: {len(accepted)} findings on {head}"))
+            for f in accepted:
+                print(_safe(f"  {f['file']} {f['kind']} lines {f['lines']}"))
+        if problems:
+            for problem in problems:
+                print(_safe(f"not ready: {problem}"))
+        else:
+            print(f"ready: {head}")
     return 1 if problems else 0
+
+
+def _record_accepted_touched(head: str, findings: list[dict]) -> None:
+    """Append the director's acceptance of `findings` on `head` to the state dir's accepted-touched.jsonl."""
+    p = paths()
+    p.state_dir.mkdir(parents=True, exist_ok=True)
+    entry = {"sha": head, "accepted": findings, "time": _now().isoformat()}
+    with (p.state_dir / "accepted-touched.jsonl").open("a") as f:
+        f.write(json.dumps(entry) + "\n")
 
 
 def _cmd_gate(args) -> int:

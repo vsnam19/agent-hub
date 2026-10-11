@@ -405,8 +405,9 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     return _finish(job, record, status or "exhausted", now, started)
 
 
-def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
-    """What still blocks a merge of `workdir` at `head`; empty when ready. `jobs` are result records, newest first."""
+def readiness(jobs: list[dict], workdir: Path, head: str, accept_touched: bool = False) -> list[str]:
+    """What still blocks a merge of `workdir` at `head`; empty when ready. `jobs` are result records, newest first.
+    `accept_touched` lifts the block on gate_touched findings once the director has read them."""
     mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == workdir.resolve()]
 
     def who(j: dict) -> str:
@@ -418,8 +419,8 @@ def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
     problems = []
     if not gated:
         problems.append(f"no passing gate on {head}")
-    else:
-        touched = next((j["gate_touched"] for j in gated if j.get("gate_touched")), None)
+    elif not accept_touched:
+        touched = touched_findings(jobs, workdir, head)
         if touched:
             problems.append(f"gate touched: {len(touched)} findings — inspect before merging")
     if not implementers:
@@ -437,6 +438,12 @@ def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
     elif all(who(r) in implementers for r in approved):
         problems.append("reviewer is the implementer")
     return problems
+
+
+def touched_findings(jobs: list[dict], workdir: Path, head: str) -> list[dict]:
+    """The gate_touched findings of the first passing gate on `head` for `workdir`; empty when none."""
+    mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == workdir.resolve()]
+    return next((j["gate_touched"] for j in mine if _passed_gate(j, head) and j.get("gate_touched")), [])
 
 
 def _passed_gate(j: dict, head: str) -> bool:
