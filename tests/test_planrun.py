@@ -623,3 +623,72 @@ def test_autocommit_falls_back_to_agent_hub_identity(tmp_path, monkeypatch):
     assert rc == 0
     worktree = Path(state.task("t1").worktree)
     assert git_out(worktree, "log", "-1", "--format=%an <%ae>") == "agent-hub <agent-hub@localhost>"
+
+
+def _trail_lines(plan):
+    return (plan.path.parent / "decisions.tsv").read_text().splitlines()
+
+
+def test_trail_records_attempt_and_done(tmp_path):
+    plan = make_plan(tmp_path, [{"name": "t1"}])
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [{"status": "ok", "id": "j1"}]})
+
+    rc = run_plan(plan, state, spawn)
+
+    assert rc == 0
+    lines = _trail_lines(plan)
+    assert lines[0] == "time\ttask\tphase\tdecision\treason\tevidence\tresult"
+    rows = [line.split("\t") for line in lines[1:]]
+    assert all(len(row) == 7 for row in rows)
+    assert [row[1:4] for row in rows] == [
+        ["t1", "start", "task started"],
+        ["t1", "attempt", "attempt 1 ended"],
+        ["t1", "final", "task done"],
+    ]
+    assert rows[1][4:] == ["ok", "j1", ""]
+    assert rows[2][6] == "done"
+
+
+def test_trail_records_retry_and_escalation(tmp_path):
+    plan = _escalating_plan(tmp_path)
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [_gate_failed("a"), _gate_failed("b"), {"status": "ok", "id": "j3"}]})
+
+    rc = run_plan(plan, state, spawn)
+
+    assert rc == 0
+    rows = [line.split("\t") for line in _trail_lines(plan)[1:]]
+    assert [row[1:4] for row in rows] == [
+        ["t1", "start", "task started"],
+        ["t1", "attempt", "attempt 1 ended"],
+        ["t1", "retry", "retry"],
+        ["t1", "attempt", "attempt 2 ended"],
+        ["t1", "escalate", "escalated implement-small -> implement"],
+        ["t1", "attempt", "attempt 3 ended"],
+        ["t1", "final", "task done"],
+    ]
+    assert rows[2][4] == "gate-failed"
+    assert rows[4][4] == "gate-failed"
+    assert rows[4][6] == "pending"
+
+
+def test_trail_header_written_once_across_resume(tmp_path):
+    plan = make_plan(tmp_path, [{"name": "t1"}])
+    run_plan(plan, load_or_init(plan), FakeSpawner({"t1": [{"status": "ok", "id": "j1"}]}))
+
+    # resume: the task is pending again and the runner appends to the same trail
+    state = load_or_init(plan)
+    state.task("t1").status = "pending"
+    rc = run_plan(plan, state, FakeSpawner({"t1": [{"status": "ok", "id": "j2"}]}))
+
+    assert rc == 0
+    lines = _trail_lines(plan)
+    assert lines.count("time\ttask\tphase\tdecision\treason\tevidence\tresult") == 1
+    assert [line.split("\t")[3] for line in lines[1:]] == [
+        "task started",
+        "attempt 1 ended",
+        "task done",
+        "attempt 2 ended",
+        "task done",
+    ]

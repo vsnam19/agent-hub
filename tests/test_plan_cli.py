@@ -170,3 +170,23 @@ def test_plan_review_task_end_to_end(env_sandbox, tmp_path):
     res = run_cli_plan(env_sandbox, plan_file, "run", extra_env=env)
     print((plan_file.parent / "state.json").read_text())
     assert res.returncode == 0
+
+
+def test_plan_status_trail_prints(env_sandbox, tmp_path):
+    repo = tmp_path / "repo"
+    make_repo(repo)
+    plan_file = make_plan_file(tmp_path, repo)
+    env = {"FAKE_CLAUDE_SCENARIO": "handoff", "FAKE_AGY_SCENARIO": "handoff", "FAKE_CODEX_SCENARIO": "handoff"}
+    run_cli_plan(env_sandbox, plan_file, "run", extra_env=env)
+
+    res = run_cli_plan(env_sandbox, plan_file, "status", extra_args=["--trail"])
+
+    assert res.returncode == 0
+    assert "\t" not in res.stdout
+    lines = res.stdout.splitlines()
+    assert lines[0].split()[:4] == ["time", "task", "phase", "decision"]
+    assert any(line.split()[1:2] == ["t1"] and "task started" in line for line in lines[1:])
+    assert any(line.split()[1:2] == ["t2"] and "task done" in line for line in lines[1:])
+    # columns line up: the task names sit at the header's "task" offset in every row
+    task_column = lines[0].index("task")
+    assert {line[task_column:].split()[0] for line in lines[1:]} == {"t1", "t2"}

@@ -5,6 +5,7 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -14,6 +15,21 @@ from agenthub.plan import Plan, Task
 from agenthub.planstate import AttemptState, State, TaskState
 
 PLAN_POLL_S = float(os.environ.get("AGENT_HUB_PLAN_POLL_S", "2.0"))
+TRAIL_HEADER = "time\ttask\tphase\tdecision\treason\tevidence\tresult"
+TERMINAL = ("done", "failed", "blocked", "scope-violation")
+
+
+def _trail(
+    plan: Plan, task: str, phase: str, decision: str, reason: str = "", evidence: str = "", result: str = ""
+) -> None:
+    """Append one row to the plan's decision trail (decisions.tsv). Only the runner writes it; the header goes first."""
+    trail_file = plan.path.parent / "decisions.tsv"
+    cells = [datetime.now(timezone.utc).astimezone().isoformat(), task, phase, decision, reason, evidence, result]
+    fresh = not trail_file.is_file()
+    with open(trail_file, "a") as f:
+        if fresh:
+            f.write(TRAIL_HEADER + "\n")
+        f.write("\t".join(str(c).replace("\t", " ").replace("\r", " ").replace("\n", " ") for c in cells) + "\n")
 
 
 def _kind(task: Task) -> str:
@@ -39,13 +55,16 @@ def _reviewers_besides(role: str, implementer: str) -> list[str]:
     return [link for link in load_pool().roles[role].chain if link != implementer]
 
 
-def _autocommit(worktree: str, slug: str, task_name: str, job_result: dict) -> None:
-    """Commit work a gated task's agent left uncommitted, so dependent tasks start from it. No-op on a clean tree."""
+def _autocommit(worktree: str, slug: str, task_name: str, job_result: dict) -> str | None:
+    """Commit work a gated task's agent left uncommitted, so dependent tasks start from it.
+
+    Returns the new commit's sha, or None on a clean tree (nothing committed).
+    """
     status = subprocess.run(
         _git_argv("status", "--porcelain"), cwd=worktree, capture_output=True, text=True, check=True
     ).stdout
     if not status.strip():
-        return
+        return None
     subprocess.run(_git_argv("add", "-A"), cwd=worktree, capture_output=True, text=True, check=True)
     # Fall back to a placeholder identity per key only when the repository configures none.
     identity = []
@@ -61,6 +80,9 @@ def _autocommit(worktree: str, slug: str, task_name: str, job_result: dict) -> N
         text=True,
         check=True,
     )
+    return subprocess.run(
+        _git_argv("rev-parse", "HEAD"), cwd=worktree, capture_output=True, text=True, check=True
+    ).stdout.strip()
 
 
 def compose_brief(plan: Plan, task: Task, state: State, attempt_note: str) -> str:
@@ -109,6 +131,7 @@ def run_plan(
                     if tstate.status == "running":
                         tstate.status = "failed"
                         tstate.reason = "cancelled"
+                        _trail(plan, name, "final", "task failed", "cancelled", "", "failed")
                         if name in running_children:
                             try:
                                 running_children[name].wait(timeout=1)
@@ -128,6 +151,7 @@ def run_plan(
                         if dep_status in ("failed", "blocked", "scope-violation", "skipped"):
                             tstate.status = "skipped"
                             tstate.reason = f"dependency {dep} {dep_status}"
+                            _trail(plan, task.name, "final", "task skipped", tstate.reason, "", "skipped")
                             changed = True
                             break
 
@@ -207,6 +231,7 @@ def run_plan(
                         # reuse existing
 
                     if tstate.status == "blocked":
+                        _trail(plan, task.name, "final", "task blocked", tstate.reason, "", "blocked")
                         continue
 
                 elif _kind(task) == "review":
@@ -219,6 +244,7 @@ def run_plan(
                     if exclude and not _reviewers_besides(task.role, exclude):
                         tstate.status = "blocked"
                         tstate.reason = f"no reviewer different from {exclude}"
+                        _trail(plan, task.name, "final", "task blocked", tstate.reason, "", "blocked")
                         changed = True
                         continue
 
@@ -264,6 +290,16 @@ def run_plan(
 
                 tstate.status = "running"
                 tstate.attempts.append(AttemptState(job="", status="", exit_code=-1))
+                if attempt_num == 1:
+                    _trail(
+                        plan,
+                        task.name,
+                        "start",
+                        "task started",
+                        f"role {tstate.role or task.role}",
+                        tstate.start_ref,
+                        "running",
+                    )
                 running_tasks.append(task)
                 changed = True
 
@@ -321,6 +357,8 @@ def run_plan(
                     attempt.status = job_status
                     attempt.exit_code = job_result.get("exit_code", popen.returncode if popen else -1)
                     attempt.gate_touched = job_result.get("gate_touched", [])
+                    _trail(plan, name, "attempt", f"attempt {len(tstate.attempts)} ended", job_status, attempt.job)
+                    role_before = tstate.role
 
                     reply_text = ""
                     reply_path = job_result.get("reply_path")
@@ -352,15 +390,19 @@ def run_plan(
                             if violations:
                                 tstate.status = "scope-violation"
                                 tstate.reason = "files outside scope: " + ", ".join(violations)
+                                _trail(plan, name, "scope", "scope violation", ", ".join(violations), attempt.job)
                             else:
+                                sha = None
                                 try:
                                     # A task resumed without a recorded worktree has no tree to commit.
                                     if tstate.worktree:
-                                        _autocommit(tstate.worktree, plan.slug, name, job_result)
+                                        sha = _autocommit(tstate.worktree, plan.slug, name, job_result)
                                 except subprocess.CalledProcessError as exc:
                                     tstate.status = "failed"
                                     tstate.reason = f"autocommit failed: {(exc.stderr or '').strip()}"
                                 else:
+                                    if sha:
+                                        _trail(plan, name, "commit", "autocommit", "agent left work uncommitted", sha)
                                     tstate.status = "done"
                                     tstate.reason = ""
                         else:
@@ -375,6 +417,32 @@ def run_plan(
                             tstate.status = "failed"
                         else:
                             apply_retry(tstate, task, job_status, job_result)
+
+                    if tstate.status == "pending":
+                        if tstate.role != role_before:
+                            _trail(
+                                plan,
+                                name,
+                                "escalate",
+                                f"escalated {tstate.escalated_from} -> {tstate.role}",
+                                job_status,
+                                f"reset to {tstate.start_ref}",
+                                "pending",
+                            )
+                        else:
+                            _trail(
+                                plan,
+                                name,
+                                "retry",
+                                "retry",
+                                job_status,
+                                f"{len(tstate.attempts)} attempts so far",
+                                "pending",
+                            )
+                    elif tstate.status in TERMINAL:
+                        _trail(
+                            plan, name, "final", f"task {tstate.status}", tstate.reason, tstate.branch, tstate.status
+                        )
 
                 state.save()
 
