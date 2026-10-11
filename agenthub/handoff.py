@@ -22,6 +22,26 @@ unit-test-verified | type-check-only | not-verified | inconclusive
 - <tasks you suggest; "(none)" if nothing>
 """
 
+REVIEW_FOOTER = """---
+When you are done, end your review with this section as your final message:
+
+## Verdict
+approve | request-changes
+"""
+
+
+def parse_verdict(reply: str) -> str | None:
+    """The word under the last `## Verdict` heading: "approve" or "request-changes"; None when absent or unknown."""
+    matches = list(re.finditer(r"^#{2,}\s+verdict\s*$", reply, re.IGNORECASE | re.MULTILINE))
+    if not matches:
+        return None
+    for line in reply[matches[-1].end() :].splitlines():
+        line = line.strip()
+        if line:
+            word = line.split()[0].lower().rstrip(".,;:'\"!?")
+            return word if word in ("approve", "request-changes") else None
+    return None
+
 
 def parse(reply: str) -> dict | None:
     # find the last ## Status heading, case-insensitively, any level >= 2

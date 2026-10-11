@@ -164,6 +164,8 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         text += "\n\n" + standing
     if kind == "implement":
         text += "\n" + handoff.FOOTER
+    else:
+        text += "\n\n" + handoff.REVIEW_FOOTER
     (job.dir / "brief.md").write_text(text)
     pid = os.getpid()
     (job.dir / "pid").write_text(json.dumps({"pid": pid, "start_time": start_time(pid)}))
@@ -171,6 +173,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     record: dict = {
         "id": job.id,
         "role": args.role,
+        "kind": kind,
         "status": "running",
         "exit_code": None,
         "agent": None,
@@ -184,6 +187,8 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         "changed_files": [],
         "diffstat": "",
         "reply_path": None,
+        "head": None,
+        "verdict": None,
     }
     job.write_json("result.json", record)
 
@@ -287,6 +292,9 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     else:
         record["handoff"] = None
         record["handoff_missing"] = False
+        reply_path = record.get("reply_path")
+        if status == "ok" and reply_path and Path(reply_path).is_file():
+            record["verdict"] = handoff.parse_verdict(Path(reply_path).read_text())
 
     record["gate"] = []
     if status == "ok" and kind == "implement" and gates:
@@ -294,6 +302,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         gate_dir = job.dir / "gate"
         gate_dir.mkdir(exist_ok=True)
 
+        gate_sha = guards.head(repo)
         for n, cmd in enumerate(gates, start=1):
             attempt_dir = gate_dir / str(n)
             attempt_dir.mkdir(exist_ok=True)
@@ -312,7 +321,14 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
 
             rc = ran.rc if not ran.timed_out else (ran.rc if ran.rc != 0 else -15)
             record["gate"].append(
-                {"cmd": cmd, "rc": rc, "duration_s": round(ran.duration_s, 3), "tail": tail, "log": str(log_path)}
+                {
+                    "cmd": cmd,
+                    "rc": rc,
+                    "duration_s": round(ran.duration_s, 3),
+                    "tail": tail,
+                    "log": str(log_path),
+                    "sha": gate_sha,
+                }
             )
 
             if rc != 0:
@@ -326,6 +342,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     else:
         record["gate_touched"] = []
 
+    record["head"] = guards.head(repo)
     files, stat = guards.changes(repo, start_head)
     record.update(changed_files=files, diffstat=stat)
     if args.allow and kind == "implement" and status in ("ok", "gate-failed"):
@@ -339,6 +356,40 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
             if status == "ok":
                 status = "scope-violation"
     return _finish(job, record, status or "exhausted", now, started)
+
+
+def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
+    """What still blocks a merge of `workdir` at `head`; empty when ready. `jobs` are result records, newest first."""
+    mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == workdir.resolve()]
+
+    def who(j: dict) -> str:
+        return f"{j.get('agent')}:{j.get('model')}"
+
+    gated = [
+        j
+        for j in mine
+        if j.get("kind") == "implement"
+        and j.get("head") == head
+        and j.get("gate")
+        and all(g.get("rc") == 0 and g.get("sha") == head for g in j["gate"])
+    ]
+    reviews = [j for j in mine if j.get("kind") == "review" and j.get("status") == "ok" and j.get("verdict")]
+    problems = []
+    if not gated:
+        problems.append(f"no gated implement job on {head}")
+    if not reviews:
+        problems.append("no review")
+        return problems
+    on_head = [r for r in reviews if r.get("head") == head]
+    if not on_head:
+        problems.append(f"review is stale (reviewed {reviews[0].get('head')})")
+        return problems
+    approved = [r for r in on_head if r["verdict"] == "approve"]
+    if not approved:
+        problems.append(f"review verdict {on_head[0]['verdict']}")
+    elif gated and all(who(r) in {who(g) for g in gated} for r in approved):
+        problems.append("reviewer is the implementer")
+    return problems
 
 
 def _rel(job: Job, attempt_dir: Path, name: str) -> str:

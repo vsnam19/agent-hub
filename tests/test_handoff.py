@@ -1,4 +1,4 @@
-from agenthub.handoff import FOOTER, parse
+from agenthub.handoff import FOOTER, parse, parse_verdict
 
 
 def test_parse_full_handoff():
@@ -126,3 +126,11 @@ inconclusive
     assert res is not None
     assert res["verification"] == "inconclusive"
     assert res["status"] == "blocked"
+
+
+def test_parse_review_verdict():
+    assert parse_verdict("findings\n\n## Verdict\napprove\n") == "approve"
+    assert parse_verdict("## verdict\n\nRequest-Changes.\n") == "request-changes"
+    assert parse_verdict("## Verdict\napprove\n\n## Verdict\nrequest-changes\n") == "request-changes"
+    assert parse_verdict("## Verdict\nmaybe\n") is None
+    assert parse_verdict("no findings") is None

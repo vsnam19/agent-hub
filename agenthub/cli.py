@@ -14,7 +14,7 @@ from agenthub.agents import registry
 from agenthub.brief import BriefError, order_table
 from agenthub.config import ConfigError, load_pool, parse_duration, paths, role_kind
 from agenthub.jobs import get_job, list_jobs
-from agenthub.orchestrate import EXIT, RunArgs, run_job
+from agenthub.orchestrate import EXIT, RunArgs, readiness, run_job
 from agenthub.plan import PlanError
 from agenthub.plan import load as load_plan
 from agenthub.planrun import run_plan
@@ -101,6 +101,12 @@ def _build_parser() -> argparse.ArgumentParser:
     orders.add_argument("-d", "--dir", default=".", dest="workdir", help="repo whose standing orders to list")
     orders.add_argument("--json", action="store_true")
 
+    ready = sub.add_parser(
+        "ready", help="is this work tree's HEAD gated and approved by another model? (exit 1 if not)"
+    )
+    ready.add_argument("-d", "--dir", default=".", dest="workdir", help="work tree to check")
+    ready.add_argument("--json", action="store_true")
+
     return parser
 
 
@@ -117,6 +123,7 @@ def main(argv: list[str] | None = None) -> int:
             "wait": _cmd_wait,
             "plan": _cmd_plan,
             "orders": _cmd_orders,
+            "ready": _cmd_ready,
         }[args.command]
         return handler(args)
     except SystemExit as e:  # --help
@@ -291,6 +298,23 @@ def _cmd_orders(args) -> int:
     for o in orders:
         print(_safe(f"{o.number:>3}  {o.enforced_by or 'MISSING':<{width}}  {o.rule}  ({o.source})"))
     return 1 if missing else 0
+
+
+def _cmd_ready(args) -> int:
+    try:
+        repo = guards.inspect(Path(args.workdir))
+    except guards.GuardError as e:
+        raise UsageError(str(e)) from None
+    head = guards.head(repo)
+    problems = readiness(list_jobs(paths(), 100000), repo.root, head)
+    if args.json:
+        print(json.dumps({"ready": not problems, "head": head, "problems": problems}, indent=2))
+    elif problems:
+        for problem in problems:
+            print(_safe(f"not ready: {problem}"))
+    else:
+        print(f"ready: {head}")
+    return 1 if problems else 0
 
 
 def _cmd_profile(args) -> int:
