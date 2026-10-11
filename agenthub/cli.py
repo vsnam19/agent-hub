@@ -11,7 +11,7 @@ from pathlib import Path
 
 from agenthub.agents import registry
 from agenthub.brief import BriefError
-from agenthub.config import ConfigError, load_pool, parse_duration, paths
+from agenthub.config import ConfigError, load_pool, parse_duration, paths, role_kind
 from agenthub.jobs import get_job, list_jobs
 from agenthub.orchestrate import EXIT, RunArgs, run_job
 from agenthub.plan import PlanError
@@ -44,7 +44,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
 
     run = sub.add_parser("run", help="run one job")
-    run.add_argument("--role", required=True, choices=["implement", "review"])
+    run.add_argument("--role", required=True)
     run.add_argument("--brief", help="brief file, or - for stdin (optional for review)")
     run.add_argument("-d", "--dir", required=True, dest="workdir")
     run.add_argument("--agent", help="use this single agent:model instead of the role's chain")
@@ -113,9 +113,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
-def _read_brief(args) -> str:
+def _read_brief(args, kind: str) -> str:
     if args.brief is None:
-        if args.role == "implement":
+        if kind == "implement":
             raise UsageError("--brief is required for implement")
         return ""
     if args.brief == "-":
@@ -172,16 +172,16 @@ def _emit(text: str) -> None:
 def _cmd_run(args) -> int:
     p = paths()
     pool = load_pool(p)
+    kind = role_kind(pool, args.role)
     if args.agent:
         links = [parse_link(args.agent)]
     else:
-        if args.role not in pool.roles:
-            raise ConfigError(f"no chain configured for role {args.role!r}")
-        links = [parse_link(x) for x in pool.roles[args.role]]
+        links = [parse_link(x) for x in pool.roles[args.role].chain]
     timeout = parse_duration(args.timeout) if args.timeout else pool.timeouts[args.role]
-    text = _read_brief(args)
+    text = _read_brief(args, kind)
     run_args = RunArgs(
         role=args.role,
+        kind=kind,
         brief=text,
         workdir=Path(args.workdir).expanduser().resolve(),
         links=links,
@@ -213,10 +213,10 @@ def _cmd_pool(args) -> int:
             print(_safe(f"no cooldown for {link}"))
         return 0
 
-    roles: dict[str, list[dict]] = {}
-    for role, chain in pool.roles.items():
+    roles: dict[str, dict] = {}
+    for role, config in pool.roles.items():
         entries = []
-        for text in chain:
+        for text in config.chain:
             link = parse_link(text)
             adapter = adapters.get(link.agent)
             installed = adapter is not None and adapter.installed()
@@ -229,14 +229,15 @@ def _cmd_pool(args) -> int:
                     "cooldown_until": until.isoformat() if until else None,
                 }
             )
-        roles[role] = entries
+        roles[role] = {"kind": config.kind, "escalate": config.escalate, "chain": entries}
 
     if args.json:
         print(json.dumps({"roles": roles}, indent=2))
         return 0
-    for role, entries in roles.items():
-        print(_safe(f"{role}:"))
-        for e in entries:
+    for role, config in roles.items():
+        escalate = f", escalate → {config['escalate']}" if config["escalate"] else ""
+        print(_safe(f"{role} ({config['kind']}{escalate}):"))
+        for e in config["chain"]:
             parts = [e["link"], "installed" if e["installed"] else "missing"]
             if e["version"]:
                 parts.append(e["version"])

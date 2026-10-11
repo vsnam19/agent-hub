@@ -2,7 +2,7 @@ from datetime import timedelta
 
 import pytest
 
-from agenthub.config import ConfigError, load_pool, parse_duration, paths
+from agenthub.config import ConfigError, load_pool, parse_duration, paths, role_kind
 
 
 def test_paths_honour_agent_hub_env(monkeypatch, tmp_path):
@@ -59,12 +59,11 @@ def test_load_pool_default_only(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_HUB_CONFIG", str(tmp_path / "conf"))
     p = paths()
     pool = load_pool(p)
-    assert pool.roles["implement"] == [
-        "agy:claude-opus-4-6-thinking",
+    assert pool.roles["implement"].chain == [
+        "claude:haiku",
         "agy:claude-sonnet-4-6",
         "agy:gemini-3.1-pro-high",
         "codex:gpt-5.6-terra",
-        "claude:sonnet",
     ]
     assert pool.timeouts["review"] == timedelta(minutes=20)
     assert pool.quota_cooldown == timedelta(minutes=60)
@@ -80,9 +79,14 @@ chain = ["x:y"]
     monkeypatch.setenv("AGENT_HUB_CONFIG", str(conf))
     p = paths()
     pool = load_pool(p)
-    assert pool.roles["implement"] == ["x:y"]
+    assert pool.roles["implement"].chain == ["x:y"]
     assert "review" in pool.roles
-    assert pool.roles["review"] == ["codex:gpt-5.6-terra", "agy:gemini-3.1-pro-high", "claude:sonnet"]
+    assert pool.roles["review"].chain == [
+        "agy:claude-opus-4-6-thinking",
+        "codex:gpt-5.6-terra",
+        "agy:gemini-3.1-pro-high",
+        "claude:sonnet",
+    ]
 
 
 def test_load_pool_user_defaults_merge(monkeypatch, tmp_path):
@@ -109,3 +113,62 @@ def test_load_pool_invalid_toml_names_file(monkeypatch, tmp_path):
 
     with pytest.raises(ConfigError, match=re.escape(str(conf / "pool.toml"))):
         load_pool(p)
+
+
+def test_legacy_pool_without_kind_still_works(monkeypatch, tmp_path):
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    (conf / "pool.toml").write_text('[roles.implement]\nchain = ["claude:legacy"]\n')
+    monkeypatch.setenv("AGENT_HUB_CONFIG", str(conf))
+
+    pool = load_pool(paths())
+
+    assert pool.roles["implement"].kind == "implement"
+    assert role_kind(pool, "implement") == "implement"
+    assert pool.roles["implement"].chain == ["claude:legacy"]
+
+
+def test_custom_role_requires_kind(monkeypatch, tmp_path):
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    (conf / "pool.toml").write_text('[roles.fast]\nchain = ["claude:haiku"]\n')
+    monkeypatch.setenv("AGENT_HUB_CONFIG", str(conf))
+
+    with pytest.raises(ConfigError, match="fast.*kind"):
+        load_pool(paths())
+
+
+def test_escalate_unknown_role_is_error(monkeypatch, tmp_path):
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    (conf / "pool.toml").write_text(
+        '[roles.implement]\nkind = "implement"\nescalate = "missing"\nchain = ["claude:haiku"]\n'
+    )
+    monkeypatch.setenv("AGENT_HUB_CONFIG", str(conf))
+
+    with pytest.raises(ConfigError, match="unknown role 'missing'"):
+        load_pool(paths())
+
+
+def test_review_role_cannot_escalate(monkeypatch, tmp_path):
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    (conf / "pool.toml").write_text(
+        '[roles.review]\nkind = "review"\nescalate = "implement"\nchain = ["claude:sonnet"]\n'
+    )
+    monkeypatch.setenv("AGENT_HUB_CONFIG", str(conf))
+
+    with pytest.raises(ConfigError, match="review role 'review' cannot escalate"):
+        load_pool(paths())
+
+
+def test_default_pool_roles(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_HUB_CONFIG", str(tmp_path / "conf"))
+    pool = load_pool(paths())
+
+    assert {(name, role.kind, role.escalate) for name, role in pool.roles.items()} == {
+        ("implement-small", "implement", "implement"),
+        ("implement", "implement", "implement-hard"),
+        ("implement-hard", "implement", None),
+        ("review", "review", None),
+    }

@@ -6,11 +6,11 @@ class BriefError(Exception):
     pass
 
 
-def validate(role: str, text: str) -> None:
-    if role == "review":
+def validate(kind: str, text: str) -> None:
+    if kind == "review":
         return
-    if role != "implement":
-        raise BriefError(f"Unknown role: {role}")
+    if kind != "implement":
+        raise BriefError(f"Unknown role: {kind}")
 
     # Headings: level >= 2 ('#' * n + space), text case-insensitive, trailing spaces/colon ignored.
     has_input = False

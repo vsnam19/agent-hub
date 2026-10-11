@@ -15,6 +15,11 @@ from agenthub.planstate import AttemptState, State, TaskState
 PLAN_POLL_S = float(os.environ.get("AGENT_HUB_PLAN_POLL_S", "2.0"))
 
 
+def _kind(task: Task) -> str:
+    """Keep programmatically constructed legacy tasks working in tests and integrations."""
+    return task.kind or task.role
+
+
 def compose_brief(plan: Plan, task: Task, state: State, attempt_note: str) -> str:
     parts = []
     parts.append("## Goal (whole plan)\n\n" + plan.goal.strip())
@@ -106,7 +111,7 @@ def run_plan(
                 attempt_num = len(tstate.attempts) + 1
                 attempt_note = tstate.reason
 
-                if task.role == "implement":
+                if _kind(task) == "implement":
                     worktree_path = plan.repo.parent / f"{plan.repo.name}/.worktrees/{plan.slug}-{task.name}"
                     worktree_abs = worktree_path.resolve()
                     branch = f"orch/{plan.slug}/{task.name}"
@@ -114,7 +119,9 @@ def run_plan(
                     if not worktree_abs.exists():
                         # Determine start_ref
                         implement_deps = [
-                            d for d in task.depends_on if next(t.role for t in plan.tasks if t.name == d) == "implement"
+                            d
+                            for d in task.depends_on
+                            if _kind(next(t for t in plan.tasks if t.name == d)) == "implement"
                         ]
 
                         start_ref = plan.base
@@ -158,7 +165,7 @@ def run_plan(
                     if tstate.status == "blocked":
                         continue
 
-                elif task.role == "review":
+                elif _kind(task) == "review":
                     verifies = task.verifies
                     vstate = state.task(verifies)
                     tstate.worktree = vstate.worktree
@@ -195,7 +202,7 @@ def run_plan(
                     argv.extend(["--timeout", task.timeout])
                 for g in task.gate:
                     argv.extend(["--gate", g])
-                if task.role == "review":
+                if _kind(task) == "review":
                     argv.extend(["--base", tstate.start_ref])
                 if plan.jev:
                     argv.append("--jev")
@@ -278,7 +285,7 @@ def run_plan(
                     tstate.handoff = f"handoffs/{name}.md"
 
                     # 5. Outcome
-                    if task.role == "implement":
+                    if _kind(task) == "implement":
                         if job_status == "ok":
                             paths_allowed = task.paths_allowed
                             changed_files = job_result.get("changed_files", [])

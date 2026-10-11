@@ -4,6 +4,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agenthub.config import ConfigError, load_pool, role_kind
 from agenthub.guards import _run_git
 
 
@@ -15,6 +16,7 @@ class PlanError(Exception):
 class Task:
     name: str
     role: str
+    kind: str | None = None
     brief: Path | None = None
     verifies: str | None = None
     gate: list[str] = field(default_factory=list)
@@ -45,6 +47,10 @@ def load(path: Path) -> Plan:
         raise PlanError(f"failed to read/parse json: {e}") from e
 
     errors = []
+    try:
+        pool = load_pool()
+    except ConfigError as e:
+        raise PlanError(str(e)) from e
 
     for k in ["goal", "repo", "base", "slug", "tasks"]:
         if k not in data:
@@ -90,13 +96,16 @@ def load(path: Path) -> Plan:
         task_names.add(name)
 
         role = tdata.get("role")
-        if role not in ["implement", "review"]:
-            errors.append(f"task {name}: role must be implement or review")
+        try:
+            kind = role_kind(pool, str(role))
+        except ConfigError as e:
+            errors.append(f"task {name}: {e}")
+            kind = None
 
         brief_path = None
         verifies = None
 
-        if role == "implement":
+        if kind == "implement":
             brief = tdata.get("brief")
             if not brief:
                 errors.append(f"task {name}: implement needs brief")
@@ -104,7 +113,7 @@ def load(path: Path) -> Plan:
                 brief_path = path.parent / brief
                 if not brief_path.exists():
                     errors.append(f"task {name}: brief file {brief_path} must exist")
-        elif role == "review":
+        elif kind == "review":
             verifies = tdata.get("verifies")
             if not verifies:
                 errors.append(f"task {name}: review needs verifies")
@@ -125,6 +134,7 @@ def load(path: Path) -> Plan:
             Task(
                 name=name,
                 role=str(role),
+                kind=kind,
                 brief=brief_path,
                 verifies=verifies,
                 gate=tdata.get("gate", []),
@@ -138,7 +148,7 @@ def load(path: Path) -> Plan:
 
     # Review implicitly depends on what it verifies
     for t in tasks:
-        if t.role == "review" and t.verifies and t.verifies not in t.depends_on:
+        if t.kind == "review" and t.verifies and t.verifies not in t.depends_on:
             t.depends_on.append(t.verifies)
 
     # Cycle detection
