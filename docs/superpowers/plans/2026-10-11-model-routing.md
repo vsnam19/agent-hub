@@ -109,7 +109,7 @@ Tests: `test_gate_failed_task_escalates_once_with_gate_tail`, `test_escalation_r
 
 ### Task 4: review never on the implementing model (`review-other-model`) — depends on `roles`
 
-**Files:** Modify `agenthub/planrun.py` (and `agenthub/orchestrate.py` if the exclusion is passed down); tests in
+**Files:** Modify `agenthub/planrun.py`, `agenthub/orchestrate.py`, `agenthub/cli.py` (the exclusion is passed down to the job runner); tests in
 `tests/test_planrun.py`.
 
 - For a plan `review` task with `verifies: <task>`, the chain skips every link equal to the `agent:model` that
