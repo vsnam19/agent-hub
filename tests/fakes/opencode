@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
+import json
+import os
 import sys
+from pathlib import Path
 
 from _common import record_call
 
 
 def main():
     scenario = record_call("opencode")
+    # Record what the child received for the gwen key, so tests can check delivery without reading the key from argv.
+    received = {"GWEN_API_KEY": os.environ.get("GWEN_API_KEY"), "OPENCODE_CONFIG": os.environ.get("OPENCODE_CONFIG")}
+    count = int((Path(os.environ["FAKE_LOG_DIR"]) / "opencode.count").read_text())
+    (Path(os.environ["FAKE_LOG_DIR"]) / f"opencode.env.{count}.json").write_text(json.dumps(received))
     if scenario == "ok":
         print("done")
         sys.exit(0)

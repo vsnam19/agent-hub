@@ -10,10 +10,9 @@ import pytest
 from agenthub.agents import Invocation, Outcome, Request
 from agenthub.agents.gwen import GwenAdapter
 from agenthub.config import paths
-from agenthub.orchestrate import run_job
 from agenthub.pool import Cooldowns, parse_link
 from agenthub.process import run
-from tests.test_run import BRIEF, args_for, go, job_dir, make_pool, now, scenario
+from tests.test_run import go, job_dir, now, scenario
 
 KEY = "sekrit-key-123"
 
@@ -72,7 +71,12 @@ def _req(tmp_path, role="implement", model="qwen-test"):
     attempt = tmp_path / "attempt"
     attempt.mkdir(exist_ok=True)
     return Request(
-        role=role, model=model, workdir=tmp_path, brief_path=brief, attempt_dir=attempt, git_common_dir=tmp_path / ".git"
+        role=role,
+        model=model,
+        workdir=tmp_path,
+        brief_path=brief,
+        attempt_dir=attempt,
+        git_common_dir=tmp_path / ".git",
     )
 
 
@@ -95,7 +99,9 @@ def test_gwen_preflight_unreachable_falls_through(env_sandbox, repo, tmp_path, m
     assert first["agent"] == "gwen" and first["outcome"] == "model-unavailable"
     assert "gwen host unreachable" in first["reason"]
     assert result["attempts"][1]["outcome"] == "ok"
-    assert Cooldowns(paths().cooldowns_file).until(parse_link("gwen:qwen-test"), now()) is None
+    cooldowns_file = paths().cooldowns_file
+    assert "gwen" not in (cooldowns_file.read_text() if cooldowns_file.exists() else "")
+    assert Cooldowns(cooldowns_file).until(parse_link("gwen:qwen-test"), now()) is None
 
 
 def test_gwen_preflight_wrong_model(tmp_path, monkeypatch, server):
@@ -160,6 +166,10 @@ def test_gwen_key_not_in_job_records(env_sandbox, repo, monkeypatch, server):
     for f in files:
         assert KEY not in f.read_text(errors="replace"), f
     assert KEY not in (env_sandbox.fakelog / "opencode.1.json").read_text()
+    # the key did reach the child, through the environment only
+    received = json.loads((env_sandbox.fakelog / "opencode.env.1.json").read_text())
+    assert received["GWEN_API_KEY"] == KEY
+    assert received["OPENCODE_CONFIG"] == str(job_dir(result) / "attempts" / "1-gwen-qwen-test" / "opencode.json")
 
 
 def test_gwen_classify_ok(tmp_path):
