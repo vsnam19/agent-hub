@@ -4,6 +4,7 @@ from pathlib import Path
 
 import agenthub.planrun
 from agenthub.config import load_pool, paths
+from agenthub.guards import _git_argv
 from agenthub.plan import Plan, Task
 from agenthub.planrun import compose_brief, run_plan
 from agenthub.planstate import load_or_init
@@ -505,3 +506,94 @@ def test_escalation_cycle_guard(tmp_path):
     assert run_plan(plan, state, spawn) == 1
     assert [_role_of(a) for a, _ in spawn.spawns] == ["a", "a", "b"]
     assert state.task("t1").status == "failed"
+
+
+class WritingSpawner(FakeSpawner):
+    """Writes one file into each named task's worktree before its fake job finishes, as an agent would."""
+
+    def __init__(self, results, writes):
+        super().__init__(results)
+        self.writes = writes
+
+    def __call__(self, argv, log_path):
+        name = log_path.stem.rsplit("-", 1)[0]
+        if name in self.writes:
+            workdir = Path(argv[argv.index("-d") + 1])
+            (workdir / f"{name}.txt").write_text(f"work of {name}\n")
+        return super().__call__(argv, log_path)
+
+
+def git_out(cwd, *args):
+    return subprocess.run(_git_argv(*args), cwd=cwd, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def test_done_task_with_uncommitted_work_is_committed(tmp_path):
+    plan = make_plan(tmp_path, [{"name": "t1"}])
+    state = load_or_init(plan)
+    spawn = WritingSpawner(
+        {"t1": [{"status": "ok", "exit_code": 0, "id": "j1", "agent": "codex", "model": "gpt-x"}]}, writes={"t1"}
+    )
+
+    rc = run_plan(plan, state, spawn)
+
+    assert rc == 0
+    assert state.task("t1").status == "done"
+    worktree = Path(state.task("t1").worktree)
+    assert git_out(worktree, "status", "--porcelain") == ""
+    assert git_out(worktree, "rev-list", "--count", "master..HEAD") == "1"
+    assert git_out(worktree, "log", "-1", "--format=%s") == (
+        "orch: testslug/t1 — work left uncommitted by codex:gpt-x (gate passed)"
+    )
+    assert git_out(worktree, "show", "--name-only", "--format=", "HEAD") == "t1.txt"
+
+
+def test_failed_gate_is_not_committed(tmp_path):
+    plan = make_plan(tmp_path, [{"name": "t1", "max_attempts": 1}])
+    state = load_or_init(plan)
+    spawn = WritingSpawner(
+        {"t1": [{"status": "gate-failed", "exit_code": 1, "id": "j1", "gate": [{"cmd": "pytest", "rc": 1}]}]},
+        writes={"t1"},
+    )
+
+    rc = run_plan(plan, state, spawn)
+
+    assert rc == 1
+    assert state.task("t1").status == "failed"
+    worktree = Path(state.task("t1").worktree)
+    assert git_out(worktree, "rev-list", "--count", "master..HEAD") == "0"
+    assert "?? t1.txt" in git_out(worktree, "status", "--porcelain")
+
+
+def test_dependent_starts_from_autocommitted_work(tmp_path):
+    plan = make_plan(tmp_path, [{"name": "t1"}, {"name": "t2", "depends_on": ["t1"]}])
+    state = load_or_init(plan)
+    spawn = WritingSpawner(
+        {
+            "t1": [{"status": "ok", "exit_code": 0, "id": "j1", "agent": "codex", "model": "gpt-x"}],
+            "t2": [{"status": "ok", "exit_code": 0, "id": "j2"}],
+        },
+        writes={"t1"},
+    )
+
+    rc = run_plan(plan, state, spawn)
+
+    assert rc == 0
+    assert state.task("t2").start_ref == state.task("t1").branch
+    assert (Path(state.task("t2").worktree) / "t1.txt").read_text() == "work of t1\n"
+
+
+def test_autocommit_falls_back_to_agent_hub_identity(tmp_path, monkeypatch):
+    repo_dir = make_repo(tmp_path / "repo")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+    git_out(repo_dir, "config", "--unset", "user.name")
+    git_out(repo_dir, "config", "--unset", "user.email")
+    plan = make_plan(tmp_path, [{"name": "t1"}])
+    state = load_or_init(plan)
+    spawn = WritingSpawner({"t1": [{"status": "ok", "exit_code": 0, "id": "j1"}]}, writes={"t1"})
+
+    rc = run_plan(plan, state, spawn)
+
+    assert rc == 0
+    worktree = Path(state.task("t1").worktree)
+    assert git_out(worktree, "log", "-1", "--format=%an <%ae>") == "agent-hub <agent-hub@localhost>"
