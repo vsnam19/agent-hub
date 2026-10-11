@@ -74,6 +74,30 @@ def test_test_function_deleted(repo):
     assert res == [{"file": "test_d.py", "kind": "test-deleted", "lines": [1]}]
 
 
+def test_signature_change_is_not_test_deleted(repo):
+    test_file = repo / "test_e.py"
+    test_file.write_text("def test_x(a):\n    assert a\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("def test_x(a, b):\n    assert a\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == []
+
+
+def test_renamed_away_test_is_test_deleted(repo):
+    test_file = repo / "test_f.py"
+    test_file.write_text("def test_old():\n    assert 1\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("def test_new():\n    assert 1\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == [{"file": "test_f.py", "kind": "test-deleted", "lines": [1]}]
+
+
 def test_justfile_change_flagged(repo):
     f = repo / "justfile"
     f.write_text("test:\n  pytest\n")

@@ -150,6 +150,14 @@ def inspect_diff(repo: guards.Repo, since: str) -> list[dict]:
 
     findings = []
 
+    # Test names added per file: a removed test whose name is re-added (e.g. a signature change) was not deleted
+    added_test_names: dict[str, set[str]] = {}
+    for c in changes:
+        if c.kind == "added" and _is_test_file(c.path):
+            m = re.search(r"def\s+(test_\w*)", c.content)
+            if m:
+                added_test_names.setdefault(c.path, set()).add(m.group(1))
+
     # Process changes
     for c in changes:
         if _is_test_file(c.path):
@@ -157,7 +165,8 @@ def inspect_diff(repo: guards.Repo, since: str) -> list[dict]:
                 findings.append({"file": c.path, "kind": "assert-removed", "line": c.line_num})
             if c.kind == "added" and re.search(r"\b(?:skip|xfail)\b|--ignore|--deselect", c.content):
                 findings.append({"file": c.path, "kind": "skip-added", "line": c.line_num})
-            if c.kind == "removed" and re.search(r"def\s+test_", c.content):
+            m = re.search(r"def\s+(test_\w*)", c.content) if c.kind == "removed" else None
+            if m and m.group(1) not in added_test_names.get(c.path, set()):
                 findings.append({"file": c.path, "kind": "test-deleted", "line": c.line_num})
 
         if _is_gate_config(c.path):

@@ -103,6 +103,7 @@ def _build_parser() -> argparse.ArgumentParser:
     plan_wait.add_argument("--json", action="store_true")
     plan_cancel = plan_sub.add_parser("cancel", help="stop the plan's runner and its running jobs")
     plan_cancel.add_argument("plan_file", metavar="<plan.json>")
+    plan_cancel.add_argument("-d", "--dir", default=".", dest="workdir", help="repository the caller runs from")
 
     orders = sub.add_parser("orders", help="list standing orders and what enforces each (exit 1 if one has none)")
     orders.add_argument("-d", "--dir", default=".", dest="workdir", help="repo whose standing orders to list")
@@ -569,6 +570,12 @@ def _cmd_plan(args) -> int:
         return 0
 
     elif args.plan_command == "cancel":
+        if _repo_of(args.workdir) != _repo_of(str(plan.repo)):
+            print(
+                _safe(f"plan {plan.slug} belongs to {plan.repo}; run plan cancel from that repository", sys.stderr),
+                file=sys.stderr,
+            )
+            return 3
         if not state_file.is_file():
             raise UsageError("state.json not found")
         state_data = json.loads(state_file.read_text())
