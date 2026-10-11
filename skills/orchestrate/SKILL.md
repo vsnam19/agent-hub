@@ -127,12 +127,12 @@ or data, and force operations. "Don't stop" or "run until done" from the user me
 | Status | Exit | Meaning | What you do next |
 |---|---|---|---|
 | `ok` | 0 | An agent finished with a non-empty reply. | Verify (step 7). Do not trust the reply. |
-| `failed` | 1 | Failure that is not quota, auth or model. | Read the reply and stderr in the attempt directory, inspect the tree, then re-brief, escalate or take over. |
+| `failed` | 1 | Failure that is not quota, auth or model. | Read the reply and stderr in the attempt directory, inspect the tree, then re-brief or escalate. |
 | `refused` | 3 | A guard refused the work directory. | Fix the directory: use a git work tree on a feature branch, then run again. |
 | `exhausted` | 4 | No link could run (all skipped or fell through). | Report which links failed and why; `agent-hub pool` shows cooldowns; wait, clear one with `pool --clear`, or do it yourself. |
 | `modified-tree` | 5 | A review changed the work tree. | Treat the review as untrustworthy; inspect and revert the change, then re-run or discard. |
 | `timeout` | 6 | The attempt hit its timeout. | Inspect the tree and any partial reply; re-brief with a smaller scope or a longer `--timeout`. |
-| `empty` | 7 | The agent exited cleanly but returned nothing. | Inspect the tree; the work may still be done. Re-brief or take over. |
+| `empty` | 7 | The agent exited cleanly but returned nothing. | Inspect the tree; the work may still be done. Re-brief or escalate. |
 | `interrupted` | 8 | Quota, auth or model failure after the tree had changed; no fallback. | Inspect the half-done tree, then finish it yourself or re-brief a fresh run from a clean state. |
 | `gate-failed` | 9 | A gate command failed. | Read the gate tail; re-brief, escalate one tier, or fix. |
 | `cancelled` | 130 | `agent-hub cancel` or Ctrl-C. | Inspect the tree; start again only if still wanted. |
