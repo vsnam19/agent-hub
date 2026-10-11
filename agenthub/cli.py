@@ -405,6 +405,8 @@ def _cmd_plan(args) -> int:
                 gate_touched = last.get("gate_touched", [])
                 if gate_touched:
                     line += f" gate touched: {len(gate_touched)}"
+            if ts.get("escalated_from"):
+                line += f" escalated from {ts['escalated_from']}"
             if branch:
                 line += f" branch={branch}"
             if handoff:

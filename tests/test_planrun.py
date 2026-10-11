@@ -1,4 +1,6 @@
 import json
+import subprocess
+from pathlib import Path
 
 import agenthub.planrun
 from agenthub.config import load_pool, paths
@@ -59,7 +61,8 @@ def make_plan(tmp_path, tasks):
         pt = Task(
             name=t["name"],
             role=t.get("role", "implement"),
-            brief=brief_path if t.get("role", "implement") == "implement" else None,
+            kind=t.get("kind"),
+            brief=brief_path if t.get("kind", t.get("role", "implement")) == "implement" else None,
             verifies=t.get("verifies"),
             depends_on=t.get("depends_on", []),
             paths_allowed=t.get("paths_allowed", []),
@@ -234,6 +237,10 @@ def test_timeout_retry_note(tmp_path):
 
 
 def test_failed_retried_only_once(tmp_path):
+    # legacy pool without escalate links: a failed task stays failed (escalation is covered separately)
+    config_dir = paths().config_dir
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "pool.toml").write_text('[roles.implement]\nkind = "implement"\nchain = ["claude:haiku"]\n')
     plan = make_plan(tmp_path, [{"name": "t1", "max_attempts": 5}])
     state = load_or_init(plan)
     spawn = FakeSpawner({"t1": [{"status": "failed"}, {"status": "failed"}, {"status": "ok"}]})
@@ -404,3 +411,97 @@ def test_review_blocked_when_only_implementing_model_left(tmp_path):
     assert state.task("r1").status == "blocked"
     assert state.task("r1").reason == "no reviewer different from claude:haiku"
     assert len(spawn.spawns) == 1
+
+
+def _escalating_plan(tmp_path, role="implement-small"):
+    return make_plan(tmp_path, [{"name": "t1", "role": role, "kind": "implement"}])
+
+
+def _role_of(argv):
+    return argv[argv.index("--role") + 1]
+
+
+def _gate_failed(tail="boom"):
+    return {"status": "gate-failed", "gate": [{"cmd": "just test", "rc": 1, "tail": tail}]}
+
+
+def test_gate_failed_task_escalates_once_with_gate_tail(tmp_path):
+    plan = _escalating_plan(tmp_path)
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [_gate_failed("a"), _gate_failed("tail-xyz"), {"status": "ok"}]})
+    rc = run_plan(plan, state, spawn)
+    assert rc == 0
+    assert [_role_of(a) for a, _ in spawn.spawns] == ["implement-small", "implement-small", "implement"]
+    tstate = state.task("t1")
+    assert tstate.status == "done"
+    assert tstate.escalated_from == "implement-small"
+    assert len(tstate.attempts) == 3
+    sent = (plan.path.parent / "briefs-sent" / "t1-3.md").read_text()
+    assert "## Previous attempt failed" in sent
+    assert "tail-xyz" in sent
+
+
+def test_escalation_resets_committed_work(tmp_path):
+    plan = _escalating_plan(tmp_path)
+    state = load_or_init(plan)
+
+    class Committing(FakeSpawner):
+        def __call__(self, argv, log_path):
+            wt = argv[argv.index("-d") + 1]
+            if _role_of(argv) == "implement-small":
+                junk = f"junk{len(self.spawns)}.txt"
+                (Path(wt) / junk).write_text("x")
+                subprocess.run(["git", "add", junk], cwd=wt, check=True)
+                subprocess.run(
+                    ["git", "-c", "user.name=t", "-c", "user.email=t@e", "commit", "-m", "junk"], cwd=wt, check=True
+                )
+                (Path(wt) / f"untracked{len(self.spawns)}.txt").write_text("y")
+            else:
+                self.seen = sorted(p.name for p in Path(wt).iterdir() if p.name != ".git")
+            return super().__call__(argv, log_path)
+
+    spawn = Committing({"t1": [_gate_failed(), _gate_failed(), {"status": "ok"}]})
+    assert run_plan(plan, state, spawn) == 0
+    assert spawn.seen == ["README.md"]
+    wt = state.task("t1").worktree
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt, capture_output=True, text=True).stdout.strip()
+    start = subprocess.run(
+        ["git", "rev-parse", state.task("t1").start_ref], cwd=wt, capture_output=True, text=True
+    ).stdout.strip()
+    assert head == start
+
+
+def test_exhausted_does_not_escalate(tmp_path):
+    plan = _escalating_plan(tmp_path)
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [{"status": "exhausted"}]})
+    assert run_plan(plan, state, spawn) == 1
+    assert len(spawn.spawns) == 1
+    assert state.task("t1").status == "blocked"
+    assert state.task("t1").escalated_from == ""
+
+
+def test_escalation_chain_two_steps_then_stops(tmp_path):
+    plan = _escalating_plan(tmp_path)
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [_gate_failed(), _gate_failed(), _gate_failed(), _gate_failed()]})
+    assert run_plan(plan, state, spawn) == 1
+    assert [_role_of(a) for a, _ in spawn.spawns] == ["implement-small"] * 2 + ["implement", "implement-hard"]
+    tstate = state.task("t1")
+    assert tstate.status == "failed"
+    assert tstate.escalated_from == "implement"
+
+
+def test_escalation_cycle_guard(tmp_path):
+    config_dir = paths().config_dir
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "pool.toml").write_text(
+        '[roles.a]\nkind = "implement"\nchain = ["claude:haiku"]\nescalate = "b"\n'
+        '[roles.b]\nkind = "implement"\nchain = ["claude:haiku"]\nescalate = "a"\n'
+    )
+    plan = _escalating_plan(tmp_path, role="a")
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [_gate_failed()] * 10})
+    assert run_plan(plan, state, spawn) == 1
+    assert [_role_of(a) for a, _ in spawn.spawns] == ["a", "a", "b"]
+    assert state.task("t1").status == "failed"
