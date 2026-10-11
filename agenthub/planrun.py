@@ -129,9 +129,9 @@ def run_plan(
             if cancelled:
                 for name, tstate in state.tasks.items():
                     if tstate.status == "running":
-                        tstate.status = "failed"
+                        tstate.status = "cancelled"
                         tstate.reason = "cancelled"
-                        _trail(plan, name, "final", "task failed", "cancelled", "", "failed")
+                        _trail(plan, name, "final", "task cancelled", "cancelled", "", "cancelled")
                         if name in running_children:
                             try:
                                 running_children[name].wait(timeout=1)
@@ -148,7 +148,7 @@ def run_plan(
                 if tstate.status == "pending":
                     for dep in task.depends_on:
                         dep_status = state.task(dep).status
-                        if dep_status in ("failed", "blocked", "scope-violation", "skipped"):
+                        if dep_status in ("failed", "blocked", "scope-violation", "skipped", "cancelled"):
                             tstate.status = "skipped"
                             tstate.reason = f"dependency {dep} {dep_status}"
                             _trail(plan, task.name, "final", "task skipped", tstate.reason, "", "skipped")
@@ -314,6 +314,8 @@ def run_plan(
 
             # 4. Poll
             time.sleep(PLAN_POLL_S)
+            if cancelled:
+                continue  # the top of the loop marks running tasks cancelled; a child ending now is not an outcome
 
             newly_finished = []
             for name, popen in list(running_children.items()):

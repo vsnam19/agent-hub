@@ -37,6 +37,7 @@ class State:
     started: str
     updated: str
     tasks: dict[str, TaskState] = field(default_factory=dict)
+    runner: dict = field(default_factory=dict)  # {pid, start_time} of the `plan run` process; empty when unknown
 
     _path: Path = field(default=None, repr=False, init=False)
 
@@ -50,6 +51,7 @@ class State:
             "slug": self.slug,
             "started": self.started,
             "updated": self.updated,
+            "runner": self.runner,
             "tasks": {
                 name: {
                     "status": t.status,
@@ -143,6 +145,7 @@ def load_or_init(plan: Plan) -> State:
             started=data.get("started", datetime.now(timezone.utc).astimezone().isoformat()),
             updated=data.get("updated", datetime.now(timezone.utc).astimezone().isoformat()),
             tasks=tasks_state,
+            runner=data.get("runner", {}),
         )
         state._path = state_file
 

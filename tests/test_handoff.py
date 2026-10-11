@@ -1,4 +1,4 @@
-from agenthub.handoff import parse
+from agenthub.handoff import FOOTER, parse, parse_verdict
 
 
 def test_parse_full_handoff():
@@ -106,3 +106,31 @@ something-else
 def test_parse_no_handoff_returns_none():
     reply = "just some text"
     assert parse(reply) is None
+
+
+def test_footer_has_escape_hatch():
+    assert "do not weaken a test, a gate or the brief's conditions" in FOOTER
+    assert 'Report Status "blocked"' in FOOTER
+    assert FOOTER.index("do not weaken") < FOOTER.index("When you are done")
+
+
+def test_parse_inconclusive_verification():
+    reply = """
+## Status
+blocked
+
+## Verification
+inconclusive
+"""
+    res = parse(reply)
+    assert res is not None
+    assert res["verification"] == "inconclusive"
+    assert res["status"] == "blocked"
+
+
+def test_parse_review_verdict():
+    assert parse_verdict("findings\n\n## Verdict\napprove\n") == "approve"
+    assert parse_verdict("## verdict\n\nRequest-Changes.\n") == "request-changes"
+    assert parse_verdict("## Verdict\napprove\n\n## Verdict\nrequest-changes\n") == "request-changes"
+    assert parse_verdict("## Verdict\nmaybe\n") is None
+    assert parse_verdict("no findings") is None

@@ -83,7 +83,8 @@ Read the leaf skill in full for any principle you apply.
    review from a different vendor with a different lens (for example `--agent <other vendor>` and the brief line
    "Lens: does it actually run and do what it claims — check error paths and inputs that break it").
    `--exclude <agent>:<model>` skips the link that wrote the change. Treat findings as input to your own judgement,
-   not as a verdict.
+   not as a verdict. Before merging, run `agent-hub ready -d <worktree>`: it exits 1 unless the current `HEAD` passed
+   its gates and a different model approved that same commit.
 9. **Force a link** with `--agent <agent>:<model>` when one model's output is poor or you need a specific one.
    It replaces the chain with that single link.
 

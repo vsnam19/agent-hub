@@ -1,6 +1,9 @@
 import re
 
 FOOTER = """---
+If you cannot meet the brief's checks, stop: do not weaken a test, a gate or the brief's conditions to get green.
+Report Status "blocked" and say exactly what stopped you.
+
 When you are done, end with this handoff as your final message, exactly these headings:
 
 ## Status
@@ -10,7 +13,7 @@ success | partial | blocked
 - <one line per change>
 
 ## Verification
-unit-test-verified | type-check-only | not-verified
+unit-test-verified | type-check-only | not-verified | inconclusive
 
 ## Notes
 - <assumptions, surprises, anything the orchestrator must know; "(none)" if nothing>
@@ -18,6 +21,26 @@ unit-test-verified | type-check-only | not-verified
 ## Follow-ups
 - <tasks you suggest; "(none)" if nothing>
 """
+
+REVIEW_FOOTER = """---
+When you are done, end your review with this section as your final message:
+
+## Verdict
+approve | request-changes
+"""
+
+
+def parse_verdict(reply: str) -> str | None:
+    """The word under the last `## Verdict` heading: "approve" or "request-changes"; None when absent or unknown."""
+    matches = list(re.finditer(r"^#{2,}\s+verdict\s*$", reply, re.IGNORECASE | re.MULTILINE))
+    if not matches:
+        return None
+    for line in reply[matches[-1].end() :].splitlines():
+        line = line.strip()
+        if line:
+            word = line.split()[0].lower().rstrip(".,;:'\"!?")
+            return word if word in ("approve", "request-changes") else None
+    return None
 
 
 def parse(reply: str) -> dict | None:
@@ -64,7 +87,7 @@ def parse(reply: str) -> dict | None:
         line = line.strip()
         if line:
             word = line.split()[0].lower().rstrip(".,;:'\"!?")
-            if word in ("unit-test-verified", "type-check-only", "not-verified"):
+            if word in ("unit-test-verified", "type-check-only", "not-verified", "inconclusive"):
                 verification = word
             break
 
