@@ -5,7 +5,20 @@ export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 # shellcheck disable=SC2155
 export RAPID_MLX_API_KEY="$(cat "$HOME/.config/gwen/api-key")"
 MODEL="$(head -n1 "$HOME/.config/gwen/model")"
+# Per-model server flags, one per line, written by `gwen-host.sh switch <model> [flags...]`.
+# Blank lines and lines starting with # are skipped. Read line by line, never with $(cat).
+EXTRA=()
+FLAGS_FILE="$HOME/.config/gwen/flags"
+if [ -f "$FLAGS_FILE" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "${line//[[:space:]]/}" in
+      "" | \#*) continue ;;
+    esac
+    EXTRA+=("$line")
+  done < "$FLAGS_FILE"
+fi
 # Clients reach the server through gwen-tap (dev.vsn.gwen-tap) on the Tailscale address; this binds loopback only.
 HOST="127.0.0.1"
+# ${EXTRA[@]+...} keeps an empty array safe under set -u on bash 3.2 (the macOS default).
 exec rapid-mlx serve "$MODEL" --host "$HOST" --port 8643 --yes --idle-unload-seconds 1800 --lazy-load \
-  --cache-memory-mb 512 --context-length 14000 --max-num-seqs 1 --max-concurrent-requests 1
+  ${EXTRA[@]+"${EXTRA[@]}"}
