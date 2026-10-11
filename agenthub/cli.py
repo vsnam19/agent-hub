@@ -90,6 +90,7 @@ def _build_parser() -> argparse.ArgumentParser:
     plan_status = plan_sub.add_parser("status")
     plan_status.add_argument("plan_file", metavar="<plan.json>")
     plan_status.add_argument("--json", action="store_true")
+    plan_status.add_argument("--trail", action="store_true", help="print the decision trail as a table")
     plan_wait = plan_sub.add_parser("wait")
     plan_wait.add_argument("plan_file", metavar="<plan.json>")
     plan_wait.add_argument("--timeout", help="e.g. 9m")
@@ -366,6 +367,18 @@ def _cmd_wait(args) -> int:
     return 124
 
 
+def _print_trail(trail_file: Path) -> int:
+    if not trail_file.is_file():
+        raise UsageError("decisions.tsv not found")
+    rows = [line.split("\t") for line in trail_file.read_text().splitlines()]
+    if not rows:
+        return 0
+    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+    for row in rows:
+        print(_safe("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip()))
+    return 0
+
+
 def _cmd_plan(args) -> int:
     plan_file = Path(args.plan_file).resolve()
     plan = load_plan(plan_file)
@@ -384,6 +397,9 @@ def _cmd_plan(args) -> int:
         return run_plan(plan, state, spawn, args.max_parallel)
 
     elif args.plan_command == "status":
+        if args.trail:
+            return _print_trail(plan_dir / "decisions.tsv")
+
         if not state_file.is_file():
             raise UsageError("state.json not found")
 
@@ -449,7 +465,9 @@ def _cmd_plan(args) -> int:
             state_data = json.loads(res.stdout)
             tasks = state_data.get("tasks", {})
             if not any(ts.get("status") in ("pending", "running") for ts in tasks.values()):
-                _cmd_plan(argparse.Namespace(plan_command="status", plan_file=args.plan_file, json=args.json))
+                _cmd_plan(
+                    argparse.Namespace(plan_command="status", plan_file=args.plan_file, json=args.json, trail=False)
+                )
                 if all(ts.get("status") == "done" for t, ts in tasks.items() if any(pt.name == t for pt in plan.tasks)):
                     return 0
                 return 1
