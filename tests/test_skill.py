@@ -14,6 +14,8 @@ SKILL_DIR = ROOT / "skills" / "orchestrate"
 SKILL = SKILL_DIR / "SKILL.md"
 TEMPLATE = SKILL_DIR / "brief-template.md"
 SMOKE = ROOT / "scripts" / "smoke.sh"
+SKILLS = ROOT / "skills"
+PRINCIPLES = sorted(p.name for p in SKILLS.glob("principle-*") if p.is_dir())
 
 
 def _frontmatter(text: str) -> dict[str, str]:
@@ -63,3 +65,23 @@ def test_smoke_script_is_executable_and_shellchecked():
         pytest.skip("shellcheck not installed")
     result = subprocess.run([checker, str(SMOKE)], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout
+
+
+def test_principle_skills_have_frontmatter_and_are_model_invocation_disabled():
+    assert len(PRINCIPLES) == 7
+    for name in PRINCIPLES:
+        text = (SKILLS / name / "SKILL.md").read_text()
+        fields = _frontmatter(text)
+        assert fields["name"] == name
+        assert fields["description"].startswith("Apply when")
+        assert fields["disable-model-invocation"] == "true"
+        for marker in ("**Why:**", "**Pattern:**", "**Boundaries:**"):
+            assert marker in text, f"{name} lacks {marker}"
+        assert len(text.splitlines()) <= 32, f"{name} is too long"
+        assert re.search(r"D-\d{3}", text), f"{name} cites no decision"
+
+
+def test_orchestrate_lists_every_principle():
+    text = SKILL.read_text()
+    mentioned = set(re.findall(r"principle-[a-z-]+", text))
+    assert mentioned == set(PRINCIPLES)
