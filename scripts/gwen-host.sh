@@ -40,7 +40,7 @@ case "$COMMAND" in
       ssh "$TARGET" "sed \"s|/Users/sammy|\$HOME|g\" > ~/Library/LaunchAgents/$agent.plist" < "$SCRIPT_DIR/gwen-host/$agent.plist"
     done
     # write model if absent
-    ssh "$TARGET" 'if [ ! -f ~/.config/gwen/model ]; then echo "qwen3.5-4b-4bit" > ~/.config/gwen/model; fi'
+    ssh "$TARGET" 'if [ ! -f ~/.config/gwen/model ]; then echo "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit" > ~/.config/gwen/model; fi'
     # launchctl bootout and bootstrap
     ssh "$TARGET" 'for a in dev.vsn.gwen dev.vsn.gwen-tap; do launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/$a.plist 2>/dev/null || true; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/$a.plist; done'
     ;;
