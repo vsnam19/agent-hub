@@ -140,3 +140,23 @@ Tests: `tests/test_skill.py` gains `test_principle_skills_have_frontmatter_and_a
 `test_orchestrate_lists_every_principle` (every `skills/principle-*` directory is named in the mode skill and vice
 versa). Existing skill tests keep passing (update expected strings only where a heading was renamed — list each in
 the handoff).
+
+---
+
+### Task 6: plan mode commits gated work the agent left uncommitted (`autocommit`)
+
+Found 2026-10-11: codex cannot commit (its sandbox cannot write the git directory, D-025), so a plan task done by codex
+left its work uncommitted and every dependent task started from an upstream branch without it.
+
+**Files:** Modify `agenthub/planrun.py`; tests in `tests/test_planrun.py`.
+
+- After an implement task's job is `ok` and its gates passed (the point where the task becomes `done`), if
+  `git status --porcelain` in its work tree is non-empty: `git add -A` and commit with message
+  `orch: <slug>/<task> — work left uncommitted by <agent:model> (gate passed)`, using the same safe git invocation
+  helper the runner uses (`_git_argv`, hooks disabled), author/committer from the repository config, falling back to
+  `agent-hub <agent-hub@localhost>` via `-c user.name=… -c user.email=…` only when none is configured. Record
+  `autocommit: <sha>` in the task state. Never commit when the gate failed or the task is not `done`.
+- Dependent tasks then start from that commit (existing behaviour once the branch has it).
+
+Tests: `test_done_task_with_uncommitted_work_is_committed`, `test_failed_gate_is_not_committed`,
+`test_dependent_starts_from_autocommitted_work`.
