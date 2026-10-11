@@ -32,7 +32,9 @@ default, and `[defaults]` keys merge one by one.
 quota_cooldown = "60m"        # used when the agent does not say when quota resets
 timeout = { implement = "60m", review = "20m" }
 
-[roles.implement]
+[roles.implement]                 # roles have a kind (implement | review) and an optional escalate target (D-061)
+kind = "implement"
+escalate = "implement-hard"
 chain = ["<agent>:<model>", "<agent>:<model>"]
 ```
 
@@ -42,18 +44,20 @@ State (cooldowns and job directories) lives in `$XDG_STATE_HOME/agent-hub/` or `
 ## Commands
 
 ```
-agent-hub run --role {implement,review} [--brief BRIEF] -d WORKDIR [--agent AGENT] [--base BASE] [--timeout TIMEOUT] [--gate CMD] [--json]
+agent-hub run --role ROLE [--brief BRIEF] -d WORKDIR [--agent AGENT:MODEL] [--exclude AGENT:MODEL]... [--base BASE] [--timeout TIMEOUT] [--gate CMD]... [--allow GLOB]... [--jev] [--json]
 agent-hub pool [--json] [--clear AGENT:MODEL]
 agent-hub profile AGENT
-agent-hub jobs [--limit LIMIT]
+agent-hub jobs [--limit LIMIT] [--all]              # this repository's jobs; --all lists every project's
 agent-hub show [--json] ID
-agent-hub cancel ID
+agent-hub cancel ID | --all [-d WORKDIR]            # only jobs of the caller's repository (D-078)
 agent-hub wait -d WORKDIR [--timeout TIMEOUT] [--json]
 agent-hub plan run <plan.json> [--max-parallel N]
-agent-hub plan status <plan.json> [--json]
+agent-hub plan status <plan.json> [--json] [--trail]
 agent-hub plan wait <plan.json> [--timeout 9m]
-agent-hub orders [-d WORKDIR] [--json]
-agent-hub gate [-d WORKDIR] [--gate CMD]... [--json]
+agent-hub plan cancel <plan.json> [-d WORKDIR]       # only from the plan's repository
+agent-hub orders [-d WORKDIR] [--json]              # standing orders and what enforces each (D-071)
+agent-hub gate [-d WORKDIR] [--gate CMD]... [--base REF] [--json]   # gate the committed HEAD; repo gates from the merge base (D-080)
+agent-hub ready -d WORKDIR [--accept-touched] [--json]               # merge check: HEAD gated + approved by a non-implementer (D-075)
 ```
 
 - `wait` blocks until the newest job for that work directory ends (or until `--timeout`, default 9m), and prints its result like `show` (or `--json`).

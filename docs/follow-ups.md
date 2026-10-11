@@ -11,6 +11,5 @@ small repository, or `implement` here (D-079).
 | 2026-10-12 | `ready --accept-touched` appends an acceptance on every run, even when other problems remain | review of D-080 (low) |
 | 2026-10-12 | `plan cancel` crashes on a corrupt `state.json` instead of a usage error | review of D-080 (low) |
 | 2026-10-12 | `--exclude` has no direct `run` test; a missing implementer record should block a plan review; a pinned review agent equal to the implementer should be blocked | handoff of review-other-model |
-| 2026-10-12 | README `run` line lacks `--allow GLOB`; `gate --base` and `ready --accept-touched` undocumented in README | handoffs of orders, review of D-080 |
 | 2026-10-12 | `agy` adapter: Gemini returned an empty review on the agent-hub repo | review run 2026-10-12 |
 | 2026-10-12 | B: install skills (incl. `telaf`, `aspice`) for agy/codex/opencode — the hub; C: C++ fixture for the gwen bench | D-077 |
