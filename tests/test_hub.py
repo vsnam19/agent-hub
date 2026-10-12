@@ -1,7 +1,6 @@
 import json
 import shutil
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -29,7 +28,7 @@ elif args[:2] == ["plugin", "list"]:
     print(json.dumps({{"installed": json.loads(inst.read_text()) if inst.exists() else [], "available": []}}))
 elif args[:2] == ["plugin", "add"]:
     if os.environ.get("FAKE_CODEX_FAIL"):
-        print("boom\\nlast line", file=sys.stderr)
+        print(os.environ.get("FAKE_CODEX_STDERR", "boom\\nlast line"), file=sys.stderr)
         sys.exit(3)
     cur = json.loads(inst.read_text()) if inst.exists() else []
     cur.append({{"name": args[2].split("@")[0], "version": "1.0.0"}})
@@ -91,7 +90,10 @@ class Env:
         monkeypatch.setenv("CODEX_HOME", str(self.codex_home))
         monkeypatch.setenv("AGENT_HUB_CONFIG", str(self.config))
         monkeypatch.setenv("FAKE_HUB_STATE", str(self.state))
-        monkeypatch.setenv("PATH", f"{self.bin}:{Path(shutil.which('git')).parent}:/usr/bin:/bin")
+        for tool in ("git", "python3"):
+            real = shutil.which(tool) if tool == "git" else sys.executable
+            (self.bin / tool).symlink_to(real)
+        monkeypatch.setenv("PATH", str(self.bin))
         self.install_fake("codex", FAKE_CODEX)
         self.install_fake("agy", FAKE_AGY)
 
@@ -283,5 +285,84 @@ def test_registered_root_with_spaces(env, tmp_path):
     spaced = tmp_path / "my market"
     spaced.mkdir()
     (env.state / "codex_marketplaces.txt").write_text(f"agent-plugins  {spaced}\n")
-    assert hub._registered(spaced.resolve()) is True
-    assert hub._registered(tmp_path / "market") is False
+    assert hub._registered(spaced.resolve()) == "root"
+    assert hub._registered(tmp_path / "market") is None
+
+
+def test_status_host_not_installed_ignores_system_path(env, tmp_path, monkeypatch):
+    system = tmp_path / "system"
+    system.mkdir()
+    for name, text in (("codex", FAKE_CODEX), ("agy", FAKE_AGY)):
+        (system / name).write_text(text)
+        (system / name).chmod(0o755)
+    (env.bin / "codex").unlink()
+    (env.bin / "agy").unlink()
+    assert not (env.bin / "codex").exists()
+    rows = hub.status(env.config)
+    assert _state(rows, "codex") == "host-not-installed"
+    assert _state(rows, "agy") == "host-not-installed"
+    assert env.calls() == []
+
+
+def test_dry_run_quotes_paths_with_spaces(env, tmp_path, capsys):
+    spaced = tmp_path / "my market"
+    shutil.copytree(env.market, spaced)
+    (env.config / "workers.toml").write_text(
+        f'default = []\n[plugins]\ntelaf = "{spaced / "plugins" / "telaf"}"\n[hub]\ncodex_marketplace = "{spaced}"\n'
+    )
+    assert hub.install(env.config, apply=False) == 0
+    out = capsys.readouterr().out
+    assert f"$ codex plugin marketplace add '{spaced.resolve()}'" in out
+    assert f"$ agy plugin install '{(spaced / 'plugins' / 'telaf').resolve()}'" in out
+
+
+def test_install_output_is_sanitised(env, monkeypatch, capsys):
+    class Tty:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def isatty(self):
+            return True
+
+        def write(self, text):
+            return self.inner.write(text)
+
+        def flush(self):
+            self.inner.flush()
+
+    monkeypatch.setenv("FAKE_CODEX_FAIL", "1")
+    monkeypatch.setenv("FAKE_CODEX_STDERR", "bad \x1b[31mred\x07 end")
+    monkeypatch.setattr(sys, "stdout", Tty(sys.stdout))
+    assert main(["hub", "install", "--apply"]) == 1
+    out = capsys.readouterr().out
+    assert "bad [31mred end" in out
+    assert "\x1b" not in out and "\x07" not in out
+
+
+def test_install_apply_missing_tool_returns_1(env, monkeypatch, capsys):
+    real_run = hub.subprocess.run
+
+    def boom(cmd, **kwargs):
+        if "list" in cmd:
+            return real_run(cmd, **kwargs)
+        raise FileNotFoundError(2, "No such file or directory", cmd[0])
+
+    monkeypatch.setattr(hub.subprocess, "run", boom)
+    assert hub.install(env.config, apply=True) == 1
+    out = capsys.readouterr().out
+    assert out.count("failed: codex plugin marketplace add") == 1
+    assert "No such file or directory" in out
+
+
+def test_marketplace_registered_from_other_root_is_not_readded(env, tmp_path, capsys):
+    (env.state / "codex_marketplaces.txt").write_text(f"agent-plugins  {tmp_path / 'elsewhere'}\n")
+    cfg = hub.load_config(env.config)
+    assert cfg.marketplace_registered == "name"
+    assert hub._registered((tmp_path / "market").resolve(), "agent-plugins") == "name"
+    rows = hub.status(env.config)
+    codex = next(r for r in rows if r.host == "codex" and r.plugin == "telaf")
+    assert "marketplace agent-plugins is registered from another root" in codex.detail
+    assert hub.install(env.config, apply=False) == 0
+    out = capsys.readouterr().out
+    assert "marketplace add" not in out
+    assert "codex plugin add telaf@agent-plugins" in out

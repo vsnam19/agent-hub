@@ -1,9 +1,11 @@
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
-from dataclasses import asdict, dataclass
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from agenthub.config import ConfigError
@@ -28,14 +30,14 @@ class HubConfig:
     plugins: dict[str, Path]
     marketplace_dir: Path | None
     marketplace_name: str | None
-    marketplace_registered: bool
+    marketplace_registered: str | None  # "root" | "name" | None
 
 
 def load_config(config_dir: Path) -> HubConfig:
     """Union of `[plugins]` and the codex marketplace from `[hub]` in workers.toml."""
     user_file = config_dir / USER_FILE
     if not user_file.is_file():
-        return HubConfig({}, None, None, False)
+        return HubConfig({}, None, None, None)
     user = _load(user_file)
     plugins = {n: Path(d).expanduser().resolve() for n, d in _plugins(user, user_file).items()}
     hub = user.get("hub", {})
@@ -43,11 +45,11 @@ def load_config(config_dir: Path) -> HubConfig:
         raise ConfigError(f"{user_file}: hub must be a table with codex_marketplace = directory string")
     directory = Path(hub["codex_marketplace"]).expanduser().resolve() if "codex_marketplace" in hub else None
     name = None
-    registered = False
+    registered = None
     if directory is not None:
         name = _marketplace_names(directory)[0]
         if name is not None and shutil.which("codex"):
-            registered = _registered(directory)
+            registered = _registered(directory, name)
     return HubConfig(plugins, directory, name, registered)
 
 
@@ -58,7 +60,11 @@ def status(config_dir: Path, repo_root: Path | None = None) -> list[Row]:
     codex_installed = _codex_installed(cfg) if shutil.which("codex") and cfg.marketplace_name else {}
     agy_installed = _agy_installed() if shutil.which("agy") else {}
     for name, directory in cfg.plugins.items():
-        rows.append(_codex_row(cfg, name, directory, listed, codex_installed))
+        row = _codex_row(cfg, name, directory, listed, codex_installed)
+        if cfg.marketplace_registered == "name" and row.state in ("current", "stale", "missing"):
+            note = f"marketplace {cfg.marketplace_name} is registered from another root"
+            row = replace(row, detail=f"{row.detail}; {note}" if row.detail else note)
+        rows.append(row)
         rows.append(_agy_row(name, directory, agy_installed))
     try:
         resolved = worker_plugins(config_dir, repo_root or _repo_root())
@@ -87,7 +93,7 @@ def plan_install(rows: list[Row], config: HubConfig, hosts: tuple[str, ...] = HO
     todo = [r for r in rows if r.state in INSTALLABLE]
     codex_rows = [r for r in todo if r.host == "codex" and "codex" in hosts]
     if codex_rows and config.marketplace_dir is not None:
-        if not config.marketplace_registered:
+        if config.marketplace_registered is None:
             cmds.append(["codex", "plugin", "marketplace", "add", str(config.marketplace_dir)])
         for r in codex_rows:
             manifest = config.plugins[r.plugin] / ".codex-plugin" / "plugin.json"
@@ -100,23 +106,27 @@ def plan_install(rows: list[Row], config: HubConfig, hosts: tuple[str, ...] = HO
     return cmds
 
 
-def install(config_dir: Path, apply: bool, hosts: tuple[str, ...] = HOSTS) -> int:
+def install(config_dir: Path, apply: bool, hosts: tuple[str, ...] = HOSTS, emit: Callable[[str], None] = print) -> int:
     cfg = load_config(config_dir)
     cmds = plan_install(status(config_dir), cfg, hosts)
     if not cmds:
-        print("nothing to install")
+        emit("nothing to install")
     for cmd in cmds:
-        print("$ " + " ".join(cmd))
+        emit("$ " + shlex.join(cmd))
     if not apply:
         return 0
     for cmd in cmds:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+        except OSError as exc:
+            emit(f"failed: {shlex.join(cmd)}: {exc}")
+            return 1
         if proc.returncode != 0:
             tail = "\n".join(proc.stderr.strip().splitlines()[-10:])
-            print(f"failed (exit {proc.returncode}): {' '.join(cmd)}\n{tail}")
+            emit(f"failed (exit {proc.returncode}): {shlex.join(cmd)}\n{tail}")
             return 1
-    print()
-    print(format_rows(status(config_dir)))
+    emit("")
+    emit(format_rows(status(config_dir)))
     return 0
 
 
@@ -184,13 +194,17 @@ def _marketplace_names(directory: Path | None) -> tuple[str | None, set[str]]:
         return None, set()
 
 
-def _registered(directory: Path) -> bool:
+def _registered(directory: Path, name: str | None = None) -> str | None:
     proc = _run("codex", "plugin", "marketplace", "list")
+    by_name = False
     for line in proc.stdout.splitlines()[1:]:
         parts = line.split(None, 1)
-        if len(parts) == 2 and Path(parts[1].strip()).expanduser().resolve() == directory:
-            return True
-    return False
+        if len(parts) != 2:
+            continue
+        if Path(parts[1].strip()).expanduser().resolve() == directory:
+            return "root"
+        by_name = by_name or (name is not None and parts[0] == name)
+    return "name" if by_name else None
 
 
 def _codex_installed(cfg: HubConfig) -> dict[str, str]:

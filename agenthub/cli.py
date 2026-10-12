@@ -251,7 +251,7 @@ def _cmd_hub(args) -> int:
         rows = hub.status(config_dir)
         print(_safe(hub.rows_json(rows) if args.json else hub.format_rows(rows)))
         return 0
-    return hub.install(config_dir, args.apply, tuple(args.host or hub.HOSTS))
+    return hub.install(config_dir, args.apply, tuple(args.host or hub.HOSTS), emit=lambda text: print(_safe(text)))
 
 
 def _cmd_pool(args) -> int:
