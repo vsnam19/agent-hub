@@ -139,10 +139,10 @@ def test_switch_writes_flags_via_stdin(tmp_path):
     assert len(logs) == 1
     assert logs[0]["stdin"].splitlines() == FLAGS
     # argv[0] is the fake ssh binary, whose path comes from tmp_path; check only the arguments after it
-    words = [word for arg in logs[0]["argv"][1:] for word in arg.split()]
+    joined = " ".join(logs[0]["argv"][1:])
     for flag in ("--cache-memory-mb", "--context-length", "--max-num-seqs", "512", "14000"):
-        assert flag not in words
-    assert any(word.startswith("~/.config/gwen/flags") for word in words)
+        assert flag not in joined
+    assert "~/.config/gwen/flags" in joined
 
 
 def test_switch_without_flags_clears_them(tmp_path):
