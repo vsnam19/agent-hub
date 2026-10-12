@@ -188,8 +188,8 @@ def _run(*argv: str) -> subprocess.CompletedProcess:
         return subprocess.run(argv, capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(argv, 124, "", "timed out")
-    except OSError:
-        return subprocess.CompletedProcess(argv, 127, "", "<error>")
+    except OSError as exc:
+        return subprocess.CompletedProcess(argv, 127, "", str(exc))
 
 
 def _failure(proc: subprocess.CompletedProcess) -> str | None:

@@ -394,8 +394,9 @@ def test_status_reports_unexecutable_tool(env, tmp_path, monkeypatch):
     _fail_list(monkeypatch, PermissionError(13, "denied"))
     rows = hub.status(env.config, tmp_path / "repo")
     errors = {r.host: r for r in rows if r.state == "error"}
-    assert errors["codex"].detail == "codex list failed: <error>"
-    assert errors["agy"].detail == "agy list failed: <error>"
+    assert errors["codex"].detail == "codex list failed: [Errno 13] denied"
+    assert errors["agy"].detail == "agy list failed: [Errno 13] denied"
+    assert "<error>" not in errors["codex"].detail
 
 
 def test_install_failure_shows_stdout_when_stderr_empty(env, tmp_path, monkeypatch, capsys):
