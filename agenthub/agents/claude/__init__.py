@@ -85,6 +85,9 @@ class ClaudeAdapter(Adapter):
             argv.append("Read,Grep,Glob,Skill")
             argv.append("--allowedTools")
             argv.append("Read,Grep,Glob,Skill")
+            # --tools only limits built-in tools. With no --mcp-config, this loads no MCP server,
+            # so project .mcp.json and claude.ai connectors cannot add tools to the reviewer.
+            argv.append("--strict-mcp-config")
             argv.append("--add-dir")
             argv.append(str(req.brief_path.parent))
 

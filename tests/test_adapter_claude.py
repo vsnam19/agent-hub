@@ -81,6 +81,7 @@ def test_claude_build_review_argv(tmp_path):
         "Read,Grep,Glob,Skill",
         "--allowedTools",
         "Read,Grep,Glob,Skill",
+        "--strict-mcp-config",
         "--add-dir",
         str(tmp_path),
     ]
@@ -89,19 +90,24 @@ def test_claude_build_review_argv(tmp_path):
         assert '"' not in arg
 
 
-def test_review_argv_keeps_skill_and_no_shell(tmp_path):
+def test_review_argv_allows_only_read_grep_glob_skill(tmp_path):
     argv = _build_for(tmp_path, "review")
     tools = argv[argv.index("--tools") + 1].split(",")
-    assert "Skill" in tools
-    for tool in ("Bash", "Write", "Edit", "WebFetch", "WebSearch"):
-        assert tool not in tools
+    assert tools == ["Read", "Grep", "Glob", "Skill"]
     assert "--permission-mode" not in argv
+
+
+def test_review_argv_loads_no_mcp_server(tmp_path):
+    argv = _build_for(tmp_path, "review")
+    assert "--strict-mcp-config" in argv
+    assert "--mcp-config" not in argv
 
 
 def test_implement_argv_unchanged_by_review_restriction(tmp_path):
     argv = _build_for(tmp_path, "implement")
     assert "--tools" not in argv
     assert "--allowedTools" not in argv
+    assert "--strict-mcp-config" not in argv
     assert argv[-2:] == ["--permission-mode", "bypassPermissions"]
 
 
