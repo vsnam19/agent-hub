@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from agenthub.config import ConfigError
-from agenthub.pool import Cooldowns, parse_link
+from agenthub.pool import Cooldowns, Link, parse_link
 
 
 def test_parse_link_ok():
@@ -26,6 +26,31 @@ def test_parse_link_model_with_colon_kept():
     assert link.agent == "codex"
     assert link.model == "gpt:5"
     assert str(link) == "codex:gpt:5"
+
+
+def test_parse_link_with_effort():
+    link = parse_link("claude:opus@low")
+    assert link == Link("claude", "opus", "low")
+    assert link.quota_key == "claude:opus"
+    assert str(link) == "claude:opus@low"
+
+
+@pytest.mark.parametrize("text", ["claude:opus@", "claude:opus@turbo", "claude:@low", "claude:opus@LOW"])
+def test_parse_link_bad_effort(text):
+    with pytest.raises(ConfigError, match="low, medium, high, xhigh, max"):
+        parse_link(text)
+
+
+def test_effort_shares_cooldown(tmp_path):
+    c = Cooldowns(tmp_path / "cooldowns.json")
+    now = datetime(2026, 10, 8, tzinfo=timezone.utc)
+    until = now + timedelta(hours=1)
+    c.set(parse_link("claude:opus@low"), until)
+    assert c.until(parse_link("claude:opus"), now) == until
+    assert c.until(parse_link("claude:opus@max"), now) == until
+    assert list(c.all(now)) == ["claude:opus"]
+    assert c.clear(parse_link("claude:opus@high")) is True
+    assert c.until(parse_link("claude:opus@low"), now) is None
 
 
 def test_cooldown_roundtrip(tmp_path):
