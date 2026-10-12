@@ -79,10 +79,24 @@ def load_tasks(suites: dict[str, Suite] | None = None) -> dict[str, Task]:
     return tasks
 
 
+# Build and tool output a developer may leave in a fixture; never copied into a run's repo.
+BUILD_OUTPUT_IGNORE = shutil.ignore_patterns(
+    "build",
+    "build-*",
+    ".cache",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    "CMakeCache.txt",
+    "CMakeFiles",
+    "compile_commands.json",
+)
+
+
 def prepare(task: Task, dest: Path, suite: Suite | None = None) -> str:
     if suite is None:
         suite = load_suites()[task.suite]
-    shutil.copytree(suite.fixture, dest)
+    shutil.copytree(suite.fixture, dest, ignore=BUILD_OUTPUT_IGNORE)
     env = {
         "GIT_AUTHOR_NAME": "Bench",
         "GIT_AUTHOR_EMAIL": "bench@example.com",
