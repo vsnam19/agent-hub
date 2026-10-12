@@ -3,6 +3,7 @@
 import fcntl
 import importlib.resources
 import json
+import math
 import re
 import shutil
 import string
@@ -418,7 +419,7 @@ class _Run:
                 data = json.loads(target.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 raise Stop(f"eval of {skill} wrote no readable result") from None
-            with_mean, without_mean = _arm_means(skill, data)
+            with_mean, without_mean = _arm_means(skill, data, target)
             self.spent += float(data.get("costUsd") or 0)
             self.report.evals[skill] = f"with {with_mean:.2f} vs without {without_mean:.2f}"
             if with_mean < PASS_SCORE or with_mean <= without_mean:
@@ -545,7 +546,7 @@ def _section(text: str, title: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _arm_means(skill: str, data: object) -> tuple[float, float]:
+def _arm_means(skill: str, data: object, source: Path) -> tuple[float, float]:
     """Mean score of the plugin arm ('with') and the baseline arm ('without') over all runs of all cases."""
     scores: dict[str, list[float]] = {"with": [], "without": []}
     cases = data.get("cases") if isinstance(data, dict) else None
@@ -556,7 +557,17 @@ def _arm_means(skill: str, data: object) -> tuple[float, float]:
         if not isinstance(arms, dict) or not set(scores) <= set(arms):
             raise Stop(f"eval of {skill}: unknown arm shape {sorted(arms) if isinstance(arms, dict) else arms!r}")
         for arm in scores:
-            scores[arm] += [float(r["score"]) for r in arms[arm] if isinstance(r, dict) and "score" in r]
+            runs = arms[arm]
+            if not isinstance(runs, list):
+                raise Stop(f"eval of {skill}: malformed score in {source}")
+            scores[arm] += [_score(skill, run, source) for run in runs]
     if not scores["with"] or not scores["without"]:
         raise Stop(f"eval of {skill}: an arm has no scored runs")
     return tuple(sum(v) / len(v) for v in scores.values())  # type: ignore[return-value]
+
+
+def _score(skill: str, run: object, source: Path) -> float:
+    score = run.get("score") if isinstance(run, dict) else None
+    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
+        raise Stop(f"eval of {skill}: malformed score in {source}")
+    return float(score)

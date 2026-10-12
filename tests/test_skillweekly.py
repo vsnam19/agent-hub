@@ -224,6 +224,20 @@ def test_eval_below_baseline_stops_and_keeps_branch(tmp_path):
     assert env.fake.words("review") == []
 
 
+def test_malformed_eval_score_stops_with_report(tmp_path):
+    arms = {"with": [{"score": None}], "without": [{"score": 0.5}]}
+    env = Env(tmp_path, evals=[{"costUsd": 0.1, "cases": [{"name": "case", "arms": arms}]}])
+    report = env.run()
+    target = env.out / "eval-foo.json"
+    assert report.exit_code == 1
+    assert report.stop_reason == f"eval of foo: malformed score in {target}"
+    assert BRANCH in env.branches()
+    assert not env.last_run.exists()
+    assert f"eval of foo: malformed score in {target}" in (env.out / "report.md").read_text()
+    assert target.is_file()
+    assert env.fake.words("review") == []
+
+
 def test_review_fix_rounds_capped_at_two(tmp_path):
     env = Env(tmp_path, verdicts=["request-changes"])
     report = env.run()
