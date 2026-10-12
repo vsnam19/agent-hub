@@ -12,6 +12,7 @@ import pytest
 from bench.gwen.run import main, run_one
 from bench.gwen.tasks import FIXTURE_DIR, TASKS_DIR, load_tasks
 from tests.bench.fakeserver import FakeServer
+from tests.bench.test_gwen_cpp_tasks import _require_toolchain
 
 
 @pytest.fixture
@@ -66,6 +67,7 @@ def test_solution_mode_passes(tmp_path, fake_upstream, harnesses_file, env_with_
 
 
 def test_cpp_solution_mode_passes(tmp_path, fake_upstream, harnesses_file, env_with_fakes):
+    _require_toolchain()
     env_with_fakes.setenv("FAKE_HARNESS_MODE", "solve")
     c1 = load_tasks()["c1"]
     env_with_fakes.setenv("FAKE_SOLUTION_PATCH", str(c1.dir / "solution.patch"))
