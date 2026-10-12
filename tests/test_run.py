@@ -780,3 +780,14 @@ def test_effort_recorded_in_result(env_sandbox, repo):
     attempt_meta = json.loads((Path(result["reply_path"]).parent / "attempt.json").read_text())
     assert attempt_meta["effort"] == "low"
     assert json.loads((job_dir(result) / "result.json").read_text())["effort"] == "low"
+
+
+def test_effort_cleared_after_fallback(env_sandbox, repo, monkeypatch):
+    # the record names the effort of the link that ran; a fallback to a link without effort drops the old one
+    scenario(monkeypatch, "claude", "quota,ok")
+    result = go(repo, ["claude:opus@low", "claude:sonnet"])
+    assert result["status"] == "ok"
+    assert [(a["model"], a["outcome"]) for a in result["attempts"]] == [("opus", "quota"), ("sonnet", "ok")]
+    assert result["model"] == "sonnet"
+    assert "effort" not in result
+    assert json.loads((job_dir(result) / "result.json").read_text()).get("effort") is None

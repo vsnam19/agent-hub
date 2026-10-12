@@ -428,6 +428,8 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
             record.update(agent=link.agent, model=link.model, reply_path=str(attempt_dir / "reply.md"))
             if link.effort:
                 record["effort"] = link.effort
+            else:
+                record.pop("effort", None)
 
             if cancel.cancelled:
                 entry["outcome"] = "cancelled"
