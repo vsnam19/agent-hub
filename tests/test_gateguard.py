@@ -595,3 +595,40 @@ def test_unreadable_base_falls_back_to_line_rule(repo, monkeypatch):
     monkeypatch.setattr(gateguard, "_git_show", lambda *args: None)
     res = gateguard.inspect_diff(guards.inspect(repo), since)
     assert res == [{"file": "test_u.py", "kind": "assert-removed", "lines": [3]}]
+
+
+def test_if_true_return_above_assert_flagged(repo):
+    res = _weaken_test(
+        repo, "def test_a():\n    assert x == 1\n", "def test_a():\n    if True:\n        return\n    assert x == 1\n"
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [1]}]
+
+
+def test_not_false_raise_above_assert_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    assert x == 1\n",
+        "def test_a():\n    while not False:\n        raise ValueError\n    assert x == 1\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [1]}]
+
+
+def test_while_true_with_break_above_assert_not_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    assert x == 1\n",
+        "def test_a():\n    while True:\n        break\n    assert x == 1\n",
+    )
+    assert res == []
+
+
+def test_latin1_test_file_does_not_crash_and_uses_line_rule(repo):
+    test_file = repo / "test_l.py"
+    test_file.write_text("def test_a():\n    assert x == 1\n    assert y == 2\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_bytes("def test_a():\n    # caf\xe9\n    assert x == 1\n".encode("latin-1"))
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == [{"file": "test_l.py", "kind": "assert-removed", "lines": [3]}]

@@ -126,12 +126,15 @@ def _index_tests(body: list[ast.stmt], prefix: str, index: dict[str, ast.AST]) -
             _index_tests(node.body + node.orelse, prefix, index)
 
 
-def _test_index(source: str) -> dict[str, TestDef] | None:
+def _test_index(source: bytes | None) -> dict[str, TestDef] | None:
     """Each test in `source` by identity: its dotted path of enclosing class and function names (see _index_tests),
-    e.g. `test_name` at module level, `Class.Inner.test_name` nested in classes. None when the source does not parse."""
+    e.g. `test_name` at module level, `Class.Inner.test_name` nested in classes. None when the source is missing, is not
+    UTF-8 or does not parse; such a file is judged by the line rules."""
+    if source is None:
+        return None
     try:
-        tree = ast.parse(source)
-    except SyntaxError:
+        tree = ast.parse(source.decode("utf-8"))
+    except (UnicodeDecodeError, SyntaxError, ValueError):
         return None
     index: dict[str, ast.AST] = {}
     _index_tests(tree.body, "", index)
@@ -250,15 +253,37 @@ def _direct_ids(body: list[ast.stmt]) -> set[int]:
     return ids
 
 
+def _constant_truth(node: ast.AST) -> bool | None:
+    """The truth value of a constant test (`True`, `1`, `not False`); None for any other test."""
+    if isinstance(node, ast.Constant):
+        return bool(node.value)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        inner = _constant_truth(node.operand)
+        return None if inner is None else not inner
+    return None
+
+
+def _exits(node: ast.AST) -> bool:
+    """A statement that never falls through: an unconditional terminator, or a constant-true `if`/`while` whose body
+    ends in one. A `while` with a `break` can fall through after its loop, so it does not count."""
+    if isinstance(node, _TERMINATORS):
+        return True
+    if isinstance(node, (ast.If, ast.While)) and node.body and _constant_truth(node.test) is True:
+        if isinstance(node, ast.While) and any(isinstance(inner, ast.Break) for inner in ast.walk(node)):
+            return False
+        return isinstance(node.body[-1], _TERMINATORS)
+    return False
+
+
 def _dead_ids(fn: ast.AST) -> set[int]:
-    """Ids of the nodes in a statement list that follow an unconditional `return`, `raise`, `continue` or `break` in
-    that same list: they never run, so an assertion there keeps nothing."""
+    """Ids of the nodes in a statement list that follow an exit (see _exits) in that same list: they never run, so an
+    assertion there keeps nothing."""
     dead = set()
     for node in ast.walk(fn):
         for _, value in ast.iter_fields(node):
             if not isinstance(value, list):
                 continue
-            end = next((i for i, s in enumerate(value) if isinstance(s, _TERMINATORS)), None)
+            end = next((i for i, s in enumerate(value) if _exits(s)), None)
             if end is not None:
                 for stmt in value[end + 1 :]:
                     dead.update(id(inner) for inner in ast.walk(stmt))
@@ -331,25 +356,22 @@ def _get_sections(content: str) -> dict[int, str]:
     return mapping
 
 
-def _git_show(repo: guards.Repo, since: str, path: str) -> str | None:
+def _git_show(repo: guards.Repo, since: str, path: str) -> bytes | None:
+    """The file's bytes at `since`; None when git cannot show it. Decoded only by _test_index."""
     res = subprocess.run(
         guards._git_argv("show", f"{since}:{path}"),
         cwd=repo.root,
         capture_output=True,
-        text=True,
         env=guards._git_env(),
     )
     return res.stdout if res.returncode == 0 else None
 
 
-def _read_or_empty(path: Path) -> str | None:
-    """The file's text; empty when it is gone (a deleted test file), None when it cannot be read as text."""
+def _read_or_empty(path: Path) -> bytes:
+    """The file's bytes; empty when it is gone (a deleted test file). Decoded only by _test_index."""
     if not path.is_file():
-        return ""
-    try:
-        return path.read_text()
-    except UnicodeDecodeError:
-        return None
+        return b""
+    return path.read_bytes()
 
 
 def inspect_diff(repo: guards.Repo, since: str) -> list[dict]:
@@ -360,6 +382,7 @@ def inspect_diff(repo: guards.Repo, since: str) -> list[dict]:
         cwd=repo.root,
         capture_output=True,
         text=True,
+        errors="replace",
         env=guards._git_env(),
     )
     changes = _parse_diff(diff_res.stdout)
@@ -370,6 +393,7 @@ def inspect_diff(repo: guards.Repo, since: str) -> list[dict]:
         cwd=repo.root,
         capture_output=True,
         text=True,
+        errors="replace",
         env=guards._git_env(),
     )
     for path in untracked_res.stdout.strip().splitlines():
@@ -387,9 +411,8 @@ def inspect_diff(repo: guards.Repo, since: str) -> list[dict]:
     # Python test files that parse on both sides are judged by test identity below; the others keep the line rules.
     compared: dict[str, tuple[dict[str, TestDef], dict[str, TestDef]]] = {}
     for path in {c.path for c in changes if c.path.endswith(".py") and _is_test_file(c.path)}:
-        # An unreadable base (git show fails) is not compared: its removed lines go through the line rules.
-        base_src = _git_show(repo, since, path)
-        base = None if base_src is None else _test_index(base_src)
+        # An unreadable base (git show fails, or is not UTF-8) is not compared: its removed lines use the line rules.
+        base = _test_index(_git_show(repo, since, path))
         new = _test_index(_read_or_empty(repo.root / path))
         if base is not None and new is not None:
             compared[path] = (base, new)
@@ -452,7 +475,7 @@ def inspect_diff(repo: guards.Repo, since: str) -> list[dict]:
 
         file_path = repo.root / "pyproject.toml"
         if added_changes and file_path.exists():
-            content = file_path.read_text()
+            content = file_path.read_text(errors="replace")
             mapping = _get_sections(content)
             for c in added_changes:
                 sec = mapping.get(c.line_num)
@@ -465,6 +488,7 @@ def inspect_diff(repo: guards.Repo, since: str) -> list[dict]:
                 cwd=repo.root,
                 capture_output=True,
                 text=True,
+                errors="replace",
                 env=guards._git_env(),
             )
             if res.returncode == 0:
