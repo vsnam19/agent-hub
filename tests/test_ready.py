@@ -147,14 +147,16 @@ def test_reviewer_matching_any_implementer_is_rejected(env_sandbox, repo, capsys
 
 
 TOUCHED = [{"file": "test_a.py", "kind": "assert-removed", "lines": [2]}]
+TWO_FINDINGS = [TOUCHED[0], {"file": "test_a.py", "kind": "assert-removed", "lines": [5]}]
 
 
-def add_judged_review(repo, head, judgements, *, model="m2", n=2):
+def add_judged_review(repo, head, judgements, *, model="m2", n=2, lines=(2,)):
     add_job(repo, "review", head, model=model, verdict="approve", n=n)
     job = sorted(paths().jobs_dir.iterdir())[-1]
     record = json.loads((job / "result.json").read_text())
     record["touched_review"] = [
-        {"file": "test_a.py", "kind": "assert-removed", "judgement": j, "reason": "r"} for j in judgements
+        {"file": "test_a.py", "kind": "assert-removed", "lines": list(lines), "judgement": j, "reason": "r"}
+        for j in judgements
     ]
     (job / "result.json").write_text(json.dumps(record))
 
@@ -231,3 +233,12 @@ def test_touched_uses_newest_gate(env_sandbox, repo, capsys):
     rc, out = ready(repo, capsys)
     assert rc == 0
     assert out["problems"] == []
+
+
+def test_judgement_covers_only_its_lines(env_sandbox, repo, capsys):
+    head = git_head(repo)
+    add_job(repo, "implement", head, model="m1", n=1, touched=TWO_FINDINGS)
+    add_judged_review(repo, head, ["legitimate"], lines=(2,))
+    rc, out = ready(repo, capsys)
+    assert rc == 1
+    assert out["problems"] == ["gate touched: 1 findings not judged by the reviewer"]

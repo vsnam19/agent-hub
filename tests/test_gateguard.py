@@ -335,3 +335,84 @@ def test_unparsable_test_file_falls_back_to_line_rules(repo):
     test_file.write_text("def test_a(:\n    pass\n")
     res = gateguard.inspect_diff(guards.inspect(repo), since)
     assert {"file": "test_j.py", "kind": "assert-removed", "lines": [2]} in res
+
+
+def _weaken_test(repo, before, after):
+    test_file = repo / "test_k.py"
+    test_file.write_text(before)
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text(after)
+    return gateguard.inspect_diff(guards.inspect(repo), since)
+
+
+def test_or_true_is_flagged(repo):
+    res = _weaken_test(repo, "def test_a():\n    assert x == 1\n", "def test_a():\n    assert x == 1 or True\n")
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_negated_assert_is_flagged(repo):
+    res = _weaken_test(repo, "def test_a():\n    assert x == 1\n", "def test_a():\n    assert not (x == 1)\n")
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_assert_moved_under_if_false_is_flagged(repo):
+    res = _weaken_test(
+        repo, "def test_a():\n    assert x == 1\n", "def test_a():\n    if False:\n        assert x == 1\n"
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_assert_wrapped_in_try_except_is_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    assert x == 1\n",
+        "def test_a():\n    try:\n        assert x == 1\n    except AssertionError:\n        pass\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_and_conjunction_with_original_not_flagged(repo):
+    res = _weaken_test(repo, "def test_a():\n    assert x == 1\n", "def test_a():\n    assert x == 1 and y\n")
+    assert res == []
+
+
+def test_assert_inside_pytest_raises_is_kept(repo):
+    res = _weaken_test(
+        repo,
+        "import pytest\n\n\ndef test_a():\n    with pytest.raises(ValueError):\n        int('a')\n",
+        "import pytest\n\n\ndef test_a():\n    with pytest.raises(ValueError):\n        int('a')\n    assert 1\n",
+    )
+    assert res == []
+
+
+def test_pytest_raises_replaced_by_other_exception_is_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "import pytest\n\n\ndef test_a():\n    with pytest.raises(ValueError):\n        int('a')\n",
+        "import pytest\n\n\ndef test_a():\n    with pytest.raises(KeyError):\n        int('a')\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [5]}]
+
+
+UNITTEST_HEAD = "import unittest\n\n\nclass TestA(unittest.TestCase):\n    def test_a(self):\n"
+
+
+def test_direct_unittest_assert_call_kept(repo):
+    res = _weaken_test(
+        repo,
+        UNITTEST_HEAD + "        self.assertEqual(x, 1)\n",
+        UNITTEST_HEAD + "        self.assertEqual(x, 1)\n        self.assertTrue(y)\n",
+    )
+    assert res == []
+
+
+def test_unittest_assert_call_under_if_is_flagged(repo):
+    res = _weaken_test(
+        repo,
+        UNITTEST_HEAD + "        self.assertEqual(x, 1)\n",
+        UNITTEST_HEAD + "        if False:\n            self.assertEqual(x, 1)\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [6]}]

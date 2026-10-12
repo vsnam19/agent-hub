@@ -491,16 +491,16 @@ def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
 
 def _touched_problems(findings: list[dict], judges: list[dict]) -> list[str]:
     """Problems with `findings` given the approving independent reviews `judges`: weakening or unjudged ones."""
-    judged: dict[tuple[str, str], str] = {}
+    judged: dict[tuple[str, str, tuple[int, ...]], str] = {}
     for r in judges:
         for e in r.get("touched_review") or []:
-            key = (e.get("file"), e.get("kind"))
+            key = (e.get("file"), e.get("kind"), tuple(sorted(e.get("lines") or [])))
             if e.get("judgement") == "weakening" or key not in judged:
                 judged[key] = e.get("judgement")
     problems = []
     unjudged = 0
     for f in findings:
-        verdict = judged.get((f["file"], f["kind"]))
+        verdict = judged.get((f["file"], f["kind"], tuple(sorted(f["lines"]))))
         if verdict == "weakening":
             problems.append(f"reviewer judged {f['file']} {f['kind']} as weakening")
         elif verdict != "legitimate":
@@ -520,7 +520,8 @@ def _touched_section(findings: list[dict]) -> str:
         "The gate guard flagged these changes to the checks themselves. Read each hunk and judge it independently.\n\n"
         f"{lines}\n\n"
         "In your final message add a `## Gate-touched` section with one line per finding:\n"
-        "`<file> <kind> — legitimate|weakening — <reason>`\n\n"
+        "`<file> <kind> lines <l1,l2> — legitimate|weakening — <reason>`, naming the same lines as the finding.\n"
+        "A judgement covers only the lines it names.\n\n"
     )
 
 

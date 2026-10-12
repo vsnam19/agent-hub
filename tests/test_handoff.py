@@ -146,14 +146,17 @@ def test_review_footer_asks_for_findings_and_verdict_in_final_message():
 def test_parse_touched_review():
     reply = (
         "## Findings\n(none)\n\n## Gate-touched\n"
-        "- a/test_x.py assert-removed — legitimate — assertion moved into a helper\n"
-        "b.toml gate-config-changed — weakening — drops the lint gate\n"
+        "- a/test_x.py assert-removed lines 4,2 — legitimate — assertion moved into a helper\n"
+        "b.toml gate-config-changed lines 1 — weakening — drops the lint gate\n"
         "garbage line\n"
-        "c.py test-deleted — maybe — unsure\n\n"
+        "c.py test-deleted — maybe — unsure\n"
+        "d.py assert-removed lines 3 — legitimate — ok\n"
+        "d.py assert-removed lines 3 — weakening — but not really\n\n"
         "## Verdict\napprove\n"
     )
     assert parse_touched_review(reply) == {
-        ("a/test_x.py", "assert-removed"): "legitimate",
-        ("b.toml", "gate-config-changed"): "weakening",
+        ("a/test_x.py", "assert-removed", (2, 4)): "legitimate",
+        ("b.toml", "gate-config-changed", (1,)): "weakening",
+        ("d.py", "assert-removed", (3,)): "weakening",
     }
     assert parse_touched_review("## Verdict\napprove\n") == {}

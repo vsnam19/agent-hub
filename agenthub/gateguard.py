@@ -1,6 +1,7 @@
 import ast
 import re
 import subprocess
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,7 +24,7 @@ class TestDef:
     start: int
     end: int
     asserts: list[str]  # ast.dump of each assertion's expression (the whole node for a call such as pytest.raises)
-    seen: set[str]  # ast.dump of every node inside the test's assertions
+    kept: list[str]  # ast.dump of each assertion the test states directly (see _kept_keys)
 
 
 def _parse_diff(diff_text: str) -> list[Change]:
@@ -120,18 +121,53 @@ def _test_index(source: str) -> dict[str, TestDef] | None:
             for item in node.body:
                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name.startswith("test_"):
                     index[f"{node.name}.{item.name}"] = item
-    tests = {}
-    for ident, fn in index.items():
-        found = [n for n in ast.walk(fn) if _is_assertion(n)]
-        keys = [ast.dump(n.test if isinstance(n, ast.Assert) else n) for n in found]
-        seen = {ast.dump(sub) for n in found for sub in ast.walk(n)}
-        tests[ident] = TestDef(fn.lineno, fn.end_lineno, keys, seen)
-    return tests
+    return {
+        ident: TestDef(fn.lineno, fn.end_lineno, _assertion_keys(fn), _kept_keys(fn.body))
+        for ident, fn in index.items()
+    }
 
 
 def _weakened(base: TestDef, new: TestDef) -> bool:
-    """Fewer assertions, or a base assertion that the new test neither keeps nor strengthens (one that contains it)."""
-    return len(new.asserts) < len(base.asserts) or any(k not in new.seen for k in base.asserts)
+    """A base assertion the new test does not keep as a direct statement. Containment in a larger expression
+    (`x == 1 or True`, `not (x == 1)`) or nesting under `if`/`try` does not keep it."""
+    return bool(Counter(base.asserts) - Counter(new.kept))
+
+
+def _is_raises(node: ast.AST) -> bool:
+    return isinstance(node, ast.Call) and ast.unparse(node.func).endswith(("raises", "warns"))
+
+
+def _assertion_keys(fn: ast.AST) -> list[str]:
+    """One key per assertion in the test: an `assert`'s test, or a call such as `self.assertEqual(...)` that is not
+    part of an `assert`."""
+    inside_assert = {id(sub) for n in ast.walk(fn) if isinstance(n, ast.Assert) for sub in ast.walk(n)}
+    keys = []
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Assert):
+            keys.append(ast.dump(n.test))
+        elif _is_assertion(n) and id(n) not in inside_assert:
+            keys.append(ast.dump(n))
+    return keys
+
+
+def _kept_keys(body: list[ast.stmt]) -> list[str]:
+    """What a test body keeps: the test of each top-level `assert` and each direct operand of its `and`; each direct
+    assertion call and each `with` header call; the body of a `with pytest.raises/warns` block, read the same way."""
+    kept = []
+    for stmt in body:
+        if isinstance(stmt, ast.Assert):
+            kept.append(ast.dump(stmt.test))
+            if isinstance(stmt.test, ast.BoolOp) and isinstance(stmt.test.op, ast.And):
+                kept.extend(ast.dump(v) for v in stmt.test.values)
+        elif isinstance(stmt, ast.Expr) and _is_assertion(stmt.value):
+            kept.append(ast.dump(stmt.value))
+        elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+            for item in stmt.items:
+                if _is_assertion(item.context_expr):
+                    kept.append(ast.dump(item.context_expr))
+            if any(_is_raises(item.context_expr) for item in stmt.items):
+                kept.extend(_kept_keys(stmt.body))
+    return kept
 
 
 def _compare_tests(path: str, base: dict[str, TestDef], new: dict[str, TestDef], removed: list[Change]) -> list[dict]:

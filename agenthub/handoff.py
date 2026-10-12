@@ -53,7 +53,8 @@ def parse_verdict(reply: str) -> str | None:
 
 
 def parse_touched_entries(reply: str) -> list[dict]:
-    """The lines under the last `## Gate-touched` heading as {file, kind, judgement, reason}; bad lines are skipped."""
+    """The lines under the last `## Gate-touched` heading as {file, kind, lines, judgement, reason}. A line reads
+    `<file> <kind> lines <l1,l2> — legitimate|weakening — reason`; bad lines are skipped."""
     matches = list(re.finditer(r"^#{2,}\s+gate-touched\s*$", reply, re.IGNORECASE | re.MULTILINE))
     if not matches:
         return []
@@ -65,12 +66,17 @@ def parse_touched_entries(reply: str) -> list[dict]:
         if len(parts) < 2:
             continue
         target, judgement = parts[0].split(), parts[1].strip().lower().rstrip(".,;:")
-        if len(target) != 2 or judgement not in ("legitimate", "weakening"):
+        if len(target) != 4 or target[2] != "lines" or judgement not in ("legitimate", "weakening"):
+            continue
+        try:
+            lines = sorted(int(n) for n in target[3].split(","))
+        except ValueError:
             continue
         entries.append(
             {
                 "file": target[0],
                 "kind": target[1],
+                "lines": lines,
                 "judgement": judgement,
                 "reason": parts[2].strip() if len(parts) > 2 else "",
             }
@@ -78,11 +84,11 @@ def parse_touched_entries(reply: str) -> list[dict]:
     return entries
 
 
-def parse_touched_review(reply: str) -> dict[tuple[str, str], str]:
-    """The reviewer's judgement per (file, kind) under `## Gate-touched`; weakening wins over legitimate."""
-    out: dict[tuple[str, str], str] = {}
+def parse_touched_review(reply: str) -> dict[tuple[str, str, tuple[int, ...]], str]:
+    """The reviewer's judgement per (file, kind, lines) under `## Gate-touched`; weakening wins over legitimate."""
+    out: dict[tuple[str, str, tuple[int, ...]], str] = {}
     for e in parse_touched_entries(reply):
-        key = (e["file"], e["kind"])
+        key = (e["file"], e["kind"], tuple(e["lines"]))
         if out.get(key) != "weakening":
             out[key] = e["judgement"]
     return out
