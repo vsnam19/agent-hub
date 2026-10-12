@@ -28,7 +28,7 @@ def _apply(repo, patch):
 
 
 def test_load_tasks_has_six():
-    assert sorted(load_tasks()) == TASK_IDS
+    assert sorted(t for t, task in load_tasks().items() if task.suite == "python") == TASK_IDS
 
 
 def test_fixture_tests_and_lint_pass(tmp_path):

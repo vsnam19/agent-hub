@@ -77,10 +77,11 @@ def _run(tmp_path: Path, suites_file: Path, tid: str, harnesses_file: Path) -> d
 
 
 def test_python_suite_loads_t1_to_t6():
-    tasks = load_tasks()
+    suites = load_suites()
+    python = suites["python"]
+    tasks = load_tasks({"python": python})
     assert [t.id for t in tasks.values()] == PY_TASK_IDS
     assert {t.suite for t in tasks.values()} == {"python"}
-    python = load_suites()["python"]
     assert python.fixture == FIXTURE_DIR
     assert python.tasks_dir == TASKS_DIR
     assert list(python.gate) == ["ruff", "visible", "hidden"]

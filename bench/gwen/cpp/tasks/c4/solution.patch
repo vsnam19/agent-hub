@@ -1,0 +1,81 @@
+diff --git a/src/cli.cpp b/src/cli.cpp
+index 697e0ce..3eafdd0 100644
+--- a/src/cli.cpp
++++ b/src/cli.cpp
+@@ -1,5 +1,6 @@
+ #include "minilib/cli.hpp"
+ 
++#include <cstddef>
+ #include <fstream>
+ #include <ostream>
+ #include <sstream>
+@@ -12,7 +13,7 @@ namespace minilib {
+ 
+ namespace {
+ 
+-constexpr const char* kUsage = "usage: minilib stats FILE | inventory FILE [--min-qty N]";
++constexpr const char* kUsage = "usage: minilib stats FILE [--json] | inventory FILE [--min-qty N]";
+ 
+ int usage(std::ostream& err) {
+     err << kUsage << "\n";
+@@ -20,19 +21,34 @@ int usage(std::ostream& err) {
+ }
+ 
+ int run_stats(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
+-    if (args.size() != 2) {
++    bool json = false;
++    std::string file;
++    for (std::size_t i = 1; i < args.size(); ++i) {
++        if (args[i] == "--json") {
++            json = true;
++        } else if (file.empty()) {
++            file = args[i];
++        } else {
++            return usage(err);
++        }
++    }
++    if (file.empty()) {
+         return usage(err);
+     }
+-    std::ifstream in(args[1]);
++    std::ifstream in(file);
+     if (!in) {
+-        err << "cannot open " << args[1] << "\n";
++        err << "cannot open " << file << "\n";
+         return 1;
+     }
+     std::stringstream buffer;
+     buffer << in.rdbuf();
+     const std::string text = buffer.str();
+-    out << "words: " << word_count(text) << "\n";
+-    out << "chars: " << text.size() << "\n";
++    if (json) {
++        out << "{\"chars\": " << text.size() << ", \"words\": " << word_count(text) << "}\n";
++    } else {
++        out << "words: " << word_count(text) << "\n";
++        out << "chars: " << text.size() << "\n";
++    }
+     return 0;
+ }
+ 
+diff --git a/tests/test_cli.cpp b/tests/test_cli.cpp
+index 9314fa0..4bc6553 100644
+--- a/tests/test_cli.cpp
++++ b/tests/test_cli.cpp
+@@ -27,6 +27,16 @@ TEST(Cli, Stats) {
+     std::remove(path.c_str());
+ }
+ 
++TEST(Cli, StatsJson) {
++    const std::string path = write_temp("stats_json.txt", "hello world");
++    std::ostringstream before, after, err;
++    EXPECT_EQ(minilib::run_cli({"stats", "--json", path}, before, err), 0);
++    EXPECT_EQ(minilib::run_cli({"stats", path, "--json"}, after, err), 0);
++    EXPECT_EQ(before.str(), "{\"chars\": 11, \"words\": 2}\n");
++    EXPECT_EQ(after.str(), before.str());
++    std::remove(path.c_str());
++}
++
+ TEST(Cli, InventoryListsLowStock) {
+     const std::string path = write_temp("items.csv", "name,qty,price\nA,2,1.5\nB,10,5.0\n");
+     std::ostringstream out, err;

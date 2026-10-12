@@ -1,0 +1,3 @@
+title = "top_words"
+paths_allowed = ["include/minilib/textstats.hpp", "src/textstats.cpp", "tests/test_textstats.cpp"]
+visible_tests = []

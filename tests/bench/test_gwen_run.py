@@ -65,6 +65,29 @@ def test_solution_mode_passes(tmp_path, fake_upstream, harnesses_file, env_with_
     assert res["usage"]["prompt_tokens"] > 0
 
 
+def test_cpp_solution_mode_passes(tmp_path, fake_upstream, harnesses_file, env_with_fakes):
+    env_with_fakes.setenv("FAKE_HARNESS_MODE", "solve")
+    c1 = load_tasks()["c1"]
+    env_with_fakes.setenv("FAKE_SOLUTION_PATCH", str(c1.dir / "solution.patch"))
+
+    res = run_one(
+        "fake",
+        "model1",
+        c1,
+        base_url=fake_upstream.url,
+        api_key="secret",
+        out_root=tmp_path,
+        timeout=60.0,
+        ssh_target=None,
+        harnesses_file=harnesses_file,
+    )
+
+    assert res["suite"] == "cpp"
+    assert res["pass"] is True
+    assert res["gate"] == {"configure": 0, "build": 0, "visible": 0, "hidden": 0}
+    assert not res["scope_violation"]
+
+
 def test_noop_mode_fails_hidden(tmp_path, fake_upstream, harnesses_file, env_with_fakes):
     env_with_fakes.setenv("FAKE_HARNESS_MODE", "noop")
     tasks = load_tasks()

@@ -1,0 +1,30 @@
+diff --git a/src/paging.cpp b/src/paging.cpp
+index 3e13c33..c3dfb90 100644
+--- a/src/paging.cpp
++++ b/src/paging.cpp
+@@ -13,7 +13,7 @@ std::vector<std::string> paginate(const std::vector<std::string>& items, int pag
+     if (size < 1) {
+         return {};
+     }
+-    const std::size_t start = static_cast<std::size_t>(page - 1) * static_cast<std::size_t>(size) + 1;
++    const std::size_t start = static_cast<std::size_t>(page - 1) * static_cast<std::size_t>(size);
+     if (start >= items.size()) {
+         return {};
+     }
+diff --git a/tests/test_paging.cpp b/tests/test_paging.cpp
+index 3c4f562..e3f0dd5 100644
+--- a/tests/test_paging.cpp
++++ b/tests/test_paging.cpp
+@@ -16,6 +16,12 @@ TEST(Paging, ReturnsEachPage) {
+     EXPECT_EQ(paginate(items, 3, 2), (std::vector<std::string>{"e"}));
+ }
+ 
++TEST(Paging, PastTheEndIsEmpty) {
++    const std::vector<std::string> items = {"a", "b", "c"};
++    EXPECT_EQ(paginate(items, 1, 3), items);
++    EXPECT_TRUE(paginate(items, 2, 3).empty());
++}
++
+ TEST(Paging, BadPageThrows) {
+     EXPECT_THROW(paginate({}, 0, 10), std::invalid_argument);
+ }

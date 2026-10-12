@@ -62,7 +62,35 @@ Harness placeholders `{lint_cmd}` and `{test_cmd}` come from the task's suite (e
 Run one suite with `--suite NAME` (repeatable); an unknown suite exits with 2. Without `--suite`, every suite runs.
 `--task all` (or no `--task`) means every task of the selected suites. Each result line records its `suite`.
 
-Task ids are unique across suites: the Python suite uses `t1`..`t6`.
+Task ids are unique across suites: the Python suite uses `t1`..`t6`, the C++ suite `c1`..`c6`.
+
+### The C++ suite
+
+`--suite cpp` runs the C++ suite (needs `cmake`, `ninja`, a C++17 compiler and the system GoogleTest, no network):
+```bash
+python -m bench.gwen.run --suite cpp --model qwen3.5-9b-4bit
+```
+It mirrors the Python suite, so the two compare one language against the other on the same kinds of work:
+
+| Id | Mirrors | Task |
+|---|---|---|
+| c1 | t1 | off-by-one in `paginate()` |
+| c2 | t2 | add `top_words` |
+| c3 | t3 | rename `load_items` → `read_items` |
+| c4 | t4 | `stats --json` |
+| c5 | t5 | crash (`std::stoi`) on a quoted CSV field |
+| c6 | t6 | `report.hpp/.cpp`, a `report FILE` subcommand, `CMakeLists.txt` edit |
+
+Layout: `bench/gwen/cpp/fixture/` (C++17 library `minilib`: `include/minilib/*.hpp`, `src/*.cpp`, `data/items.csv`,
+`tests/test_*.cpp`, `CMakeLists.txt` with an explicit source list) and `bench/gwen/cpp/tasks/c1..c6/` (the same files as
+the Python tasks, with `hidden/*.cpp`). The build uses `-Wall -Wextra -Wpedantic` with warnings as errors. The visible
+tests build into one executable labelled `visible`; if `tests/hidden/` exists, its `*.cpp` build into a second one
+labelled `hidden`. Tests that read `data/` get the source directory from `MINILIB_SOURCE_DIR`.
+
+Gate steps, in order (all must exit 0): `configure` (`cmake -S . -B {build_dir} -G Ninja -DCMAKE_BUILD_TYPE=Debug`),
+`build` (`cmake --build {build_dir}`), `visible` (`ctest -L visible --no-tests=error`), `hidden` (`ctest -L hidden
+--no-tests=error`). The agent's briefs ask it to run `cmake -S . -B build -G Ninja && cmake --build build && ctest
+--test-dir build --output-on-failure`. For aider, `lint_cmd` is a build and `test_cmd` is the build plus `ctest`.
 
 ## How to add a harness
 
@@ -77,7 +105,7 @@ Task ids are unique across suites: the Python suite uses `t1`..`t6`.
 2. Add `task.toml` defining the `title`, `paths_allowed`, and `visible_tests`.
 3. Add `brief.md` for the agent.
 4. Add `setup.patch` (applied before the run) and `solution.patch` (reference solution).
-5. Add `hidden/test_*.py` for hidden assertions.
+5. Add `hidden/test_*.py` (C++: `hidden/*.cpp`) for hidden assertions.
 
 ## How to add a suite
 
