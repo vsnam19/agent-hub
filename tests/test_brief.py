@@ -57,6 +57,13 @@ def test_review_preamble_says_no_shell():
     assert "file-reading tools" in text
 
 
+def test_review_preamble_limits_reads_to_worktree_and_diff():
+    text = review_text("main", None, Path("/j/diff.patch"))
+    assert "inside the current directory" in text
+    assert "not available" in text
+    assert "unverified" in text
+
+
 def test_review_text_points_at_diff_file_and_has_no_git_command():
     text = review_text("master", None, Path("/jobs/j1/diff.patch"))
     assert "/jobs/j1/diff.patch" in text
