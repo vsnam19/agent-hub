@@ -178,6 +178,38 @@ def test_agy_classify_fail(env_sandbox, adapter_agy, req_agy):
     assert c.outcome == Outcome.FAILED
 
 
+AUTO_DENIED_STDOUT = (
+    '{"conversation_id":"c1","status":"SUCCESS","response":"","duration_seconds":65.3,"num_turns":1,'
+    '"denied_actions":[{"action":"command","display_name":"RunCommand"}]}'
+)
+AUTO_DENIED_STDERR = (
+    'jetski: no output produced — a tool required the "command" permission that headless mode cannot prompt for, '
+    "so it was auto-denied."
+)
+
+
+def test_agy_denied_permission_is_failed_with_reason(adapter_agy, tmp_path):
+    attempt = tmp_path / "denied"
+    attempt.mkdir()
+    (attempt / "stdout").write_text(AUTO_DENIED_STDOUT)
+    (attempt / "stderr").write_text(AUTO_DENIED_STDERR)
+    c = adapter_agy.classify(0, attempt)
+    assert c.outcome == Outcome.FAILED
+    assert c.detail.startswith("permission auto-denied: RunCommand")
+    assert c.reply == ""
+
+
+def test_agy_denied_permission_with_reply_is_ok(adapter_agy, tmp_path):
+    attempt = tmp_path / "denied-reply"
+    attempt.mkdir()
+    stdout = AUTO_DENIED_STDOUT.replace('"response":""', '"response":"no findings"')
+    (attempt / "stdout").write_text(stdout)
+    (attempt / "stderr").write_text("")
+    c = adapter_agy.classify(0, attempt)
+    assert c.outcome == Outcome.OK
+    assert c.reply == "no findings"
+
+
 def test_agy_reply_mentioning_quota_is_ok(env_sandbox, adapter_agy, req_agy):
     c = run_fake(env_sandbox, adapter_agy, "ok-quota-text", req_agy)
     assert c.outcome == Outcome.OK

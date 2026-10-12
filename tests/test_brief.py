@@ -50,6 +50,13 @@ def test_review_text_without_notes_has_no_notes_section():
     assert "## Orchestrator notes" not in text2
 
 
+def test_review_preamble_says_no_shell():
+    text = review_text("main", None, Path("/j/diff.patch"))
+    assert "no shell" in text
+    assert "do not run commands" in text
+    assert "file-reading tools" in text
+
+
 def test_review_text_points_at_diff_file_and_has_no_git_command():
     text = review_text("master", None, Path("/jobs/j1/diff.patch"))
     assert "/jobs/j1/diff.patch" in text

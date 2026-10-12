@@ -49,10 +49,12 @@ class AgyAdapter(Adapter):
 
         reply = stdout_text
         error_field = ""
+        denied = []
         try:
             data = json.loads(stdout_text, strict=False)
             reply = data.get("response", "")
             error_field = data.get("error", "")
+            denied = data.get("denied_actions") or []
         except Exception:
             pass
 
@@ -76,6 +78,12 @@ class AgyAdapter(Adapter):
 
         if "print timeout after" in diag and "returning partial output" in diag:
             return Classified(Outcome.TIMEOUT, reply=reply, detail=diag)
+
+        # headless mode auto-denies tools that need a permission; a reviewer with no reply and a denial is a failure
+        if not reply and (denied or "auto-denied" in diag):
+            names = [str(a.get("display_name")) for a in denied if isinstance(a, dict) and a.get("display_name")]
+            detail = "permission auto-denied: " + (", ".join(names) or "unknown")
+            return Classified(Outcome.FAILED, reply=reply, detail=detail)
 
         if rc != 0:
             return Classified(Outcome.FAILED, reply=reply, detail=diag)
