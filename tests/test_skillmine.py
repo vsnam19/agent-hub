@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -893,3 +894,19 @@ def test_session_uuid_kept_short(tmp_path):
 
     assert [c["session"] for c in corrections] == ["3f2a9c1e", "3f2a9c1e", "s1"]
     assert uuid not in json.dumps(corrections)
+
+
+def test_word_check_is_linear_on_long_capitals():
+    # the bare runs and their `Basic ` forms: only the latter reach the word check
+    for text in (
+        "A" * 5000 + "b1",
+        "ABCDEFGHIJ" * 300 + "x",
+        "Basic " + "A" * 5000 + "b1",
+        "Basic " + "ABCDEFGHIJ" * 300 + "x",
+    ):
+        start = time.perf_counter()
+        redacted = skillmine.redact(text)
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 0.5
+        assert redacted

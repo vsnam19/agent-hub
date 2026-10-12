@@ -3,6 +3,7 @@
 import json
 import math
 import re
+import string
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -62,7 +63,7 @@ _PART_SPLIT = re.compile(r"[_+-]+")
 _SNAKE_CHUNK = re.compile(r"[a-z]{2,}(?:\d{1,3}[a-z]*)?|[a-z]\d{1,3}|\d{1,3}[a-z]+|\d{1,8}")
 _SNAKE_CHUNK_MAX = 12
 _ASCII_RUN = re.compile(r"[\x00-\x7f]+")
-_WORD = re.compile(r"(?:[A-Z]+(?![a-z])|[A-Z]?[a-z]{3,})+")
+_WORD_PIECE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+")
 _IDENT_WORD = re.compile(r"(?:[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]{3,})+")
 _JOB_ID = re.compile(r"\d{8}-\d{6}-[a-z]+(?:-[a-z]+)*-[0-9a-f]{4}(?:\.\w+)?")
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
@@ -90,11 +91,25 @@ _CAT_PATH = re.compile(
 _CAT_NUMBER = re.compile(r"\b\d+(?:\.\d+)*\b")
 
 
+def _is_word(text: str) -> bool:
+    """Whether `text` is a camel-case word run: capital runs and lowercase runs of 3+ letters, nothing else.
+
+    Splitting into pieces in one linear pass keeps it fast; a nested `(?:...)+` pattern backtracks 2^(n-1) ways over
+    a run of n capitals.
+    """
+    pieces = _WORD_PIECE.findall(text)
+    return (
+        bool(pieces)
+        and "".join(pieces) == text
+        and all(p.isupper() or len(p.lstrip(string.ascii_uppercase)) >= 3 for p in pieces)
+    )
+
+
 def redact(text: str) -> str:
     text = _PEM.sub("<redacted-key>", text)
     text = _JWT.sub("<redacted>", text)
     text = _BEARER.sub("Bearer <redacted>", text)
-    text = _BASIC.sub(lambda m: m.group(0) if _WORD.fullmatch(m.group(1)) else "Basic <redacted>", text)
+    text = _BASIC.sub(lambda m: m.group(0) if _is_word(m.group(1)) else "Basic <redacted>", text)
     text = _URL_CREDS.sub(r"\1:<redacted>@", text)
     text = _PREFIXED.sub("<redacted>", text)
     text = _KV.sub(r"\1\2<redacted>", text)
