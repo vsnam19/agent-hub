@@ -14,10 +14,21 @@ from pathlib import Path
 from bench.gwen.awake import KeepAwake
 from bench.gwen.memsample import MemSampler
 from bench.gwen.proxy import RecordingProxy
-from bench.gwen.tasks import Task, install_hidden, load_tasks, prepare
+from bench.gwen.tasks import SUITES_FILE, Suite, Task, install_hidden, load_suites, load_tasks, prepare
 
 SECRET_WORDS = ("TOKEN", "SECRET", "API_KEY", "PASSWORD")
 GATE_TIMEOUT = 300
+
+
+def _expand_gate(argv: list[str], task: Task, build_dir: Path) -> list[str]:
+    """Gate argv with {python}, {build_dir} and the whole-argument {visible_tests} filled in."""
+    out = []
+    for arg in argv:
+        if arg == "{visible_tests}":
+            out.extend(task.visible_tests)
+        else:
+            out.append(arg.replace("{python}", sys.executable).replace("{build_dir}", str(build_dir)))
+    return out
 
 
 def _gate(cmd: list[str], repo: Path) -> tuple[int, str]:
@@ -64,6 +75,10 @@ def get_harnesses_file():
     return Path(os.environ.get("GWEN_BENCH_HARNESSES") or Path(__file__).parent / "harnesses.toml")
 
 
+def get_suites_file():
+    return Path(os.environ.get("GWEN_BENCH_SUITES") or SUITES_FILE)
+
+
 def run_one(
     harness: str,
     model: str,
@@ -75,6 +90,7 @@ def run_one(
     timeout: float,
     ssh_target: str | None,
     harnesses_file: Path,
+    suites: dict[str, Suite] | None = None,
 ) -> dict:
 
     ts = time.strftime("%Y%m%d-%H%M%S")
@@ -93,8 +109,9 @@ def run_one(
         sys.exit(2)
 
     cfg = harnesses[harness]
+    suite = (load_suites() if suites is None else suites)[task.suite]
 
-    setup_commit = prepare(task, repo)
+    setup_commit = prepare(task, repo, suite)
 
     proxy_log = run_dir / "proxy.jsonl"
     proxy = RecordingProxy(base_url, proxy_log)
@@ -117,6 +134,8 @@ def run_one(
             .replace("{brief_text}", task.brief)
             .replace("{workdir}", str(repo))
             .replace("{home}", str(home))
+            .replace("{lint_cmd}", suite.harness.get("lint_cmd", ""))
+            .replace("{test_cmd}", suite.harness.get("test_cmd", ""))
         )
 
     for k, v in cfg.get("env", {}).items():
@@ -190,12 +209,10 @@ def run_one(
 
     install_hidden(task, repo)
 
-    py = [sys.executable, "-m"]
-    gate = {
-        "ruff": _gate(py + ["ruff", "check", "--no-cache", "."], repo),
-        "visible": _gate(py + ["pytest", "-q", "-p", "no:cacheprovider", *task.visible_tests], repo),
-        "hidden": _gate(py + ["pytest", "-q", "-p", "no:cacheprovider", "tests/hidden"], repo),
-    }
+    # Fresh build directory for the gate, outside the repository (the agent's own build/ never counts).
+    build_dir = run_dir / "gate-build"
+    build_dir.mkdir()
+    gate = {name: _gate(_expand_gate(argv, task, build_dir), repo) for name, argv in suite.gate.items()}
     (run_dir / "gate.log").write_text("\n\n".join(f"== {k} rc={rc}\n{tail}" for k, (rc, tail) in gate.items()))
 
     usage = proxy.summary()
@@ -208,6 +225,7 @@ def run_one(
         "harness": harness,
         "model": model,
         "task": task.id,
+        "suite": task.suite,
         "pass": passed,
         "infra_error": infra_error,
         "rc": p.returncode if not timed_out else None,
@@ -233,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--harness", action="append")
     parser.add_argument("--model", action="append")
     parser.add_argument("--task", action="append")
+    parser.add_argument("--suite", action="append")
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--base-url", default=os.environ.get("GWEN_BASE_URL", "http://100.86.30.90:8642"))
     parser.add_argument("--api-key-file", default=os.path.expanduser("~/.config/gwen/api-key"))
@@ -256,7 +275,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Unknown harness: {h}", file=sys.stderr)
             return 2
 
-    tasks_dict = load_tasks()
+    suites = load_suites(get_suites_file())
+    for s in args.suite or []:
+        if s not in suites:
+            print(f"Unknown suite: {s}", file=sys.stderr)
+            return 2
+
+    tasks_dict = {tid: t for tid, t in load_tasks(suites).items() if not args.suite or t.suite in args.suite}
     selected_tasks = args.task if args.task and "all" not in args.task else list(tasks_dict.keys())
     for t in selected_tasks:
         if t not in tasks_dict:
@@ -281,12 +306,12 @@ def main(argv: list[str] | None = None) -> int:
 
     with KeepAwake(ssh_target):
         return _run_batch(
-            args, selected_harnesses, selected_tasks, tasks_dict, api_key, out_root, results_file, ssh_target
+            args, selected_harnesses, selected_tasks, tasks_dict, api_key, out_root, results_file, ssh_target, suites
         )
 
 
 def _run_batch(
-    args, selected_harnesses, selected_tasks, tasks_dict, api_key, out_root, results_file, ssh_target
+    args, selected_harnesses, selected_tasks, tasks_dict, api_key, out_root, results_file, ssh_target, suites
 ) -> int:
     for _ in range(args.repeat):
         for h in selected_harnesses:
@@ -306,6 +331,7 @@ def _run_batch(
                         timeout=args.timeout,
                         ssh_target=ssh_target,
                         harnesses_file=get_harnesses_file(),
+                        suites=suites,
                     )
 
                     with open(results_file, "a") as f:

@@ -1,0 +1,17 @@
+# Suites of the gwen bench. Paths are relative to this file's directory.
+# Gate argv placeholders: {python} (sys.executable), {build_dir} (fresh, outside the repository),
+# {visible_tests} (as a whole argument: expands to the task's visible_tests).
+# Harness placeholders from [<suite>.harness]: {lint_cmd}, {test_cmd} (empty when omitted).
+
+[python]
+fixture = "fixture"
+tasks = "tasks"
+
+[python.gate]
+ruff = ["{python}", "-m", "ruff", "check", "--no-cache", "."]
+visible = ["{python}", "-m", "pytest", "-q", "-p", "no:cacheprovider", "{visible_tests}"]
+hidden = ["{python}", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests/hidden"]
+
+[python.harness]
+lint_cmd = "python: ruff check --fix"
+test_cmd = "python -m pytest -q"

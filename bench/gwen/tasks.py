@@ -1,11 +1,23 @@
+import re
 import shutil
 import subprocess
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+SUITES_FILE = Path(__file__).parent / "suites.toml"
+# The Python suite's paths (tests import them).
 FIXTURE_DIR = Path(__file__).parent / "fixture"
 TASKS_DIR = Path(__file__).parent / "tasks"
+
+
+@dataclass(frozen=True)
+class Suite:
+    name: str
+    fixture: Path
+    tasks_dir: Path
+    gate: dict[str, list[str]]
+    harness: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -15,31 +27,62 @@ class Task:
     dir: Path
     paths_allowed: list[str]
     visible_tests: list[str]
+    suite: str
 
     @property
     def brief(self) -> str:
         return (self.dir / "brief.md").read_text(encoding="utf-8")
 
 
-def load_tasks() -> dict[str, Task]:
-    tasks = {}
-    for i in range(1, 7):
-        tid = f"t{i}"
-        tdir = TASKS_DIR / tid
-        with (tdir / "task.toml").open("rb") as f:
-            data = tomllib.load(f)
-        tasks[tid] = Task(
-            id=tid,
-            title=data["title"],
-            dir=tdir,
-            paths_allowed=data["paths_allowed"],
-            visible_tests=data["visible_tests"],
+def load_suites(path: Path = SUITES_FILE) -> dict[str, Suite]:
+    with path.open("rb") as f:
+        data = tomllib.load(f)
+    base = path.parent
+    return {
+        name: Suite(
+            name=name,
+            fixture=base / body["fixture"],
+            tasks_dir=base / body["tasks"],
+            gate=body.get("gate", {}),
+            harness=body.get("harness", {}),
         )
+        for name, body in data.items()
+    }
+
+
+def _natural_key(name: str) -> list[tuple[int, int | str]]:
+    """Sort key that orders embedded numbers by value: t2 before t10."""
+    return [(0, int(part)) if part.isdigit() else (1, part) for part in re.split(r"(\d+)", name)]
+
+
+def load_tasks(suites: dict[str, Suite] | None = None) -> dict[str, Task]:
+    if suites is None:
+        suites = load_suites()
+    tasks: dict[str, Task] = {}
+    for suite in suites.values():
+        task_dirs = [d for d in suite.tasks_dir.iterdir() if (d / "task.toml").is_file()]
+        for tdir in sorted(task_dirs, key=lambda d: _natural_key(d.name)):
+            if tdir.name in tasks:
+                raise ValueError(
+                    f"duplicate task id {tdir.name!r} in suites {tasks[tdir.name].suite!r} and {suite.name!r}"
+                )
+            with (tdir / "task.toml").open("rb") as f:
+                data = tomllib.load(f)
+            tasks[tdir.name] = Task(
+                id=tdir.name,
+                title=data["title"],
+                dir=tdir,
+                paths_allowed=data["paths_allowed"],
+                visible_tests=data["visible_tests"],
+                suite=suite.name,
+            )
     return tasks
 
 
-def prepare(task: Task, dest: Path) -> str:
-    shutil.copytree(FIXTURE_DIR, dest)
+def prepare(task: Task, dest: Path, suite: Suite | None = None) -> str:
+    if suite is None:
+        suite = load_suites()[task.suite]
+    shutil.copytree(suite.fixture, dest)
     env = {
         "GIT_AUTHOR_NAME": "Bench",
         "GIT_AUTHOR_EMAIL": "bench@example.com",
