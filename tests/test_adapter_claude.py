@@ -1,5 +1,6 @@
+import json
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -278,3 +279,67 @@ def test_claude_build_adds_plugin_dirs(tmp_path):
     argv = adapter.build(req).argv
     assert argv[-4:] == ["--plugin-dir", str(telaf), "--plugin-dir", str(aspice)]
     assert argv[argv.index("--allowedTools") + 1] == "Read,Grep,Glob"
+
+
+def _classify_stdout(tmp_path, adapter, payload, rc=1):
+    attempt = tmp_path / "attempt"
+    attempt.mkdir(parents=True)
+    (attempt / "stdout").write_text(json.dumps(payload))
+    return adapter.classify(rc, attempt)
+
+
+def _limit_payload(result, **extra):
+    payload = {"type": "result", "subtype": "success", "is_error": True, "terminal_reason": "api_error"}
+    payload["result"] = result
+    payload.update(extra)
+    return payload
+
+
+def test_claude_session_limit_is_quota(tmp_path, adapter_claude):
+    c = _classify_stdout(
+        tmp_path,
+        adapter_claude,
+        _limit_payload("You've hit your session limit · resets 12:20pm (Asia/Ho_Chi_Minh)", api_error_status=429),
+    )
+    assert c.outcome == Outcome.QUOTA
+
+    c = _classify_stdout(tmp_path / "second", adapter_claude, _limit_payload("You've hit your weekly limit"))
+    assert c.outcome == Outcome.QUOTA
+
+
+def test_claude_session_limit_reset_time_parsed(tmp_path, adapter_claude, monkeypatch):
+    text = "You've hit your session limit · resets 12:20pm (Asia/Ho_Chi_Minh)"
+
+    # 09:00 in Asia/Ho_Chi_Minh (UTC+7): 12:20pm is still ahead today, i.e. 05:20 UTC.
+    monkeypatch.setattr("agenthub.agents.claude._now", lambda: datetime(2026, 10, 12, 2, 0, tzinfo=timezone.utc))
+    c = _classify_stdout(tmp_path / "before", adapter_claude, _limit_payload(text, api_error_status=429))
+    assert c.outcome == Outcome.QUOTA
+    assert c.reset_at == datetime(2026, 10, 12, 5, 20, tzinfo=timezone.utc)
+
+    # 17:00 in Asia/Ho_Chi_Minh: 12:20pm has passed, so the reset is tomorrow at 05:20 UTC.
+    monkeypatch.setattr("agenthub.agents.claude._now", lambda: datetime(2026, 10, 12, 10, 0, tzinfo=timezone.utc))
+    c = _classify_stdout(tmp_path / "after", adapter_claude, _limit_payload(text, api_error_status=429))
+    assert c.outcome == Outcome.QUOTA
+    assert c.reset_at == datetime(2026, 10, 13, 5, 20, tzinfo=timezone.utc)
+
+
+def test_claude_429_without_text_is_quota(tmp_path, adapter_claude):
+    c = _classify_stdout(tmp_path, adapter_claude, {"is_error": True, "api_error_status": 429, "result": ""})
+    assert c.outcome == Outcome.QUOTA
+    assert c.reset_at is None
+
+
+def test_claude_limit_reset_with_date_parsed(tmp_path, adapter_claude, monkeypatch):
+    text = "You've hit your session limit · resets Oct 14, 9am (Asia/Ho_Chi_Minh)"
+    monkeypatch.setattr("agenthub.agents.claude._now", lambda: datetime(2026, 10, 12, 2, 0, tzinfo=timezone.utc))
+    c = _classify_stdout(tmp_path, adapter_claude, _limit_payload(text, api_error_status=429))
+    assert c.outcome == Outcome.QUOTA
+    # 09:00 local on 2026-10-14 is 02:00 UTC.
+    assert c.reset_at == datetime(2026, 10, 14, 2, 0, tzinfo=timezone.utc)
+
+
+def test_claude_limit_unknown_zone_has_no_reset(tmp_path, adapter_claude):
+    text = "You've hit your session limit · resets 12:20pm (Mars/Olympus)"
+    c = _classify_stdout(tmp_path, adapter_claude, _limit_payload(text, api_error_status=429))
+    assert c.outcome == Outcome.QUOTA
+    assert c.reset_at is None
