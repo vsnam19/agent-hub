@@ -282,7 +282,9 @@ def _cmd_skills(args) -> int:
     out = Path(args.out) if args.out else state_dir / "skills" / now.strftime("%Y-%m-%d")
     extract = skillmine.mine(state_dir, transcripts, since, now)
     summary = skillmine.write(extract, out)
-    print(_safe(json.dumps(extract.to_json(), indent=2, ensure_ascii=False) if args.json else summary))
+    text = _safe(json.dumps(extract.to_json(), indent=2, ensure_ascii=False) if args.json else summary)
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    print(text.encode(encoding, errors="backslashreplace").decode(encoding))
     return 0
 
 
@@ -299,7 +301,8 @@ def _mine_window(args, state_dir: Path, now: datetime) -> datetime:
         return since if since.tzinfo else since.replace(tzinfo=timezone.utc)
     since = now - timedelta(days=28)
     try:
-        last = datetime.fromisoformat((state_dir / "skills" / "last-run").read_text().strip())
+        last_run = (state_dir / "skills" / "last-run").read_text(encoding="utf-8", errors="replace")
+        last = datetime.fromisoformat(last_run.strip())
     except (OSError, ValueError):
         return since
     return min(since, last if last.tzinfo else last.replace(tzinfo=timezone.utc))

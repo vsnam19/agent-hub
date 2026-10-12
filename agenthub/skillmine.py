@@ -21,15 +21,16 @@ _KV_JSON = re.compile(r"(?i)(\"\w*(?:key|token|secret|password|passwd)\"\s*:\s*)
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _HEX = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{32,}(?![0-9A-Za-z])")
 _B64 = re.compile(r"(?<![\w+/=-])[A-Za-z0-9+/]{40,}={0,2}(?![\w+/])")
-_HOME = re.compile(r"/home/[^/\s]+")
+_HOME = re.compile(r"(?:^|(?<=[\s\"'`(=:]))/home/[^/\s]+")
 
 _CORRECTION = re.compile(
     r"không được|\bphải\b|\bđừng\b|\bsai\b|\bdon[’']?t\b|\bnever\b|\bwrong\b|\bmust\b",
     re.I,
 )
-_FINDING = re.compile(r"^\s*[-*]\s+(high|medium|low)\s+[—–-]\s+(.+)$", re.I)
-_DASH = re.compile(r"\s+[—–-]\s+")
-_FIX_BRIEF = re.compile(r"review round \d+\s*(?:fix(?:es)?|—|–|-)", re.I)
+_FINDING = re.compile(r"^\s*[-*]\s+(high|medium|low)\s+(?:—|–|--|-)\s+(.+)$", re.I)
+_DASH = re.compile(r"\s+(?:—|–|--|-)\s+")
+_LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_FIX_BRIEF = re.compile(r"\bround\s+\d+\s*(?::|fix(?:es)?\b|—|–|-)", re.I)
 _AGENT_HUB = re.compile(r"(?<![\w-])agent-hub\s+([a-z][\w-]*)")
 
 _CAT_BACKTICK = re.compile(r"`[^`]*`")
@@ -74,6 +75,8 @@ class Extract:
     since: str
     until: str
     findings: list[dict] = field(default_factory=list)
+    groups: list[dict] = field(default_factory=list)
+    review_failures: int = 0
     fix_rounds: dict[str, dict] = field(default_factory=dict)
     corrections: list[dict] = field(default_factory=list)
     corrections_total: int = 0
@@ -88,6 +91,7 @@ def mine(state_dir: Path, transcripts_dir: Path, since: datetime, now: datetime)
     extract = Extract(since=since.isoformat(), until=now.isoformat())
     _mine_jobs(Path(state_dir), _plan_branches(Path(state_dir)), extract, since)
     _mine_transcripts(Path(transcripts_dir), extract, since)
+    extract.groups = group_findings(extract.findings)
     return extract
 
 
@@ -103,14 +107,14 @@ def _parse_time(value) -> datetime | None:
 
 def _read_json(path: Path):
     try:
-        return json.loads(path.read_text(errors="replace"))
+        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
         return None
 
 
 def _read_text(path: Path) -> str:
     try:
-        return path.read_text(errors="replace")
+        return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
 
@@ -161,7 +165,9 @@ def _mine_jobs(state_dir: Path, branches: dict[str, str], extract: Extract, sinc
         branch = clean(branches.get(dirname, dirname) or "unknown")
         entry = per_branch.setdefault(branch, {"fix_briefs": 0, "reviews": 0, "verdicts": []})
         reply = _read_reply(job_dir)
-        if kind == "review":
+        if kind == "review" and result.get("status") != "ok":
+            extract.review_failures += 1
+        elif kind == "review":
             entry["reviews"] += 1
             verdict = result.get("verdict") or _verdict_of(reply)
             if verdict:
@@ -179,9 +185,37 @@ def _mine_jobs(state_dir: Path, branches: dict[str, str], extract: Extract, sinc
                         "category": category(claim),
                     }
                 )
-        elif _FIX_BRIEF.search(_read_text(job_dir / "brief.md").split("\n", 1)[0]):
+        elif _FIX_BRIEF.search(_first_line(_read_text(job_dir / "brief.md"))):
             entry["fix_briefs"] += 1
     extract.fix_rounds = per_branch
+
+
+def _first_line(text: str) -> str:
+    return next((line for line in text.splitlines() if line.strip()), "")
+
+
+def module_of(path: str) -> str:
+    return "/".join([part for part in path.split("/") if part and part != "."][:2])
+
+
+def group_findings(findings: list[dict]) -> list[dict]:
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for f in findings:
+        grouped.setdefault((f["severity"], module_of(f["file"])), []).append(f)
+    groups = []
+    for (severity, module), items in grouped.items():
+        examples = list(dict.fromkeys(f["claim"] for f in items))[:3]
+        groups.append(
+            {
+                "severity": severity,
+                "module": module,
+                "count": len(items),
+                "branches": len({f["branch"] for f in items}),
+                "examples": examples,
+            }
+        )
+    groups.sort(key=lambda g: (-g["count"], g["severity"], g["module"]))
+    return groups
 
 
 def _read_reply(job_dir: Path) -> str:
@@ -220,7 +254,11 @@ def _findings_of(reply: str):
         parts = _DASH.split(match.group(2), maxsplit=1)
         if len(parts) != 2:
             continue
-        where = re.match(r"[^\s:,]+", parts[0].strip().strip("`*"))
+        label = parts[0].strip().strip("`*")
+        link = _LINK.match(label)
+        if link:
+            label = link.group(1).strip().strip("`*")
+        where = re.match(r"[^\s:,]+", label)
         yield match.group(1).lower(), where.group(0).strip("`") if where else "", parts[1].strip()
 
 
@@ -234,7 +272,7 @@ def _mine_transcripts(root: Path, extract: Extract, since: datetime) -> None:
         try:
             if datetime.fromtimestamp(path.stat().st_mtime, timezone.utc) < since:
                 continue
-            with path.open(errors="replace") as handle:
+            with path.open(encoding="utf-8", errors="replace") as handle:
                 for line in handle:
                     _transcript_line(line, extract, since, sequences)
         except OSError:
@@ -291,6 +329,7 @@ def metrics(extract: Extract) -> dict:
         "findings_per_category": dict(per_category.most_common(20)),
         "mean_review_rounds": round(sum(rounds) / len(rounds), 2) if rounds else 0,
         "max_review_rounds": max(rounds, default=0),
+        "review_failures": extract.review_failures,
         "fix_briefs_total": sum(b["fix_briefs"] for b in extract.fix_rounds.values()),
         "corrections_total": extract.corrections_total,
     }
@@ -299,13 +338,11 @@ def metrics(extract: Extract) -> dict:
 def render_md(extract: Extract) -> str:
     lines = [f"# Skill mining extract ({extract.since[:10]} .. {extract.until[:10]})", ""]
     lines += [f"Findings: {len(extract.findings)}; corrections: {extract.corrections_total}", ""]
-    lines.append("## Top finding categories")
-    jobs: dict[str, list[str]] = {}
-    for f in extract.findings:
-        if f["job"] not in jobs.setdefault(f["category"], []):
-            jobs[f["category"]].append(f["job"])
-    top = Counter(f["category"] for f in extract.findings).most_common(10)
-    lines += [f"- {n}× {cat} (e.g. {', '.join(jobs[cat][:3])})" for cat, n in top] or ["- (none)"]
+    lines.append("## Top finding groups (severity, module)")
+    lines += [
+        f"- {g['count']}× {g['severity']} in {g['module']} ({g['branches']} branches): " + "; ".join(g["examples"])
+        for g in [g for g in extract.groups if g["count"] >= 2][:10]
+    ] or ["- (none)"]
     lines += ["", "## Branches with 2+ review rounds"]
     looped = sorted(
         ((b, d) for b, d in extract.fix_rounds.items() if d["reviews"] >= 2), key=lambda x: -x[1]["reviews"]
@@ -321,7 +358,9 @@ def render_md(extract: Extract) -> str:
 def write(extract: Extract, out: Path) -> str:
     out.mkdir(parents=True, exist_ok=True)
     summary = render_md(extract)
-    (out / "extract.json").write_text(json.dumps(extract.to_json(), indent=2, ensure_ascii=False) + "\n")
-    (out / "extract.md").write_text(summary)
-    (out / "metrics.json").write_text(json.dumps(metrics(extract), indent=2, ensure_ascii=False) + "\n")
+    dump = json.dumps(extract.to_json(), indent=2, ensure_ascii=False)
+    (out / "extract.json").write_text(dump + "\n", encoding="utf-8")
+    (out / "extract.md").write_text(summary, encoding="utf-8")
+    stats = json.dumps(metrics(extract), indent=2, ensure_ascii=False)
+    (out / "metrics.json").write_text(stats + "\n", encoding="utf-8")
     return summary

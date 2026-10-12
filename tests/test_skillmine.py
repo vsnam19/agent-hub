@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -16,7 +19,7 @@ def make_job(
     job_id: str,
     *,
     kind: str = "review",
-    status: str = "done",
+    status: str = "ok",
     workdir: str = "/work/repo/.worktrees/feat-one",
     started: datetime = RECENT,
     brief: str = "# Brief: x\n",
@@ -57,7 +60,7 @@ def write_transcript(root: Path, records: list[dict], name: str = "s1") -> Path:
     project = root / "proj"
     project.mkdir(parents=True, exist_ok=True)
     path = project / f"{name}.jsonl"
-    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n", encoding="utf-8")
     return path
 
 
@@ -324,10 +327,136 @@ def test_cli_writes_three_files_and_does_not_touch_last_run(tmp_path, monkeypatc
     assert sorted(p.name for p in out.iterdir()) == ["extract.json", "extract.md", "metrics.json"]
     assert json.loads((out / "extract.json").read_text())["findings"][0]["claim"] == "Something is off"
     assert json.loads((out / "metrics.json").read_text())["corrections_total"] == 0
-    assert "something is off" in capsys.readouterr().out
+    assert "Findings: 1" in capsys.readouterr().out
     assert last_run.read_text() == "2020-01-01T00:00:00+00:00\n"
 
     rc = main(["skills", "mine", "--out", str(out), "--transcripts", str(tmp_path / "claude"), "--json"])
     assert rc == 0
     printed = json.loads(capsys.readouterr().out)
     assert printed["findings"][0]["claim"] == "Something is off"
+
+
+def test_write_works_under_c_locale(tmp_path):
+    write_transcript(tmp_path / "claude", [user_msg("không được sửa file này")])
+    out = tmp_path / "out"
+    env = {
+        **os.environ,
+        "LC_ALL": "C",
+        "LANG": "C",
+        "PYTHONUTF8": "0",
+        "PYTHONPATH": str(Path(skillmine.__file__).parent.parent),
+        "AGENT_HUB_STATE": str(tmp_path / "state"),
+        "HOME": str(tmp_path / "home"),
+    }
+    code = "import sys; from agenthub.cli import main; sys.exit(main(sys.argv[1:]))"
+    argv = ["skills", "mine", "--out", str(out), "--transcripts", str(tmp_path / "claude"), "--since", "2026-09-01"]
+    done = subprocess.run([sys.executable, "-c", code, *argv], env=env, capture_output=True, cwd=tmp_path)
+
+    assert done.returncode == 0, done.stderr.decode("utf-8", "replace")
+    assert sorted(p.name for p in out.iterdir()) == ["extract.json", "extract.md", "metrics.json"]
+    corrections = json.loads((out / "extract.json").read_text(encoding="utf-8"))["corrections"]
+    assert [c["text"] for c in corrections] == ["không được sửa file này"]
+    assert "không được sửa file này" in (out / "extract.md").read_text(encoding="utf-8")
+
+
+def test_double_hyphen_separator(tmp_path):
+    make_job(tmp_path / "state", "20261010-100000-review-aaaa", reply=review_reply("- high -- a/b.py:3 -- Bad thing"))
+
+    findings = run_mine(tmp_path).findings
+
+    assert [(f["severity"], f["file"], f["claim"]) for f in findings] == [("high", "a/b.py", "Bad thing")]
+
+
+def test_markdown_link_file(tmp_path):
+    reply = review_reply(
+        "- high — [agenthub/x.py](file:///work/agenthub/x.py#L42) — Linked",
+        "- low — agenthub/y.py:9 — Plain",
+    )
+    make_job(tmp_path / "state", "20261010-100000-review-aaaa", reply=reply)
+
+    findings = run_mine(tmp_path).findings
+
+    assert [(f["file"], f["claim"]) for f in findings] == [("agenthub/x.py", "Linked"), ("agenthub/y.py", "Plain")]
+
+
+def test_home_inside_url_kept():
+    assert skillmine.redact("see https://example.org/home/alice/x") == "see https://example.org/home/alice/x"
+    assert skillmine.redact('open "/home/alice/x" and (/home/bob/y) and p=/home/carol/z') == (
+        'open "~/x" and (~/y) and p=~/z'
+    )
+    assert skillmine.redact("/home/alice/start") == "~/start"
+
+
+def test_failed_reviews_not_counted_as_rounds(tmp_path):
+    state = tmp_path / "state"
+    make_job(state, "20261010-100000-review-aaaa", status="ok", reply=review_reply("- low — a.py:1 — One"))
+    make_job(state, "20261010-110000-review-bbbb", status="failed", started=RECENT + timedelta(hours=1))
+    make_job(state, "20261010-120000-review-cccc", status="timeout", started=RECENT + timedelta(hours=2))
+    make_job(state, "20261010-130000-review-dddd", status="cancelled", started=RECENT + timedelta(hours=3))
+
+    extract = run_mine(tmp_path)
+
+    assert extract.fix_rounds["feat-one"]["reviews"] == 1
+    assert extract.review_failures == 3
+    assert skillmine.metrics(extract)["review_failures"] == 3
+    assert skillmine.metrics(extract)["max_review_rounds"] == 1
+
+
+def test_fix_brief_variants(tmp_path):
+    state = tmp_path / "state"
+    briefs = [
+        "\n\n# Brief: round 1: fix things\n",
+        "# Brief: hub round 2 — more\n",
+        "# Brief: round 3 fixes\n",
+        "# Brief: round 4 fix\n",
+        "# Brief: something else entirely\n",
+    ]
+    for i, brief in enumerate(briefs):
+        make_job(
+            state,
+            f"20261010-1{i}0000-implement-x{i}",
+            kind="implement",
+            started=RECENT + timedelta(hours=i),
+            brief=brief,
+        )
+
+    extract = run_mine(tmp_path)
+
+    assert extract.fix_rounds["feat-one"]["fix_briefs"] == 4
+
+
+def test_groups_by_severity_and_module(tmp_path):
+    state = tmp_path / "state"
+    make_job(
+        state,
+        "20261010-100000-review-aaaa",
+        workdir="/work/repo/.worktrees/b1",
+        reply=review_reply(
+            "- high — tests/bench/x.py:1 — First",
+            "- high — tests/bench/y.py:2 — Second",
+            "- low — agenthub/skillmine.py:3 — Alone",
+        ),
+    )
+    make_job(
+        state,
+        "20261010-110000-review-bbbb",
+        workdir="/work/repo/.worktrees/b2",
+        started=RECENT + timedelta(hours=1),
+        reply=review_reply("- high — tests/bench/z.py:3 — Third", "- high — tests/bench/z.py:4 — Fourth"),
+    )
+
+    extract = run_mine(tmp_path)
+
+    assert extract.groups[0] == {
+        "severity": "high",
+        "module": "tests/bench",
+        "count": 4,
+        "branches": 2,
+        "examples": ["First", "Second", "Third"],
+    }
+    assert {"severity": "low", "module": "agenthub/skillmine.py", "count": 1, "branches": 1, "examples": ["Alone"]} in (
+        extract.groups
+    )
+    md = skillmine.render_md(extract)
+    assert "4× high in tests/bench (2 branches)" in md
+    assert "Alone" not in md
