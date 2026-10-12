@@ -21,7 +21,7 @@ _KV_JSON = re.compile(r"(?i)(\"\w*(?:key|token|secret|password|passwd)\"\s*:\s*)
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _HEX = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{32,}(?![0-9A-Za-z])")
 _B64 = re.compile(r"(?<![\w+/=-])[A-Za-z0-9+/]{40,}={0,2}(?![\w+/])")
-_HOME = re.compile(r"(?:^|(?<=[\s\"'`(=:]))/home/[^/\s]+")
+_HOME = re.compile(r"(?:^|(?<=[\s\"'`(=:/\[]))/home/[^/\s]+")
 
 _CORRECTION = re.compile(
     r"không được|\bphải\b|\bđừng\b|\bsai\b|\bdon[’']?t\b|\bnever\b|\bwrong\b|\bmust\b",
@@ -63,11 +63,22 @@ def clean(text: str) -> str:
 
 
 def category(claim: str) -> str:
-    text = _CAT_BACKTICK.sub("<id>", claim.lower().replace("**", ""))
+    text = _CAT_BACKTICK.sub("<id>", redact(claim).lower().replace("**", ""))
     text = _CAT_QUOTED.sub("<str>", text)
     text = _CAT_PATH.sub("<path>", text)
     text = _CAT_NUMBER.sub("<n>", text)
     return clean(" ".join(text.split()[:CATEGORY_WORDS]))
+
+
+def _redact_all(value):
+    """The one choke point: every string leaving the extract, keys included, is redacted once more."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, list):
+        return [_redact_all(v) for v in value]
+    if isinstance(value, dict):
+        return {redact(k) if isinstance(k, str) else k: _redact_all(v) for k, v in value.items()}
+    return value
 
 
 @dataclass
@@ -84,7 +95,7 @@ class Extract:
     outcomes: dict[str, dict] = field(default_factory=lambda: {"by_role": {}, "by_agent": {}})
 
     def to_json(self) -> dict:
-        return asdict(self)
+        return _redact_all(asdict(self))
 
 
 def mine(state_dir: Path, transcripts_dir: Path, since: datetime, now: datetime) -> Extract:
@@ -163,7 +174,7 @@ def _mine_jobs(state_dir: Path, branches: dict[str, str], extract: Extract, sinc
         workdir = result.get("workdir") if isinstance(result.get("workdir"), str) else ""
         dirname = Path(workdir).name
         branch = clean(branches.get(dirname, dirname) or "unknown")
-        entry = per_branch.setdefault(branch, {"fix_briefs": 0, "reviews": 0, "verdicts": []})
+        entry = per_branch.setdefault(branch, {"fix_briefs": 0, "fix_brief_titles": [], "reviews": 0, "verdicts": []})
         reply = _read_reply(job_dir)
         if kind == "review" and result.get("status") != "ok":
             extract.review_failures += 1
@@ -185,8 +196,11 @@ def _mine_jobs(state_dir: Path, branches: dict[str, str], extract: Extract, sinc
                         "category": category(claim),
                     }
                 )
-        elif _FIX_BRIEF.search(_first_line(_read_text(job_dir / "brief.md"))):
-            entry["fix_briefs"] += 1
+        else:
+            title = _first_line(_read_text(job_dir / "brief.md"))
+            if _FIX_BRIEF.search(title):
+                entry["fix_briefs"] += 1
+                entry["fix_brief_titles"].append(clean(title))
     extract.fix_rounds = per_branch
 
 
@@ -317,7 +331,8 @@ def _transcript_line(line: str, extract: Extract, since: datetime, sequences: di
         for block in content:
             if not (isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Bash"):
                 continue
-            command = (block.get("input") or {}).get("command")
+            tool_input = block.get("input")
+            command = tool_input.get("command") if isinstance(tool_input, dict) else None
             if isinstance(command, str):
                 sequences.setdefault(session, []).extend(_AGENT_HUB.findall(command))
 
@@ -350,6 +365,8 @@ def render_md(extract: Extract) -> str:
     lines += [
         f"- {b}: {d['reviews']} reviews, {d['fix_briefs']} fix briefs ({' → '.join(d['verdicts'])})" for b, d in looped
     ] or ["- (none)"]
+    for b, d in looped:
+        lines += [f"  - {b}: {t}" for t in d["fix_brief_titles"]]
     lines += ["", "## Corrections"]
     lines += [f"- {c['text']}" for c in extract.corrections[:20]] or ["- (none)"]
     return "\n".join(lines) + "\n"
@@ -357,10 +374,10 @@ def render_md(extract: Extract) -> str:
 
 def write(extract: Extract, out: Path) -> str:
     out.mkdir(parents=True, exist_ok=True)
-    summary = render_md(extract)
+    summary = redact(render_md(extract))
     dump = json.dumps(extract.to_json(), indent=2, ensure_ascii=False)
     (out / "extract.json").write_text(dump + "\n", encoding="utf-8")
     (out / "extract.md").write_text(summary, encoding="utf-8")
-    stats = json.dumps(metrics(extract), indent=2, ensure_ascii=False)
+    stats = json.dumps(_redact_all(metrics(extract)), indent=2, ensure_ascii=False)
     (out / "metrics.json").write_text(stats + "\n", encoding="utf-8")
     return summary

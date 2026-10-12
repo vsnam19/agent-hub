@@ -140,6 +140,7 @@ def test_fix_rounds_counted_per_branch(tmp_path):
 
     assert extract.fix_rounds["feat-one"] == {
         "fix_briefs": 2,
+        "fix_brief_titles": ["# Brief: hub review round 1 fixes", "# Brief: hub review round 2 fix — x"],
         "reviews": 2,
         "verdicts": ["request-changes", "approve"],
     }
@@ -460,3 +461,78 @@ def test_groups_by_severity_and_module(tmp_path):
     md = skillmine.render_md(extract)
     assert "4× high in tests/bench (2 branches)" in md
     assert "Alone" not in md
+
+
+def test_category_redacts_case_sensitive_secrets(tmp_path):
+    aws = "AKIAABCDEFGHIJKLMNOP"
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4"
+    pem = "-----BEGIN RSA PRIVATE KEY----- MIIEowIBAAKCAQEAsecretbody -----END RSA PRIVATE KEY-----"
+    claims = [f"leaks {aws} here", f"token {jwt} here", f"key {pem} here"]
+    reply = review_reply(*[f"- high — a.py:{i} — {c}" for i, c in enumerate(claims)])
+    make_job(tmp_path / "state", "20261010-100000-review-aaaa", reply=reply)
+
+    extract = run_mine(tmp_path)
+    out = tmp_path / "out"
+    skillmine.write(extract, out)
+
+    assert len(extract.findings) == 3
+    for secret in (aws, jwt, "MIIEowIBAAKCAQEAsecretbody", aws.lower(), jwt.lower()):
+        assert all(secret not in f["category"] for f in extract.findings)
+        for name in ("extract.json", "metrics.json", "extract.md"):
+            assert secret not in (out / name).read_text()
+
+
+def test_home_in_file_url_and_brackets_redacted():
+    assert skillmine.redact("see file:///home/alice/x.py") == "see file://~/x.py"
+    assert skillmine.redact("paths [/home/bob/y] done") == "paths [~/y] done"
+    assert skillmine.redact("at https://example.org/home/carol/z") == "at https://example.org/home/carol/z"
+
+
+def test_non_dict_tool_input_skipped(tmp_path):
+    root = tmp_path / "claude"
+    records = []
+    for i, bad in enumerate(["agent-hub run x", ["agent-hub run x"], None, 7]):
+        block = {"type": "tool_use", "name": "Bash", "input": bad}
+        records.append(
+            {
+                "type": "assistant",
+                "message": {"content": [block]},
+                "timestamp": RECENT.isoformat(),
+                "sessionId": f"s{i}",
+            }
+        )
+    records += [bash_msg("agent-hub run a && agent-hub review b && agent-hub merge c")]
+    write_transcript(root, records)
+
+    extract = run_mine(tmp_path)
+
+    assert extract.agenthub_commands == {"run > review > merge": {"count": 1, "sessions": 1}}
+
+
+def test_fix_brief_titles_extracted(tmp_path):
+    state = tmp_path / "state"
+    make_job(
+        state,
+        "20261010-100000-implement-aaaa",
+        kind="implement",
+        brief="# Brief: round 1: fix things in /home/alice/repo\n",
+    )
+    make_job(
+        state,
+        "20261010-110000-implement-bbbb",
+        kind="implement",
+        started=RECENT + timedelta(hours=1),
+        brief="# Brief: other\n",
+    )
+    make_job(state, "20261010-120000-review-cccc", started=RECENT + timedelta(hours=2), reply=review_reply())
+    make_job(state, "20261010-130000-review-dddd", started=RECENT + timedelta(hours=3), reply=review_reply())
+
+    extract = run_mine(tmp_path)
+    out = tmp_path / "out"
+    summary = skillmine.write(extract, out)
+
+    entry = extract.fix_rounds["feat-one"]
+    assert entry["fix_brief_titles"] == ["# Brief: round 1: fix things in ~/repo"]
+    assert all(len(t) <= 300 for t in entry["fix_brief_titles"])
+    assert "round 1: fix things in ~/repo" in summary
+    assert "alice" not in (out / "extract.json").read_text()
