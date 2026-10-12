@@ -33,7 +33,9 @@ endfunction()
 file(GLOB VISIBLE_TESTS CONFIGURE_DEPENDS tests/*.cpp)
 add_minilib_tests(minilib_visible_tests visible ${VISIBLE_TESTS})
 
+# Hidden tests stay out of the default build: a hidden test that does not compile fails only the build-hidden step.
 if(IS_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/hidden)
   file(GLOB HIDDEN_TESTS CONFIGURE_DEPENDS tests/hidden/*.cpp)
   add_minilib_tests(minilib_hidden_tests hidden ${HIDDEN_TESTS})
+  set_target_properties(minilib_hidden_tests PROPERTIES EXCLUDE_FROM_ALL TRUE)
 endif()

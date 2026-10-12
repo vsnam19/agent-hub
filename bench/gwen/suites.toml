@@ -24,7 +24,8 @@ tasks = "cpp/tasks"
 configure = ["cmake", "-S", ".", "-B", "{build_dir}", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug"]
 build = ["cmake", "--build", "{build_dir}"]
 visible = ["ctest", "--test-dir", "{build_dir}", "-L", "visible", "--no-tests=error", "--output-on-failure"]
-hidden = ["ctest", "--test-dir", "{build_dir}", "-L", "hidden", "--no-tests=error", "--output-on-failure"]
+build-hidden = ["cmake", "--build", "{build_dir}", "--target", "minilib_hidden_tests"]
+hidden =["ctest", "--test-dir", "{build_dir}", "-L", "hidden", "--no-tests=error", "--output-on-failure"]
 
 [cpp.harness]
 # aider appends the edited file name to lint_cmd, so the script ignores its argument.

@@ -37,7 +37,7 @@ def _apply(repo, patch):
 
 def test_cpp_suite_has_six_tasks():
     assert sorted(_tasks()) == TASK_IDS
-    assert list(load_suites()["cpp"].gate) == ["configure", "build", "visible", "hidden"]
+    assert list(load_suites()["cpp"].gate) == ["configure", "build", "visible", "build-hidden", "hidden"]
 
 
 def test_cpp_fixture_builds_and_passes(tmp_path):
@@ -45,7 +45,12 @@ def test_cpp_fixture_builds_and_passes(tmp_path):
     repo = tmp_path / "fx"
     prepare(task, repo)
     steps = _gate(task, repo, tmp_path / "build")
-    assert {n: rc for n, (rc, _) in steps.items() if n != "hidden"} == {"configure": 0, "build": 0, "visible": 0}
+    assert {n: rc for n, (rc, _) in steps.items() if n not in ("build-hidden", "hidden")} == {
+        "configure": 0,
+        "build": 0,
+        "visible": 0,
+    }
+    assert steps["build-hidden"][0] != 0  # no hidden target without hidden tests
     assert steps["hidden"][0] != 0  # no hidden tests installed: --no-tests=error
 
 
@@ -57,6 +62,22 @@ def test_cpp_hidden_tests_fail_before_solution(tmp_path, tid):
     install_hidden(task, repo)
     steps = _gate(task, repo, tmp_path / "build")
     assert steps["hidden"][0] != 0, steps["hidden"][1][-2000:]
+
+
+def test_cpp_hidden_compile_error_fails_only_hidden_steps(tmp_path):
+    # c2's hidden tests call top_words, which the setup state does not have yet: they do not compile.
+    task = _tasks()["c2"]
+    repo = tmp_path / "c2"
+    prepare(task, repo)
+    install_hidden(task, repo)
+    steps = _gate(task, repo, tmp_path / "build")
+    assert {n: rc for n, (rc, _) in steps.items() if n in ("configure", "build", "visible")} == {
+        "configure": 0,
+        "build": 0,
+        "visible": 0,
+    }, {n: out[-2000:] for n, (rc, out) in steps.items()}
+    assert steps["build-hidden"][0] != 0
+    assert steps["hidden"][0] != 0
 
 
 @pytest.mark.parametrize("tid", TASK_IDS)

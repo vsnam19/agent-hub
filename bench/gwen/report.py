@@ -4,7 +4,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from bench.gwen.tasks import _natural_key
+from bench.gwen.tasks import natural_key
 
 
 def render(records: list[dict]) -> str:
@@ -29,7 +29,7 @@ def render(records: list[dict]) -> str:
         for suite in sorted(data[model].keys()):
             out.append(f"### Suite: {suite}")
             out.append("")
-            suite_tasks = sorted(tasks[suite], key=_natural_key)
+            suite_tasks = sorted(tasks[suite], key=natural_key)
 
             header = ["Harness"] + suite_tasks + ["Pass Rate", "Wall (s)", "Tokens (P/C)", "Swap (MB)", "Free (%)"]
             out.append("| " + " | ".join(header) + " |")

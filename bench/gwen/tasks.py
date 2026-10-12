@@ -50,7 +50,7 @@ def load_suites(path: Path = SUITES_FILE) -> dict[str, Suite]:
     }
 
 
-def _natural_key(name: str) -> list[tuple[int, int | str]]:
+def natural_key(name: str) -> list[tuple[int, int | str]]:
     """Sort key that orders embedded numbers by value: t2 before t10."""
     return [(0, int(part)) if part.isdigit() else (1, part) for part in re.split(r"(\d+)", name)]
 
@@ -61,7 +61,7 @@ def load_tasks(suites: dict[str, Suite] | None = None) -> dict[str, Task]:
     tasks: dict[str, Task] = {}
     for suite in suites.values():
         task_dirs = [d for d in suite.tasks_dir.iterdir() if (d / "task.toml").is_file()]
-        for tdir in sorted(task_dirs, key=lambda d: _natural_key(d.name)):
+        for tdir in sorted(task_dirs, key=lambda d: natural_key(d.name)):
             if tdir.name in tasks:
                 raise ValueError(
                     f"duplicate task id {tdir.name!r} in suites {tasks[tdir.name].suite!r} and {suite.name!r}"

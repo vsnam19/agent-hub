@@ -93,6 +93,10 @@ def run_one(
     suites: dict[str, Suite] | None = None,
 ) -> dict:
 
+    suites = load_suites(get_suites_file()) if suites is None else suites
+    if task.suite not in suites:
+        raise ValueError(f"task {task.id} belongs to suite {task.suite!r}, which {get_suites_file()} does not define")
+
     ts = time.strftime("%Y%m%d-%H%M%S")
     safe_model = model.replace("/", "_")
     run_dir = out_root / f"{ts}-{uuid.uuid4().hex[:6]}-{harness}-{safe_model}-{task.id}"
@@ -109,7 +113,7 @@ def run_one(
         sys.exit(2)
 
     cfg = harnesses[harness]
-    suite = (load_suites(get_suites_file()) if suites is None else suites)[task.suite]
+    suite = suites[task.suite]
 
     setup_commit = prepare(task, repo, suite)
 
