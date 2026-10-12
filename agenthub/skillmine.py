@@ -17,17 +17,21 @@ _PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIV
 _JWT = re.compile(r"\beyJ[\w-]+\.[\w-]+\.[\w-]+")
 _BEARER = re.compile(r"(?i)\bBearer\s+[\w.~+/=-]+")
 _BASIC = re.compile(r"\bBasic\s+([A-Za-z0-9+/_-]{8,}={0,2})(?![\w+/])")
+_URL_CREDS = re.compile(r"(\b[a-z][\w+.-]*://[^\s/:@]*):[^\s/@]+@", re.I)
 _PREFIXED = re.compile(r"\b(?:sk-[\w-]{16,}|ghp_\w{20,}|xox[a-z]-[\w-]{10,}|AKIA[0-9A-Z]{16})")
-# a secret name has a part (split on `_`, `-` or a camelCase hump) equal to one of these words: `DB_PASS`, `api-key`,
-# `apiKey` match, while `Design`, `author`, `keyboard`, `monkey` and `signal` do not
-_SECRET_WORD = (
-    r"(?:pass|passwd|password|pwd|passphrase|secret|token|apikey|key|auth|authorization|credentials?"
-    r"|cookie|session|salt|sig|signature)"
+# a secret name contains one of `_LONG_WORDS` (`PGPASSWORD`, `SECRETKEY`, `api_key`), or a part (split on `_`, `-` or a
+# camelCase hump) equals or ends with one of `_PART_WORDS` (`DB_PASS`, `apiKey`, `adminpass`). A `key` ending needs four
+# letters before it, so `monkey` stays a word; `Design`, `author`, `keyboard`, `signal` and `passage` do not match
+_LONG_WORDS = "password|passwd|passphrase|secret|token|credential|apikey|api_key|privatekey|private_key"
+_PART_WORDS = "pass|pwd|auth|authorization|cookie|session|salt|sig|signature"
+_PART_START = r"(?:(?<![\w-])|(?<=[_-])|(?<=(?-i:[a-z0-9]))(?=(?-i:[A-Z])))"
+_PART_END = r"(?=[_-]|(?![\w-])|(?<=(?-i:[a-z0-9]))(?=(?-i:[A-Z])))"
+_SECRET_NAME = (
+    rf"(?=[\w-]*?(?:{_LONG_WORDS})"
+    rf"|[\w-]*?(?:{_PART_WORDS}){_PART_END}"
+    rf"|[\w-]*?(?:[a-z]{{4}}|{_PART_START})key{_PART_END})"
 )
-_NAME = (
-    r"(?=(?:[\w-]*?[_-]|[\w-]*?(?<=(?-i:[a-z0-9]))(?=(?-i:[A-Z])))?"
-    rf"{_SECRET_WORD}(?=[_-]|(?![\w-])|(?<=(?-i:[a-z0-9]))(?-i:[A-Z])))[\w-]+"
-)
+_NAME = rf"{_SECRET_NAME}[\w-]+"
 _VALUE = r"(?:\"[^\"]*\"|'[^']*'|[^\s\"',;]+)"
 _KV = re.compile(rf"(?i)(?<![\w-])({_NAME})(\s*[=:]\s*){_VALUE}")
 _KV_SPACE = re.compile(rf"(?i)(?<![\w-])({_NAME})(\s+)(?!-|<redacted>){_VALUE}")
@@ -90,6 +94,7 @@ def redact(text: str) -> str:
     text = _JWT.sub("<redacted>", text)
     text = _BEARER.sub("Bearer <redacted>", text)
     text = _BASIC.sub(lambda m: m.group(0) if _WORD.fullmatch(m.group(1)) else "Basic <redacted>", text)
+    text = _URL_CREDS.sub(r"\1:<redacted>@", text)
     text = _PREFIXED.sub("<redacted>", text)
     text = _KV.sub(r"\1\2<redacted>", text)
     text = _KV_SPACE.sub(_redact_space_value, text)
@@ -414,7 +419,13 @@ def _mine_transcripts(root: Path, extract: Extract, since: datetime) -> None:
             gram = " > ".join(subs[i : i + 3])
             ngrams[gram] += 1
             sessions.setdefault(gram, set()).add(session)
-    extract.agenthub_commands = {clean(g): {"count": n, "sessions": len(sessions[g])} for g, n in ngrams.most_common()}
+    # two n-grams can clean to the same key (secret-looking command names): their counts and sessions are merged
+    merged: dict[str, dict] = {}
+    for gram, n in ngrams.most_common():
+        entry = merged.setdefault(clean(gram), {"count": 0, "sessions": set()})
+        entry["count"] += n
+        entry["sessions"] |= sessions[gram]
+    extract.agenthub_commands = {g: {"count": e["count"], "sessions": len(e["sessions"])} for g, e in merged.items()}
 
 
 def _transcript_line(line: str, extract: Extract, since: datetime, sequences: dict[str, list[str]]) -> None:

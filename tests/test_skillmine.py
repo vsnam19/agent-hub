@@ -776,9 +776,60 @@ def test_secret_names_match_whole_parts():
         "keyboard: layout",
         "monkey=banana",
         "signal: stop",
+        "passage: a corridor",
     ]
     for text in prose:
         assert skillmine.redact(text) == text, text
+
+
+def test_glued_secret_names_redacted():
+    secrets = [
+        ("PGPASSWORD=hunter2hunter2", "hunter2hunter2"),
+        ("DBPASSWORD: hunter2hunter2", "hunter2hunter2"),
+        ("SECRETKEY=hunter2hunter2", "hunter2hunter2"),
+        ("adminpass=hunter2hunter2", "hunter2hunter2"),
+    ]
+    for text, secret in secrets:
+        out = skillmine.redact(text)
+        assert secret not in out, text
+        assert out.endswith("<redacted>"), text
+
+
+def test_url_credentials_redacted():
+    assert (
+        skillmine.redact("postgres://admin:s3cretpass@localhost:5432/app")
+        == "postgres://admin:<redacted>@localhost:5432/app"
+    )
+    assert skillmine.redact("redis://:pw12345@db:6379") == "redis://:<redacted>@db:6379"
+
+
+def test_mine_write_error_exit_2(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path / "state"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file, not a directory")
+    out = blocker / "out"
+
+    rc = main(["skills", "mine", "--out", str(out), "--transcripts", str(tmp_path / "claude"), "--days", "7"])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert err.startswith(f"agent-hub: cannot write {out}: "), err
+    assert "Traceback" not in err
+
+
+def test_command_key_collisions_summed(tmp_path):
+    first = "aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE3fG5hI7k"
+    second = "aX9kL2mN4pQ6rS8tV0wY1zA3bC5dE7fG9hJ1kL3"
+    records = [
+        bash_msg(f"agent-hub run && agent-hub {first} && agent-hub show", session="s1"),
+        bash_msg(f"agent-hub run && agent-hub {second} && agent-hub show", session="s2"),
+    ]
+    write_transcript(tmp_path / "claude", records)
+
+    commands = run_mine(tmp_path).agenthub_commands
+
+    assert commands == {"run > <redacted> > show": {"count": 2, "sessions": 2}}
 
 
 def test_repo_at_home_root_not_user_name(tmp_path):
