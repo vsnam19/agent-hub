@@ -78,9 +78,9 @@ def test_claude_build_review_argv(tmp_path):
         "--append-system-prompt",
         WORKER_PROMPT,
         "--tools",
-        "Read,Grep,Glob",
+        "Read,Grep,Glob,Skill",
         "--allowedTools",
-        "Read,Grep,Glob",
+        "Read,Grep,Glob,Skill",
         "--add-dir",
         str(tmp_path),
     ]
@@ -89,11 +89,11 @@ def test_claude_build_review_argv(tmp_path):
         assert '"' not in arg
 
 
-def test_review_argv_limits_tools_to_read_grep_glob(tmp_path):
+def test_review_argv_keeps_skill_and_no_shell(tmp_path):
     argv = _build_for(tmp_path, "review")
-    assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
     tools = argv[argv.index("--tools") + 1].split(",")
-    for tool in ("Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"):
+    assert "Skill" in tools
+    for tool in ("Bash", "Write", "Edit", "WebFetch", "WebSearch"):
         assert tool not in tools
     assert "--permission-mode" not in argv
 
@@ -296,7 +296,7 @@ def test_claude_build_adds_plugin_dirs(tmp_path):
 
     argv = adapter.build(req).argv
     assert argv[-4:] == ["--plugin-dir", str(telaf), "--plugin-dir", str(aspice)]
-    assert argv[argv.index("--allowedTools") + 1] == "Read,Grep,Glob"
+    assert argv[argv.index("--allowedTools") + 1] == "Read,Grep,Glob,Skill"
 
 
 def _classify_stdout(tmp_path, adapter, payload, rc=1):

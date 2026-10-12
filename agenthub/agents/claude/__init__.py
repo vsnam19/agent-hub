@@ -80,10 +80,11 @@ class ClaudeAdapter(Adapter):
             # --tools removes every other built-in tool from the session (no Bash, so no shell at all).
             # --allowedTools only pre-approves, and Claude Code still auto-allows read-only Bash without
             # --tools, so it is not enough on its own.
+            # Skill is kept on purpose: --plugin-dir entries provide skills the reviewer must be able to load.
             argv.append("--tools")
-            argv.append("Read,Grep,Glob")
+            argv.append("Read,Grep,Glob,Skill")
             argv.append("--allowedTools")
-            argv.append("Read,Grep,Glob")
+            argv.append("Read,Grep,Glob,Skill")
             argv.append("--add-dir")
             argv.append(str(req.brief_path.parent))
 
