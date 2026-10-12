@@ -753,3 +753,45 @@ def test_group_ties_by_severity_rank():
         ("medium", "zzz/sub"),
         ("low", "aaa/sub"),
     ]
+
+
+def test_secret_names_match_whole_parts():
+    secrets = [
+        ("DB_PASS=hunter2hunter2", "hunter2hunter2"),
+        ("api-key: hunter2hunter2", "hunter2hunter2"),
+        ("apiKey=hunter2hunter2", "hunter2hunter2"),
+        ("API_TOKEN=hunter2hunter2", "hunter2hunter2"),
+        ("passwd: hunter2hunter2", "hunter2hunter2"),
+        ("user_credentials: hunter2hunter2", "hunter2hunter2"),
+        ("sessionId=hunter2hunter2", "hunter2hunter2"),
+        ("Authorization: hunter2hunter2", "hunter2hunter2"),
+    ]
+    for text, secret in secrets:
+        out = skillmine.redact(text)
+        assert secret not in out, text
+        assert "<redacted>" in out, text
+    prose = [
+        "Design: the flag",
+        "author: alice",
+        "keyboard: layout",
+        "monkey=banana",
+        "signal: stop",
+    ]
+    for text in prose:
+        assert skillmine.redact(text) == text, text
+
+
+def test_repo_at_home_root_not_user_name(tmp_path):
+    state = tmp_path / "state"
+    reply = review_reply("- low — docs/a.md — Typo in heading")
+    home_job = make_job(state, "20261010-100000-review-aaaa", reply=reply, verdict="request-changes")
+    nested_job = make_job(state, "20261010-110000-review-bbbb", reply=reply, verdict="request-changes")
+    for job, repo in ((home_job, "/home/alice/.git"), (nested_job, "/home/alice/project/.git")):
+        result = json.loads((job / "result.json").read_text())
+        result["repo"] = repo
+        (job / "result.json").write_text(json.dumps(result))
+
+    repos = {f["job"]: f["repo"] for f in run_mine(tmp_path).findings}
+
+    assert repos == {"20261010-100000-review-aaaa": "~", "20261010-110000-review-bbbb": "project"}
+    assert "alice" not in json.dumps(repos)

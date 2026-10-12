@@ -18,7 +18,16 @@ _JWT = re.compile(r"\beyJ[\w-]+\.[\w-]+\.[\w-]+")
 _BEARER = re.compile(r"(?i)\bBearer\s+[\w.~+/=-]+")
 _BASIC = re.compile(r"\bBasic\s+([A-Za-z0-9+/_-]{8,}={0,2})(?![\w+/])")
 _PREFIXED = re.compile(r"\b(?:sk-[\w-]{16,}|ghp_\w{20,}|xox[a-z]-[\w-]{10,}|AKIA[0-9A-Z]{16})")
-_NAME = r"[\w-]*(?:pass|pwd|secret|token|key|auth|authorization|credential|cookie|session|salt|sig|signature)[\w-]*"
+# a secret name has a part (split on `_`, `-` or a camelCase hump) equal to one of these words: `DB_PASS`, `api-key`,
+# `apiKey` match, while `Design`, `author`, `keyboard`, `monkey` and `signal` do not
+_SECRET_WORD = (
+    r"(?:pass|passwd|password|pwd|passphrase|secret|token|apikey|key|auth|authorization|credentials?"
+    r"|cookie|session|salt|sig|signature)"
+)
+_NAME = (
+    r"(?=(?:[\w-]*?[_-]|[\w-]*?(?<=(?-i:[a-z0-9]))(?=(?-i:[A-Z])))?"
+    rf"{_SECRET_WORD}(?=[_-]|(?![\w-])|(?<=(?-i:[a-z0-9]))(?-i:[A-Z])))[\w-]+"
+)
 _VALUE = r"(?:\"[^\"]*\"|'[^']*'|[^\s\"',;]+)"
 _KV = re.compile(rf"(?i)(?<![\w-])({_NAME})(\s*[=:]\s*){_VALUE}")
 _KV_SPACE = re.compile(rf"(?i)(?<![\w-])({_NAME})(\s+)(?!-|<redacted>){_VALUE}")
@@ -270,7 +279,7 @@ def _mine_jobs(state_dir: Path, branches: dict[str, str], extract: Extract, sinc
             verdict = result.get("verdict") or _verdict_of(reply)
             if verdict:
                 entry["verdicts"].append(clean(verdict))
-            repo = Path(str(result.get("repo") or "")).parent.name if result.get("repo") else ""
+            repo = _repo_name(str(result.get("repo") or "")) if result.get("repo") else ""
             found, unparsed = _findings_of(reply)
             extract.unparsed_findings += unparsed
             for severity, path, claim in found:
@@ -291,6 +300,12 @@ def _mine_jobs(state_dir: Path, branches: dict[str, str], extract: Extract, sinc
                 entry["fix_briefs"] += 1
                 entry["fix_brief_titles"].append(clean(title))
     extract.fix_rounds = per_branch
+
+
+def _repo_name(git_dir: str) -> str:
+    """Directory name of the repo; `~` when the repo sits at a home directory, so a user name is not a repo name."""
+    root = Path(git_dir).parent
+    return "~" if _HOME.fullmatch(str(root)) else root.name
 
 
 def _first_line(text: str) -> str:
