@@ -355,7 +355,8 @@ def _read_or_empty(path: Path) -> str | None:
 def inspect_diff(repo: guards.Repo, since: str) -> list[dict]:
     # 1. Tracked changes
     diff_res = subprocess.run(
-        guards._git_argv("diff", "-U0", "--no-ext-diff", "--no-textconv", since),
+        # --no-renames: a renamed file's removed lines stay under their old path, so its base can be read and compared.
+        guards._git_argv("diff", "-U0", "--no-ext-diff", "--no-textconv", "--no-renames", since),
         cwd=repo.root,
         capture_output=True,
         text=True,
@@ -386,7 +387,9 @@ def inspect_diff(repo: guards.Repo, since: str) -> list[dict]:
     # Python test files that parse on both sides are judged by test identity below; the others keep the line rules.
     compared: dict[str, tuple[dict[str, TestDef], dict[str, TestDef]]] = {}
     for path in {c.path for c in changes if c.path.endswith(".py") and _is_test_file(c.path)}:
-        base = _test_index(_git_show(repo, since, path) or "")
+        # An unreadable base (git show fails) is not compared: its removed lines go through the line rules.
+        base_src = _git_show(repo, since, path)
+        base = None if base_src is None else _test_index(base_src)
         new = _test_index(_read_or_empty(repo.root / path))
         if base is not None and new is not None:
             compared[path] = (base, new)

@@ -567,3 +567,31 @@ def test_assert_moved_out_of_try_to_top_level_not_flagged(repo):
         "def test_a():\n    assert x == 1\n    try:\n        pass\n    except ValueError:\n        pass\n",
     )
     assert res == []
+
+
+def test_renamed_and_edited_test_file_assert_removal_flagged(repo):
+    test_file = repo / "test_old.py"
+    test_file.write_text(
+        "def test_foo():\n    assert 1 == 1\n    assert 2 == 2\n    assert 3 == 3\n    assert 4 == 4\n"
+    )
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    run_git(repo, "mv", "test_old.py", "test_new.py")
+    (repo / "test_new.py").write_text("def test_foo():\n    assert 1 == 1\n    assert 2 == 2\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == [{"file": "test_old.py", "kind": "test-deleted", "lines": [1]}]
+
+
+def test_unreadable_base_falls_back_to_line_rule(repo, monkeypatch):
+    test_file = repo / "test_u.py"
+    test_file.write_text("def test_foo():\n    assert 1 == 1\n    assert 2 == 2\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("def test_foo():\n    assert 1 == 1\n")
+    monkeypatch.setattr(gateguard, "_git_show", lambda *args: None)
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == [{"file": "test_u.py", "kind": "assert-removed", "lines": [3]}]
