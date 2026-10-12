@@ -334,7 +334,10 @@ def _cmd_skills(args) -> int:
         transcripts = Path(os.environ.get("HOME", "~")).expanduser() / ".claude" / "projects"
     out = Path(args.out) if args.out else state_dir / "skills" / now.strftime("%Y-%m-%d")
     extract = skillmine.mine(state_dir, transcripts, since, now)
-    summary = skillmine.write(extract, out)
+    try:
+        summary = skillmine.write(extract, out)
+    except OSError as e:
+        raise UsageError(f"cannot write {out}: {e.strerror or e}") from None
     text = _safe(json.dumps(extract.to_json(), indent=2, ensure_ascii=False) if args.json else summary)
     encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
     print(text.encode(encoding, errors="backslashreplace").decode(encoding))
@@ -343,8 +346,8 @@ def _cmd_skills(args) -> int:
 
 def _mine_window(args, state_dir: Path, now: datetime) -> datetime:
     if args.days is not None:
-        if args.days < 1:
-            raise UsageError("--days must be at least 1")
+        if not 1 <= args.days <= 3650:
+            raise UsageError("--days must be between 1 and 3650")
         return now - timedelta(days=args.days)
     if args.since:
         try:

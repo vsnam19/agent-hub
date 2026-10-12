@@ -1,0 +1,61 @@
+diff --git a/include/minilib/inventory.hpp b/include/minilib/inventory.hpp
+index f47de60..613fc5c 100644
+--- a/include/minilib/inventory.hpp
++++ b/include/minilib/inventory.hpp
+@@ -12,7 +12,7 @@ struct Item {
+ };
+ 
+ // Reads a CSV file with the header `name,qty,price`. Throws std::runtime_error if it cannot be opened.
+-std::vector<Item> load_items(const std::string& path);
++std::vector<Item> read_items(const std::string& path);
+ 
+ double total_value(const std::vector<Item>& items);
+ 
+diff --git a/src/cli.cpp b/src/cli.cpp
+index 697e0ce..6f4a0e1 100644
+--- a/src/cli.cpp
++++ b/src/cli.cpp
+@@ -51,7 +51,7 @@ int run_inventory(const std::vector<std::string>& args, std::ostream& out, std::
+             return usage(err);
+         }
+     }
+-    for (const Item& item : load_items(args[1])) {
++    for (const Item& item : read_items(args[1])) {
+         if (item.qty < min_qty) {
+             out << item.name << " " << item.qty << "\n";
+         }
+diff --git a/src/inventory.cpp b/src/inventory.cpp
+index 40537f3..f2cd815 100644
+--- a/src/inventory.cpp
++++ b/src/inventory.cpp
+@@ -6,7 +6,7 @@
+ 
+ namespace minilib {
+ 
+-std::vector<Item> load_items(const std::string& path) {
++std::vector<Item> read_items(const std::string& path) {
+     std::ifstream in(path);
+     if (!in) {
+         throw std::runtime_error("cannot open " + path);
+diff --git a/tests/test_inventory.cpp b/tests/test_inventory.cpp
+index 60768fb..a8e1dc1 100644
+--- a/tests/test_inventory.cpp
++++ b/tests/test_inventory.cpp
+@@ -13,7 +13,7 @@ const std::vector<Item> kItems = {{"A", 2, 1.5}, {"B", 10, 5.0}};
+ }
+ 
+ TEST(Inventory, LoadsTheDataFile) {
+-    const auto items = minilib::load_items(std::string(MINILIB_SOURCE_DIR) + "/data/items.csv");
++    const auto items = minilib::read_items(std::string(MINILIB_SOURCE_DIR) + "/data/items.csv");
+     ASSERT_GE(items.size(), 2u);
+     EXPECT_EQ(items[0].name, "Nail");
+     EXPECT_EQ(items[0].qty, 100);
+@@ -22,7 +22,7 @@ TEST(Inventory, LoadsTheDataFile) {
+ }
+ 
+ TEST(Inventory, MissingFileThrows) {
+-    EXPECT_THROW(minilib::load_items("/nonexistent/items.csv"), std::runtime_error);
++    EXPECT_THROW(minilib::read_items("/nonexistent/items.csv"), std::runtime_error);
+ }
+ 
+ TEST(Inventory, TotalValue) {

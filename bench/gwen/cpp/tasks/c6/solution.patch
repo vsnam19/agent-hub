@@ -1,0 +1,169 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 97c8708..6250e56 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -12,6 +12,7 @@ add_library(minilib_core
+   src/textstats.cpp
+   src/inventory.cpp
+   src/cli.cpp
++  src/report.cpp
+ )
+ target_include_directories(minilib_core PUBLIC include)
+ 
+diff --git a/include/minilib/report.hpp b/include/minilib/report.hpp
+new file mode 100644
+index 0000000..0d6c3f8
+--- /dev/null
++++ b/include/minilib/report.hpp
+@@ -0,0 +1,19 @@
++#pragma once
++
++#include <string>
++#include <vector>
++
++#include "minilib/inventory.hpp"
++
++namespace minilib {
++
++struct Summary {
++    int count;
++    int total_qty;
++    double total_value;
++    std::vector<std::string> low_stock;  // names with qty < 5, sorted
++};
++
++Summary summarize(const std::vector<Item>& items);
++
++}  // namespace minilib
+diff --git a/src/cli.cpp b/src/cli.cpp
+index 697e0ce..81f4247 100644
+--- a/src/cli.cpp
++++ b/src/cli.cpp
+@@ -1,18 +1,21 @@
+ #include "minilib/cli.hpp"
+ 
++#include <cstddef>
+ #include <fstream>
++#include <iomanip>
+ #include <ostream>
+ #include <sstream>
+ #include <stdexcept>
+ 
+ #include "minilib/inventory.hpp"
++#include "minilib/report.hpp"
+ #include "minilib/textstats.hpp"
+ 
+ namespace minilib {
+ 
+ namespace {
+ 
+-constexpr const char* kUsage = "usage: minilib stats FILE | inventory FILE [--min-qty N]";
++constexpr const char* kUsage = "usage: minilib stats FILE | inventory FILE [--min-qty N] | report FILE";
+ 
+ int usage(std::ostream& err) {
+     err << kUsage << "\n";
+@@ -59,6 +62,22 @@ int run_inventory(const std::vector<std::string>& args, std::ostream& out, std::
+     return 0;
+ }
+ 
++int run_report(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
++    if (args.size() != 2) {
++        return usage(err);
++    }
++    const Summary s = summarize(load_items(args[1]));
++    std::ostringstream json;
++    json << "{\"count\": " << s.count << ", \"low_stock\": [";
++    for (std::size_t i = 0; i < s.low_stock.size(); ++i) {
++        json << (i ? ", " : "") << '"' << s.low_stock[i] << '"';
++    }
++    json << "], \"total_qty\": " << s.total_qty << ", \"total_value\": " << std::fixed << std::setprecision(2)
++         << s.total_value << "}\n";
++    out << json.str();
++    return 0;
++}
++
+ }  // namespace
+ 
+ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
+@@ -71,6 +90,9 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
+     if (args[0] == "inventory") {
+         return run_inventory(args, out, err);
+     }
++    if (args[0] == "report") {
++        return run_report(args, out, err);
++    }
+     return usage(err);
+ }
+ 
+diff --git a/src/report.cpp b/src/report.cpp
+new file mode 100644
+index 0000000..e9c5a94
+--- /dev/null
++++ b/src/report.cpp
+@@ -0,0 +1,19 @@
++#include "minilib/report.hpp"
++
++#include <algorithm>
++
++namespace minilib {
++
++Summary summarize(const std::vector<Item>& items) {
++    Summary s{static_cast<int>(items.size()), 0, total_value(items), {}};
++    for (const Item& item : items) {
++        s.total_qty += item.qty;
++    }
++    for (const Item& item : low_stock(items, 5)) {
++        s.low_stock.push_back(item.name);
++    }
++    std::sort(s.low_stock.begin(), s.low_stock.end());
++    return s;
++}
++
++}  // namespace minilib
+diff --git a/tests/test_cli.cpp b/tests/test_cli.cpp
+index 9314fa0..43cef11 100644
+--- a/tests/test_cli.cpp
++++ b/tests/test_cli.cpp
+@@ -35,6 +35,14 @@ TEST(Cli, InventoryListsLowStock) {
+     std::remove(path.c_str());
+ }
+ 
++TEST(Cli, ReportPrintsSortedJson) {
++    const std::string path = write_temp("report.csv", "name,qty,price\nB,2,1.5\nA,10,5.0\nC,1,0.25\n");
++    std::ostringstream out, err;
++    EXPECT_EQ(minilib::run_cli({"report", path}, out, err), 0);
++    EXPECT_EQ(out.str(), "{\"count\": 3, \"low_stock\": [\"B\", \"C\"], \"total_qty\": 13, \"total_value\": 53.25}\n");
++    std::remove(path.c_str());
++}
++
+ TEST(Cli, UsageErrorReturnsTwo) {
+     std::ostringstream out, err;
+     EXPECT_EQ(minilib::run_cli({}, out, err), 2);
+diff --git a/tests/test_report.cpp b/tests/test_report.cpp
+new file mode 100644
+index 0000000..1fccfc2
+--- /dev/null
++++ b/tests/test_report.cpp
+@@ -0,0 +1,22 @@
++#include <gtest/gtest.h>
++
++#include <string>
++#include <vector>
++
++#include "minilib/report.hpp"
++
++TEST(Report, SummarizesItems) {
++    const std::vector<minilib::Item> items = {{"Nail", 100, 0.05}, {"Screw", 3, 0.10}, {"Bolt", 1, 0.30}};
++    const minilib::Summary s = minilib::summarize(items);
++    EXPECT_EQ(s.count, 3);
++    EXPECT_EQ(s.total_qty, 104);
++    EXPECT_DOUBLE_EQ(s.total_value, 5.6);
++    EXPECT_EQ(s.low_stock, (std::vector<std::string>{"Bolt", "Screw"}));
++}
++
++TEST(Report, EmptyInventory) {
++    const minilib::Summary s = minilib::summarize({});
++    EXPECT_EQ(s.count, 0);
++    EXPECT_EQ(s.total_qty, 0);
++    EXPECT_TRUE(s.low_stock.empty());
++}

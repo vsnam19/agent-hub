@@ -1,0 +1,3 @@
+title = "stats --json"
+paths_allowed = ["src/cli.cpp", "tests/test_cli.cpp"]
+visible_tests = []

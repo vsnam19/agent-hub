@@ -1,0 +1,176 @@
+import fnmatch
+import functools
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from bench.gwen.run import _expand_gate
+from bench.gwen.tasks import install_hidden, load_suites, load_tasks, prepare
+
+TASK_IDS = ["c1", "c2", "c3", "c4", "c5", "c6"]
+BUILD_AND_TEST = "cmake -S . -B build -G Ninja && cmake --build build && ctest --test-dir build --output-on-failure"
+PROBE_CMAKELISTS = "cmake_minimum_required(VERSION 3.24)\nproject(probe CXX)\nfind_package(GTest REQUIRED)\n"
+
+
+def _tasks():
+    return {tid: t for tid, t in load_tasks().items() if t.suite == "cpp"}
+
+
+def _missing_tool():
+    """Name the first tool the cpp suite needs that is not on PATH, or return None."""
+    for tool in ("cmake", "ninja"):
+        if not shutil.which(tool):
+            return f"{tool} is missing: the cpp suite needs cmake and ninja on PATH"
+    if not any(shutil.which(cxx) for cxx in ("c++", "g++", "clang++")):
+        return "a C++ compiler is missing: the cpp suite needs c++, g++ or clang++ on PATH"
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def _gtest_missing():
+    """Configure a 3-line CMake project that needs GoogleTest, once per session; return a message or None."""
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = Path(tmp) / "probe"
+        probe.mkdir()
+        (probe / "CMakeLists.txt").write_text(PROBE_CMAKELISTS)
+        res = subprocess.run(
+            ["cmake", "-S", str(probe), "-B", str(Path(tmp) / "build"), "-G", "Ninja"],
+            capture_output=True,
+            text=True,
+        )
+    if res.returncode == 0:
+        return None
+    output = res.stdout + res.stderr
+    if "GTest" in output:
+        return "GoogleTest is missing: CMake cannot find GTest (install the system GoogleTest development package)"
+    return "CMake cannot configure a C++ project: " + output[-500:]
+
+
+def _require_toolchain():
+    """Fail, never skip, with one message naming what is missing."""
+    problem = _missing_tool() or _gtest_missing()
+    if problem:
+        pytest.fail(problem, pytrace=False)
+
+
+def _gate(task, repo, build_dir):
+    """Run the cpp suite's own gate steps, as run.py does; returns {step: (rc, output)}."""
+    _require_toolchain()
+    build_dir.mkdir()
+    steps = {}
+    for name, argv in load_suites()["cpp"].gate.items():
+        res = subprocess.run(_expand_gate(argv, task, build_dir), cwd=repo, capture_output=True, text=True)
+        steps[name] = (res.returncode, res.stdout + res.stderr)
+    return steps
+
+
+def _failures(steps):
+    return {name: out[-2000:] for name, (rc, out) in steps.items() if rc != 0}
+
+
+def _apply(repo, patch):
+    subprocess.run(["git", "apply", str(patch)], cwd=repo, check=True, capture_output=True)
+
+
+def test_cpp_suite_has_six_tasks():
+    assert sorted(_tasks()) == TASK_IDS
+    assert list(load_suites()["cpp"].gate) == ["configure", "build", "visible", "build-hidden", "hidden"]
+
+
+def test_missing_toolchain_message_names_the_tool(monkeypatch):
+    real_which = shutil.which
+    monkeypatch.setattr(
+        shutil, "which", lambda name, *args, **kwargs: None if name == "ninja" else real_which(name, *args, **kwargs)
+    )
+    with pytest.raises(pytest.fail.Exception, match="ninja"):
+        _require_toolchain()
+
+
+def test_cpp_fixture_builds_and_passes(tmp_path):
+    task = _tasks()["c2"]  # c2 has an empty setup patch: the plain fixture
+    repo = tmp_path / "fx"
+    prepare(task, repo)
+    steps = _gate(task, repo, tmp_path / "build")
+    assert {n: rc for n, (rc, _) in steps.items() if n not in ("build-hidden", "hidden")} == {
+        "configure": 0,
+        "build": 0,
+        "visible": 0,
+    }
+    assert steps["build-hidden"][0] != 0  # no hidden target without hidden tests
+    assert steps["hidden"][0] != 0  # no hidden tests installed: --no-tests=error
+
+
+@pytest.mark.parametrize("tid", TASK_IDS)
+def test_cpp_hidden_tests_fail_before_solution(tmp_path, tid):
+    task = _tasks()[tid]
+    repo = tmp_path / tid
+    prepare(task, repo)
+    install_hidden(task, repo)
+    steps = _gate(task, repo, tmp_path / "build")
+    assert steps["hidden"][0] != 0, steps["hidden"][1][-2000:]
+
+
+def test_cpp_hidden_compile_error_fails_only_hidden_steps(tmp_path):
+    # c2's hidden tests call top_words, which the setup state does not have yet: they do not compile.
+    task = _tasks()["c2"]
+    repo = tmp_path / "c2"
+    prepare(task, repo)
+    install_hidden(task, repo)
+    steps = _gate(task, repo, tmp_path / "build")
+    assert {n: rc for n, (rc, _) in steps.items() if n in ("configure", "build", "visible")} == {
+        "configure": 0,
+        "build": 0,
+        "visible": 0,
+    }, {n: out[-2000:] for n, (rc, out) in steps.items()}
+    assert steps["build-hidden"][0] != 0
+    assert steps["hidden"][0] != 0
+
+
+@pytest.mark.parametrize("tid", TASK_IDS)
+def test_cpp_solution_passes_every_gate_step(tmp_path, tid):
+    task = _tasks()[tid]
+    repo = tmp_path / tid
+    prepare(task, repo)
+    _apply(repo, task.dir / "solution.patch")
+    install_hidden(task, repo)
+    assert _failures(_gate(task, repo, tmp_path / "build")) == {}
+
+
+@pytest.mark.parametrize("tid", TASK_IDS)
+def test_cpp_solution_stays_in_scope(tmp_path, tid):
+    task = _tasks()[tid]
+    repo = tmp_path / tid
+    prepare(task, repo)
+    _apply(repo, task.dir / "solution.patch")
+    out = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout
+    changed = [line[3:] for line in out.splitlines()]
+    assert changed
+    assert all(any(fnmatch.fnmatch(p, g) for g in task.paths_allowed) for p in changed), changed
+    # Every allowed path is really used by the solution: paths_allowed lists exactly what it changes.
+    assert all(any(fnmatch.fnmatch(p, g) for p in changed) for g in task.paths_allowed), task.paths_allowed
+
+
+@pytest.mark.parametrize("tid", TASK_IDS)
+def test_cpp_brief_sections_and_gate(tid):
+    task = _tasks()[tid]
+    brief = task.brief
+    for section in ("## Goal", "## Input", "## Expected output", "## Gate"):
+        assert section in brief
+    assert BUILD_AND_TEST in brief
+    assert "hidden" not in brief.lower()
+    assert task.visible_tests == []
+
+
+def test_cpp_tests_name_temp_files_per_process():
+    # Two bench runs or ctest -j must not share a temp file: every C++ test that uses the temp dir names it by pid.
+    suite = load_suites()["cpp"]
+    sources = [*(suite.fixture / "tests").glob("*.cpp"), *suite.tasks_dir.glob("*/hidden/*.cpp")]
+    users = [p for p in sources if "temp_directory_path" in p.read_text()]
+    assert users
+    for p in users:
+        assert "getpid" in p.read_text(), p
