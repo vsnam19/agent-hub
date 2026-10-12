@@ -77,6 +77,8 @@ def test_claude_build_review_argv(tmp_path):
         "project,local",
         "--append-system-prompt",
         WORKER_PROMPT,
+        "--tools",
+        "Read,Grep,Glob",
         "--allowedTools",
         "Read,Grep,Glob",
         "--add-dir",
@@ -85,6 +87,22 @@ def test_claude_build_review_argv(tmp_path):
     assert inv.stdin_path == brief
     for arg in inv.argv:
         assert '"' not in arg
+
+
+def test_review_argv_limits_tools_to_read_grep_glob(tmp_path):
+    argv = _build_for(tmp_path, "review")
+    assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
+    tools = argv[argv.index("--tools") + 1].split(",")
+    for tool in ("Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"):
+        assert tool not in tools
+    assert "--permission-mode" not in argv
+
+
+def test_implement_argv_unchanged_by_review_restriction(tmp_path):
+    argv = _build_for(tmp_path, "implement")
+    assert "--tools" not in argv
+    assert "--allowedTools" not in argv
+    assert argv[-2:] == ["--permission-mode", "bypassPermissions"]
 
 
 def _build_for(tmp_path, role):

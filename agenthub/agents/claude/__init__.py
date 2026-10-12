@@ -77,6 +77,11 @@ class ClaudeAdapter(Adapter):
             argv.append("--permission-mode")
             argv.append("bypassPermissions")
         else:
+            # --tools removes every other built-in tool from the session (no Bash, so no shell at all).
+            # --allowedTools only pre-approves, and Claude Code still auto-allows read-only Bash without
+            # --tools, so it is not enough on its own.
+            argv.append("--tools")
+            argv.append("Read,Grep,Glob")
             argv.append("--allowedTools")
             argv.append("Read,Grep,Glob")
             argv.append("--add-dir")
