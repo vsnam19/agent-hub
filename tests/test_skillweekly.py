@@ -76,6 +76,7 @@ class Fake:
         self.director = opts.get("director", False)
         self.director_fix = opts.get("director_fix", False)
         self.commit_fix = opts.get("commit_fix", False)
+        self.stray = opts.get("stray")
         self.plugin_rc = opts.get("plugin_rc", 0)
         self.install_rc = opts.get("install_rc", 0)
         self.ready_rc = opts.get("ready_rc", 0)
@@ -137,6 +138,12 @@ class Fake:
         if self.commit_fix and self.drafts > 1:
             git(workdir, "add", "-A")
             git(workdir, "commit", "-m", "fix by job")
+        if self.stray:
+            file = workdir / self.stray
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text("job edit\n")
+            git(workdir, "add", "-A")
+            git(workdir, "commit", "-m", "job edit outside the learned plugins")
         return self.job("draft", status="ok")
 
     def review(self) -> Proc:
@@ -247,6 +254,35 @@ def test_fix_job_that_commits_still_counts(tmp_path):
     assert report.exit_code == 0, report.stop_reason
     # One eval for the draft and one for the fix round: the committed fix was seen as a change.
     assert len(env.fake.words("claude", "plugin", "eval")) == 2
+
+
+def test_committed_change_outside_learned_plugins_stops(tmp_path):
+    env = Env(tmp_path, stray="plugins/worker/notes.md")
+    before = git(env.repo, "rev-parse", "master")
+    report = env.run()
+    assert report.exit_code == 1
+    assert report.stop_reason == "job changed plugins/worker/notes.md outside the learned plugins"
+    assert git(env.repo, "rev-parse", "master") == before
+    assert env.fake.words("merge") == []
+    assert env.fake.words("claude", "plugin", "eval") == []
+
+
+def test_max_cost_must_be_finite():
+    for value in ("nan", "inf", "-inf", "0", "-1"):
+        assert main(["skills", "weekly", f"--max-cost-usd={value}"]) == 2, value
+
+
+def test_tiny_remaining_budget_stops_before_eval(tmp_path):
+    env = Env(tmp_path, evals=[eval_json(1.0, 0.0, cost=0.1)])
+    env.cfg.max_cost_usd = 0.105
+    make_eval_case(env.worktree, "learned-worker", "foo", "foo-pos")
+    make_eval_case(env.worktree, "learned-worker", "bar", "bar-pos")
+    env.out.mkdir(parents=True)
+    run = skillweekly._Run(env.cfg, NOW, env.fake, skillweekly.Report(date=DATE))
+    with pytest.raises(skillweekly.Stop, match=r"eval budget \$0\.105 spent before bar"):
+        run.evaluate([("learned-worker", "foo"), ("learned-worker", "bar")])
+    assert len(env.fake.words("claude", "plugin", "eval")) == 1
+    assert run.report.evals == {"foo": "with 1.00 vs without 0.00"}
 
 
 def test_eval_cases_exclude_longer_skill_names(tmp_path):

@@ -19,6 +19,7 @@ from typing import NamedTuple
 from agenthub import skillmine
 
 PLUGINS = ("learned-worker", "learned-director")
+LEARNED_DIRS = tuple(f"plugins/{p}/" for p in PLUGINS)
 MANIFESTS = (".claude-plugin/plugin.json", ".codex-plugin/plugin.json", "plugin.json")
 MIN_FINDINGS = 3
 FIX_ROUNDS = 2
@@ -341,6 +342,7 @@ class _Run:
         result = self.job("draft", proc)
         if result.get("status") != "ok":
             raise Stop(f"draft job {result.get('status')}: {result.get('error') or ''}".strip())
+        self.learned_only()
         self.report.proposals = [
             line.strip("-* ").strip() for line in self.reply(result).splitlines() if "MCP proposal:" in line
         ]
@@ -357,6 +359,12 @@ class _Run:
         diff = self.git("diff", "--name-only", ref, cwd=self.wt).stdout.split("\n")
         other = self.git("ls-files", "--others", "--exclude-standard", cwd=self.wt).stdout.split("\n")
         return sorted({p for p in diff + other if p.strip()})
+
+    def learned_only(self) -> None:
+        """Stop when a job changed any path outside the learned plugins, committed or not."""
+        for path in self.changed("master"):
+            if not path.startswith(LEARNED_DIRS):
+                raise Stop(f"job changed {path} outside the learned plugins")
 
     def skills_of(self, paths: list[str]) -> list[tuple[str, str]]:
         found: set[tuple[str, str]] = set()
@@ -438,7 +446,7 @@ class _Run:
     def evaluate(self, skills: list[tuple[str, str]]) -> None:
         for plugin, skill in skills:
             remaining = self.cfg.max_cost_usd - self.spent
-            if remaining <= 0:
+            if remaining < 0.01:  # less than a cent left cannot pay for an eval, and is passed as 0.00
                 raise Stop(f"eval budget ${self.cfg.max_cost_usd} spent before {skill}")
             target = self.out / f"eval-{skill}.json"
             cases = [arg for case in self.eval_cases(plugin, skill) for arg in ("--case", case)]
@@ -520,6 +528,7 @@ class _Run:
         result = self.job(f"fix round {round_no}", proc)
         if result.get("status") != "ok":
             raise Stop(f"fix round {round_no} job {result.get('status')}")
+        self.learned_only()
         changed = self.changed(before)
         if not changed:
             raise Stop(f"fix round {round_no} changed nothing")

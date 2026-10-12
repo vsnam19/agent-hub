@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 import signal
 import subprocess
@@ -290,8 +291,8 @@ def _skills_repo(config_dir: Path) -> Path:
 def _cmd_skills_weekly(args) -> int:
     from agenthub import skillweekly
 
-    if args.max_cost_usd <= 0:
-        raise UsageError("--max-cost-usd must be positive")
+    if not math.isfinite(args.max_cost_usd) or args.max_cost_usd <= 0:
+        raise UsageError("--max-cost-usd must be a finite positive number")
     p = paths()
     cfg = skillweekly.Config(
         state_dir=p.state_dir,
