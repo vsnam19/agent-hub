@@ -135,6 +135,10 @@ def _build_parser() -> argparse.ArgumentParser:
     mine.add_argument("--out", help="output directory (default: <state>/skills/<date>)")
     mine.add_argument("--transcripts", help="Claude Code projects directory (default: ~/.claude/projects)")
     mine.add_argument("--json", action="store_true")
+    weekly = skills_sub.add_parser("weekly", help="mine, draft, eval, review and release learned skills (local only)")
+    weekly.add_argument("--dry-run", action="store_true", help="print the steps; run nothing, write nothing")
+    weekly.add_argument("--max-cost-usd", type=float, default=3.0, help="eval budget in USD (default 3)")
+    skills_sub.add_parser("report", help="print the newest weekly report")
 
     gate = sub.add_parser("gate", help="run the gates on the committed HEAD and record them (exit 9 if one fails)")
     gate.add_argument("-d", "--dir", default=".", dest="workdir", help="clean work tree to gate")
@@ -269,9 +273,58 @@ def _cmd_hub(args) -> int:
     return hub.install(config_dir, args.apply, tuple(args.host or hub.HOSTS), emit=lambda text: print(_safe(text)))
 
 
+def _skills_repo(config_dir: Path) -> Path:
+    import tomllib
+
+    try:
+        data = tomllib.loads((config_dir / "workers.toml").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise UsageError(f"cannot read workers.toml: {e}") from None
+    hub = data.get("hub")
+    directory = hub.get("codex_marketplace") if isinstance(hub, dict) else None
+    if not isinstance(directory, str):
+        raise UsageError("workers.toml needs [hub] codex_marketplace = the skills repo")
+    return Path(directory).expanduser().resolve()
+
+
+def _cmd_skills_weekly(args) -> int:
+    from agenthub import skillweekly
+
+    if args.max_cost_usd <= 0:
+        raise UsageError("--max-cost-usd must be positive")
+    p = paths()
+    cfg = skillweekly.Config(
+        state_dir=p.state_dir,
+        skills_repo=_skills_repo(p.config_dir),
+        transcripts=Path(os.environ.get("HOME", "~")).expanduser() / ".claude" / "projects",
+        max_cost_usd=args.max_cost_usd,
+    )
+    report = skillweekly.weekly(cfg, _now(), skillweekly.run_command, args.dry_run)
+    if args.dry_run:
+        print(_safe(report.render()), end="")
+    else:
+        print(_safe(report.one_line()))
+        if report.exit_code != 3:
+            print(_safe(f"report: {cfg.state_dir / 'skills' / report.date / 'report.md'}"))
+    return report.exit_code
+
+
+def _cmd_skills_report() -> int:
+    reports = sorted((paths().state_dir / "skills").glob("*/report.md"), key=lambda f: f.parent.name)
+    if not reports:
+        print("agent-hub: no weekly report yet", file=sys.stderr)
+        return 1
+    print(_safe(reports[-1].read_text(encoding="utf-8", errors="replace")), end="")
+    return 0
+
+
 def _cmd_skills(args) -> int:
     from agenthub import skillmine
 
+    if args.skills_command == "weekly":
+        return _cmd_skills_weekly(args)
+    if args.skills_command == "report":
+        return _cmd_skills_report()
     state_dir = paths().state_dir
     now = _now()
     since = _mine_window(args, state_dir, now)
