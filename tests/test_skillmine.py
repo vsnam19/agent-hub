@@ -602,3 +602,87 @@ def test_long_paths_not_redacted():
     blob = "QUJDREVGR0hJSktMTU5P/UFFSU1RVVldYWVowMTIzNDU2Nzg5abcdefghijklmnop"
     assert skillmine.redact(f"blob {blob}") == "blob <redacted>"
     assert skillmine.redact("blob aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE3fG5hI7k/aB3dE5gH") == "blob <redacted>"
+
+
+def test_redact_basic_auth():
+    out = skillmine.redact("Authorization: Basic dXNlcjpwYXNzd29yZA==")
+    assert "dXNlcjpwYXNzd29yZA" not in out
+    assert skillmine.redact("curl -H 'Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=='").count("QWxhZGRpbjpv") == 0
+    assert skillmine.redact("Basic usage of Basic Authentication") == "Basic usage of Basic Authentication"
+
+
+def test_redact_pass_suffix_names():
+    cases = [
+        ("DB_PASS=hunter2x", "hunter2x"),
+        ("ADMIN_PASS: s3cretvalue", "s3cretvalue"),
+        ("MYSQL_PWD=abc", "abc"),
+        ("export DB_PASS hunter2x", "hunter2x"),
+        ("session_id=abcd", "abcd"),
+        ("cookie: sid=zz", "zz"),
+        ("salt=xy1", "xy1"),
+        ("signature: a1b2", "a1b2"),
+    ]
+    for text, secret in cases:
+        out = skillmine.redact(text)
+        assert secret not in out, text
+        assert "<redacted>" in out, text
+
+
+def test_redact_b64_after_plain_equals():
+    blob = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldY"
+    out = skillmine.redact(f"data={blob} and x:{blob}")
+    assert blob not in out
+    assert out == "data=<redacted> and x:<redacted>"
+
+
+def test_redact_base64url():
+    blob = "dXNlcjpwYXNzLXdvcmQ_YWJjZGVmZ2hpamts-bW5vcA"
+    out = skillmine.redact(f"value {blob} end")
+    assert blob not in out
+    assert out == "value <redacted> end"
+
+
+def test_entropy_rule_spares_paths_identifiers_and_job_ids():
+    keep = [
+        "agenthub/skillmine.py",
+        "orch/phased/skills-mine",
+        "20261012-082712-review-8e6a",
+        "test_redact_basic_auth",
+        "CMAKE_COMPILE_WARNING_AS_ERROR",
+        "docs/superpowers/specs/design.md",
+        "RedactionChokePointHandler",
+    ]
+    for text in keep:
+        assert skillmine.redact(f"see {text} now") == f"see {text} now", text
+    assert skillmine.redact("k Xk9fQ2mP7vLz4TnR8wYb") == "k <redacted>"
+    assert skillmine.redact("aaaaaaaaaaaaaaaaaaaaaaaa1") == "aaaaaaaaaaaaaaaaaaaaaaaa1"
+
+
+def test_read_reply_uses_reply_path_and_numeric_order(tmp_path):
+    job = tmp_path / "job"
+    for name, body in (("2-a-x", "two"), ("10-a-x", "ten"), ("9-a-x", "nine")):
+        (job / "attempts" / name).mkdir(parents=True)
+        (job / "attempts" / name / "reply.md").write_text(body)
+
+    assert skillmine._read_reply(job, {}) == "ten"
+    assert skillmine._read_reply(job, {"reply_path": str(job / "attempts" / "2-a-x" / "reply.md")}) == "two"
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside")
+    assert skillmine._read_reply(job, {"reply_path": str(outside)}) == "ten"
+    assert skillmine._read_reply(job, {"reply_path": str(job / "missing.md")}) == "ten"
+
+
+def test_group_ties_by_severity_rank():
+    findings = [
+        {"severity": sev, "file": f"{mod}/sub/x.py", "claim": sev, "branch": "b"}
+        for sev, mod in (("low", "aaa"), ("medium", "zzz"), ("high", "mmm"), ("high", "bbb"))
+    ]
+
+    groups = skillmine.group_findings(findings)
+
+    assert [(g["severity"], g["module"]) for g in groups] == [
+        ("high", "bbb/sub"),
+        ("high", "mmm/sub"),
+        ("medium", "zzz/sub"),
+        ("low", "aaa/sub"),
+    ]

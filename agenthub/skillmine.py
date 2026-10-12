@@ -1,6 +1,7 @@
 """Deterministic extractor for the weekly skill run: what repeats in job records and transcripts, redacted."""
 
 import json
+import math
 import re
 from collections import Counter
 from dataclasses import asdict, dataclass, field
@@ -15,16 +16,31 @@ CATEGORY_WORDS = 12
 _PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.S)
 _JWT = re.compile(r"\beyJ[\w-]+\.[\w-]+\.[\w-]+")
 _BEARER = re.compile(r"(?i)\bBearer\s+[\w.~+/=-]+")
+_BASIC = re.compile(r"\bBasic\s+([A-Za-z0-9+/_-]{8,}={0,2})(?![\w+/])")
 _PREFIXED = re.compile(r"\b(?:sk-[\w-]{16,}|ghp_\w{20,}|xox[a-z]-[\w-]{10,}|AKIA[0-9A-Z]{16})")
-_NAME = r"[\w-]*(?:key|token|secret|password|passwd|pwd|credential)[\w-]*"
+_NAME = r"[\w-]*(?:pass|pwd|secret|token|key|auth|authorization|credential|cookie|session|salt|sig|signature)[\w-]*"
 _VALUE = r"(?:\"[^\"]*\"|'[^']*'|[^\s\"',;]+)"
 _KV = re.compile(rf"(?i)(?<![\w-])({_NAME})(\s*[=:]\s*){_VALUE}")
-_KV_FLAG = re.compile(rf"(?i)(?<![\w-])(--{_NAME})(\s+)(?!-){_VALUE}")
+_KV_SPACE = re.compile(rf"(?i)(?<![\w-])({_NAME})(\s+)(?!-|<redacted>){_VALUE}")
 _KV_JSON = re.compile(rf"(?i)(\"{_NAME}\"\s*:\s*)\"[^\"]*\"")
+_BARE_SECRET_WORDS = {"password", "passwd", "pwd", "passphrase"}
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
-_HEX = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{32,}(?![0-9A-Za-z])")
-_B64 = re.compile(r"(?<![\w+/=-])[A-Za-z0-9+/]{40,}={0,2}(?![\w+/])")
 _HOME = re.compile(r"(?:^|(?<=[\s\"'`(=:/\[]))(?:/home/[^/\s]+|/Users/[^/\s]+|/root(?![\w.-]))")
+
+# Token rule. Text is split on whitespace, quotes, backticks and `=:,;()<>[]{}?&`; a token is redacted when ALL hold:
+#   - >= 16 chars: shorter strings are mostly words or short ids, and name rules cover short passwords;
+#   - >= 2 of {lower, upper, digit, symbol `+/_-`}: a single-class string is a word or a number;
+#   - Shannon entropy >= 3.0 bits/char: random keys sit at 4+, repeated or patterned text well below;
+#   - not path-like (>= 2 `/` segments, each with a letter and <= 40 chars, none digit+mixed-case): file paths,
+#     branch names and URLs have short readable segments, base64 blobs do not;
+#   - not an identifier (words of letters joined by `_`/`-`, each word upper-case or camel/lower with >= 3 letter
+#     pieces) and not a job id (`YYYYMMDD-HHMMSS-kind-xxxx`): names the extract needs to keep.
+_TOKEN = re.compile(r"[^\s\"'`=:,;()<>\[\]{}?&]+")
+_TOKEN_MIN_LEN = 16
+_TOKEN_MIN_ENTROPY = 3.0
+_SEGMENT_MAX = 40
+_WORD = re.compile(r"(?:[A-Z]+(?![a-z])|[A-Z]?[a-z]{3,})+")
+_JOB_ID = re.compile(r"\d{8}-\d{6}-[a-z]+-[0-9a-f]{4}(?:\.\w+)?")
 
 _CORRECTION = re.compile(
     r"không được|\bphải\b|\bđừng\b|\bsai\b|\bdon[’']?t\b|\bnever\b|\bwrong\b|\bmust\b",
@@ -33,6 +49,7 @@ _CORRECTION = re.compile(
 _FINDING = re.compile(
     r"^\s*[-*]\s+(?:\*\*|`)?(high|medium|low|critical|important|minor)(?:\*\*|`)?\s+(?:—|–|--|-)\s+(.+)$", re.I
 )
+_SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
 _SEVERITY = {"critical": "high", "important": "medium", "minor": "low"}
 _BULLET = re.compile(r"^\s*[-*]\s")
 _DASH = re.compile(r"\s+(?:—|–|--|-)\s+")
@@ -52,28 +69,55 @@ def redact(text: str) -> str:
     text = _PEM.sub("<redacted-key>", text)
     text = _JWT.sub("<redacted>", text)
     text = _BEARER.sub("Bearer <redacted>", text)
+    text = _BASIC.sub(lambda m: m.group(0) if _WORD.fullmatch(m.group(1)) else "Basic <redacted>", text)
     text = _PREFIXED.sub("<redacted>", text)
     text = _KV.sub(r"\1\2<redacted>", text)
-    text = _KV_FLAG.sub(r"\1\2<redacted>", text)
+    text = _KV_SPACE.sub(_redact_space_value, text)
     text = _KV_JSON.sub(r'\1"<redacted>"', text)
     text = _EMAIL.sub("<email>", text)
-    text = _HEX.sub("<redacted>", text)
-    text = _B64.sub(lambda m: "<redacted>" if _looks_random(m.group(0)) else m.group(0), text)
+    text = _TOKEN.sub(lambda m: "<redacted>" if _looks_secret(m.group(0)) else m.group(0), text)
     return _HOME.sub("~", text)
 
 
-def _looks_random(blob: str) -> bool:
-    if not (any(c.isdigit() for c in blob) and any(c.isalpha() for c in blob)):
+def _redact_space_value(match: re.Match) -> str:
+    """`name value`: only for flags, identifier-like names and bare password words, so prose stays readable."""
+    name = match.group(1)
+    value = match.group(0)[len(name) + len(match.group(2)) :]
+    flag = name.startswith("--") or name.lower() in _BARE_SECRET_WORDS
+    identifier = ("_" in name or re.search(r"[a-z][A-Z]", name)) and not value.isalpha()
+    if flag or identifier:
+        return f"{name}{match.group(2)}<redacted>"
+    return match.group(0)
+
+
+def _entropy(token: str) -> float:
+    counts = Counter(token)
+    return -sum(n / len(token) * math.log2(n / len(token)) for n in counts.values())
+
+
+def _looks_secret(token: str) -> bool:
+    if len(token) < _TOKEN_MIN_LEN:
         return False
-    segments = [seg for seg in blob.split("/") if seg]
+    classes = (
+        any(c.islower() for c in token),
+        any(c.isupper() for c in token),
+        any(c.isdigit() for c in token),
+        any(c in "+/_-" for c in token),
+    )
+    if sum(classes) < 2 or _entropy(token) < _TOKEN_MIN_ENTROPY:
+        return False
+    segments = [seg for seg in token.split("/") if seg]
     if len(segments) >= 2 and all(_pathlike(seg) for seg in segments):
         return False
-    return True
+    if _JOB_ID.fullmatch(token):
+        return False
+    words = [word for word in re.split(r"[_-]+", token) if word]
+    return not (all(word.isalpha() for word in words) and all(_WORD.fullmatch(word) for word in words))
 
 
 def _pathlike(segment: str) -> bool:
     mixed = any(c.isdigit() for c in segment) and segment != segment.lower() and segment != segment.upper()
-    return len(segment) <= 40 and any(c.isalpha() for c in segment) and not mixed
+    return len(segment) <= _SEGMENT_MAX and any(c.isalpha() for c in segment) and not mixed
 
 
 def clean(text: str) -> str:
@@ -194,7 +238,7 @@ def _mine_jobs(state_dir: Path, branches: dict[str, str], extract: Extract, sinc
         dirname = Path(workdir).name
         branch = clean(branches.get(dirname, dirname) or "unknown")
         entry = per_branch.setdefault(branch, {"fix_briefs": 0, "fix_brief_titles": [], "reviews": 0, "verdicts": []})
-        reply = _read_reply(job_dir)
+        reply = _read_reply(job_dir, result)
         if kind == "review" and result.get("status") != "ok":
             extract.review_failures += 1
         elif kind == "review":
@@ -249,15 +293,24 @@ def group_findings(findings: list[dict]) -> list[dict]:
                 "examples": examples,
             }
         )
-    groups.sort(key=lambda g: (-g["count"], g["severity"], g["module"]))
+    groups.sort(key=lambda g: (-g["count"], _SEVERITY_RANK.get(g["severity"], len(_SEVERITY_RANK)), g["module"]))
     return groups
 
 
-def _read_reply(job_dir: Path) -> str:
+def _read_reply(job_dir: Path, result: dict | None = None) -> str:
+    reply_path = result.get("reply_path") if isinstance(result, dict) else None
+    if isinstance(reply_path, str) and reply_path:
+        try:
+            path = Path(reply_path).resolve()
+            if path.is_file() and path.is_relative_to(job_dir.resolve()):
+                return _read_text(path)
+        except (OSError, ValueError):
+            pass
     try:
-        replies = sorted((job_dir / "attempts").glob("*/reply.md"))
+        replies = [p for p in (job_dir / "attempts").glob("*/reply.md") if p.parent.name.split("-")[0].isdigit()]
     except OSError:
         return ""
+    replies.sort(key=lambda p: int(p.parent.name.split("-")[0]))
     return _read_text(replies[-1]) if replies else ""
 
 
