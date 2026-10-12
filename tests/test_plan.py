@@ -162,6 +162,28 @@ def test_load_bad_slug_and_names(tmp_path):
     assert "task 0: name must be [a-z0-9-]+" in str(exc.value)
 
 
+def test_plan_task_skills_must_be_strings(tmp_path):
+    repo_dir = make_repo(tmp_path / "repo")
+    plan_dir = tmp_path / "plan"
+    plan_dir.mkdir()
+    (plan_dir / "brief.md").write_text("brief")
+    plan_file = plan_dir / "plan.json"
+
+    def write(skills):
+        task = {"name": "core", "role": "implement", "brief": "brief.md", "skills": skills}
+        data = {"goal": "g", "repo": str(repo_dir), "base": "master", "slug": "skills", "tasks": [task]}
+        plan_file.write_text(json.dumps(data))
+
+    write(["debug-playbook", "telaf"])
+    assert load(plan_file).tasks[0].skills == ["debug-playbook", "telaf"]
+
+    for bad in ("debug-playbook", ["debug-playbook", 1]):
+        write(bad)
+        with pytest.raises(PlanError) as exc:
+            load(plan_file)
+        assert "task core: skills must be a list of strings" in str(exc.value)
+
+
 def test_plan_task_custom_role(monkeypatch, tmp_path):
     conf = tmp_path / "conf"
     conf.mkdir()

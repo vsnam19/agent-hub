@@ -59,6 +59,9 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--exclude", action="append", default=[], metavar="AGENT:MODEL", help="skip this link (repeatable)"
     )
+    run.add_argument(
+        "--skill", action="append", default=[], dest="skills", metavar="NAME", help="worker skill to load (repeatable)"
+    )
     run.add_argument("--jev", action="store_true", help="use jev fallback for missing handoffs")
     run.add_argument("--json", action="store_true")
 
@@ -225,6 +228,7 @@ def _cmd_run(args) -> int:
         jev=args.jev or os.environ.get("AGENT_HUB_JEV") == "1",
         exclude=args.exclude,
         allow=args.allow,
+        skills=args.skills,
     )
     result = run_job(run_args, p, pool, _now)
     if args.json:

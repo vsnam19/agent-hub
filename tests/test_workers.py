@@ -1,7 +1,7 @@
 import pytest
 
 from agenthub.config import ConfigError
-from agenthub.workers import worker_plugins
+from agenthub.workers import available_skills, worker_plugins
 
 
 def _plugin(root, name):
@@ -109,3 +109,15 @@ def test_plugins_values_must_be_strings(layout):
     _user(config, "default = []\n[plugins]\ntelaf = 1\n")
     with pytest.raises(ConfigError, match="plugins must be a table"):
         worker_plugins(config, repo)
+
+
+def test_available_skills_maps_skill_to_plugin(layout, tmp_path):
+    config, repo, telaf, aspice = layout
+    (telaf / "skills" / "telaf").mkdir()
+    (telaf / "skills" / "telaf" / "SKILL.md").write_text("# telaf\n")
+    (aspice / "skills" / "spice").mkdir()
+    (aspice / "skills" / "spice" / "SKILL.md").write_text("# spice\n")
+    (aspice / "skills" / "no-file").mkdir()
+    _user(config, f'default = ["telaf"]\n[plugins]\ntelaf = "{telaf}"\naspice = "{aspice}"\n')
+    assert available_skills(config) == {"telaf": "telaf", "spice": "aspice"}
+    assert available_skills(tmp_path / "absent") == {}

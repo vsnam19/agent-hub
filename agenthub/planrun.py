@@ -278,6 +278,8 @@ def run_plan(
                     argv.extend(["--timeout", task.timeout])
                 for g in task.gate:
                     argv.extend(["--gate", g])
+                for s in task.skills:
+                    argv.extend(["--skill", s])
                 if _kind(task) == "review":
                     argv.extend(["--base", tstate.start_ref])
                 if exclude:

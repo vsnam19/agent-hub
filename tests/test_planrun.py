@@ -69,6 +69,7 @@ def make_plan(tmp_path, tasks):
             depends_on=t.get("depends_on", []),
             paths_allowed=t.get("paths_allowed", []),
             gate=t.get("gate", []),
+            skills=t.get("skills", []),
             max_attempts=t.get("max_attempts", 2),
         )
         plan_tasks.append(pt)
@@ -284,6 +285,16 @@ def test_review_runs_in_verified_worktree_with_base(tmp_path):
     assert "--role" in r1_argv
     assert "review" in r1_argv
     assert "--base" in r1_argv
+
+
+def test_plan_task_skills_reach_brief(tmp_path):
+    plan = make_plan(tmp_path, [{"name": "t1", "skills": ["debug-playbook", "telaf"]}])
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [{"status": "ok"}]})
+    rc = run_plan(plan, state, spawn)
+    assert rc == 0
+    argv = spawn.spawns[0][0]
+    assert [argv[i + 1] for i, a in enumerate(argv) if a == "--skill"] == ["debug-playbook", "telaf"]
 
 
 def test_upstream_handoff_in_brief(tmp_path):

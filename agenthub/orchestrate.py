@@ -20,7 +20,7 @@ from agenthub.config import ConfigError, Paths, Pool
 from agenthub.jobs import Job, list_jobs, new_job
 from agenthub.pool import Cooldowns, Link
 from agenthub.procinfo import start_time
-from agenthub.workers import worker_plugins
+from agenthub.workers import available_skills, worker_plugins
 
 EXIT = {
     "ok": 0,
@@ -56,6 +56,7 @@ class RunArgs:
     kind: str = ""
     exclude: list[str] = dataclasses.field(default_factory=list)  # agent:model links to skip (e.g. the implementer)
     allow: list[str] = dataclasses.field(default_factory=list)  # repo-relative globs the run may change
+    skills: list[str] = dataclasses.field(default_factory=list)  # worker skills the brief tells the worker to load
 
 
 def repo_gates(root: Path) -> list[str]:
@@ -248,6 +249,11 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         if link.agent not in adapters:
             raise ConfigError(f"unknown agent in chain: {link.agent}")
     briefmod.validate(kind, args.brief)
+    known_skills = available_skills(p.config_dir) if args.skills else {}
+    for skill in args.skills:
+        if skill not in known_skills:
+            listed = ", ".join(sorted(known_skills)) or "none configured"
+            raise ConfigError(f"unknown skill {skill!r}: available skills are {listed}")
 
     started = now()
     workdir = args.workdir
@@ -305,6 +311,8 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     standing = briefmod.standing_orders(p.config_dir, repo.root if repo else None)
     if standing:
         text += "\n\n" + standing
+    if args.skills:
+        text += "\n\n" + _skills_section(args.skills, known_skills) + "\n"
     if kind == "implement":
         text += "\n" + handoff.FOOTER
     else:
@@ -531,6 +539,14 @@ def _touched_problems(findings: list[dict], judges: list[dict]) -> list[str]:
     if unjudged:
         problems.insert(0, f"gate touched: {unjudged} findings not judged by the reviewer")
     return problems
+
+
+def _skills_section(skills: list[str], known: dict[str, str]) -> str:
+    """The `## Skills` brief section naming each skill with its plugin, in the order given."""
+    listed = ", ".join(f"{s} ({known[s]})" for s in skills)
+    return (
+        f"## Skills\n\nLoad and follow these skills before you start (Claude lists them as <plugin>:<skill>): {listed}"
+    )
 
 
 def _touched_section(findings: list[dict]) -> str:

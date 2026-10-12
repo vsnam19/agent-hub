@@ -36,6 +36,20 @@ def worker_plugins(config_dir: Path, repo_root: Path, repo_config: str | None = 
     return tuple(_plugin_dir(name, plugins, user_file) for name in dict.fromkeys(names))
 
 
+def available_skills(config_dir: Path) -> dict[str, str]:
+    """Skill name -> plugin name for every `skills/<skill>/SKILL.md` under any plugin in `[plugins]` of
+    `<config_dir>/workers.toml`, whether or not a run enables it. A name found in two plugins maps to the first in
+    table order. Empty without a user file."""
+    user_file = config_dir / USER_FILE
+    if not user_file.is_file():
+        return {}
+    found: dict[str, str] = {}
+    for name, directory in _plugins(_load(user_file), user_file).items():
+        for skill in sorted((Path(directory).expanduser() / "skills").glob("*/SKILL.md")):
+            found.setdefault(skill.parent.name, name)
+    return found
+
+
 def _load(path: Path) -> dict:
     try:
         text = path.read_text()

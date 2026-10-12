@@ -136,6 +136,13 @@ only name plugins from `[plugins]`. Without `workers.toml` no worker gets extra 
 `--plugin-dir` per plugin; gwen workers get `skills.paths` and run with `OPENCODE_DISABLE_EXTERNAL_SKILLS=1`, so they
 index only these skills. codex and agy read their globally installed plugins and are not affected.
 
+A job can name the skills it should use: `agent-hub run --skill debug-playbook --skill telaf ...` (repeatable), or
+`"skills": ["debug-playbook"]` on a plan task. Each name must be a `skills/<skill>/SKILL.md` under any plugin in
+`[plugins]`, not only the ones this run enables; an unknown name is a configuration error (exit 2) that lists the
+available skills, and nothing is recorded. The CLI then appends a `## Skills` section to the brief, after the
+standing orders and before the handoff footer, asking the worker to load and follow them (for implement and review
+jobs alike). Without skills there is no section.
+
 ## Exit codes
 
 | Exit | Status | Meaning |

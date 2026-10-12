@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from agenthub import orchestrate
+from agenthub import handoff, orchestrate
 from agenthub.config import ConfigError, Pool, paths
+from agenthub.jobs import list_jobs
 from agenthub.orchestrate import EXIT, RunArgs, run_job
 from agenthub.pool import Cooldowns, Link, parse_link
 from tests.conftest import fake_calls
@@ -38,6 +39,7 @@ def args_for(
     gates=None,
     jev=False,
     allow=None,
+    skills=None,
 ):
     return RunArgs(
         role=role,
@@ -49,6 +51,7 @@ def args_for(
         gates=gates or [],
         jev=jev,
         allow=allow or [],
+        skills=skills or [],
     )
 
 
@@ -634,3 +637,46 @@ def test_review_ignores_branch_worker_plugins(env_sandbox, repo, tmp_path):
     assert result["status"] == "ok"
     argv = fake_calls(env_sandbox.fakelog, "claude")[0]["argv"]
     assert argv[argv.index("--plugin-dir") + 1] == str(telaf.resolve())
+
+
+def _skills_layout(env_sandbox, tmp_path):
+    worker = tmp_path / "worker-plugin"
+    (worker / "skills" / "debug-playbook").mkdir(parents=True)
+    (worker / "skills" / "debug-playbook" / "SKILL.md").write_text("# debug\n")
+    telaf = tmp_path / "telaf"
+    (telaf / "skills" / "telaf").mkdir(parents=True)
+    (telaf / "skills" / "telaf" / "SKILL.md").write_text("# telaf\n")
+    (env_sandbox.config / "workers.toml").write_text(
+        f'default = []\n[plugins]\nworker = "{worker}"\ntelaf = "{telaf}"\n'
+    )
+
+
+def test_skills_section_in_brief(env_sandbox, repo, tmp_path):
+    _skills_layout(env_sandbox, tmp_path)
+    skills = ["debug-playbook", "telaf"]
+    line = "Load and follow these skills before you start (Claude lists them as <plugin>:<skill>): "
+    expected = "debug-playbook (worker), telaf (telaf)"
+
+    result = go(repo, ["agy:m1"], skills=skills)
+    brief = (job_dir(result) / "brief.md").read_text()
+    assert f"## Skills\n\n{line}{expected}\n" in brief
+    assert brief.index("## Skills") < brief.index(handoff.FOOTER)
+
+    result = go(repo, ["claude:sonnet"], role="review", brief="", base="master", skills=skills)
+    brief = (job_dir(result) / "brief.md").read_text()
+    assert f"## Skills\n\n{line}{expected}\n" in brief
+    assert brief.index("## Skills") < brief.index(handoff.REVIEW_FOOTER)
+
+
+def test_unknown_skill_is_config_error(env_sandbox, repo, tmp_path):
+    _skills_layout(env_sandbox, tmp_path)
+    with pytest.raises(ConfigError, match="'nope'") as err:
+        go(repo, ["agy:m1"], skills=["debug-playbook", "nope"])
+    assert "available skills are debug-playbook, telaf" in str(err.value)
+    assert list_jobs(paths(), 100) == []
+
+
+def test_no_skills_no_section(env_sandbox, repo):
+    result = go(repo, ["agy:m1"])
+    brief = (job_dir(result) / "brief.md").read_text()
+    assert "## Skills" not in brief
