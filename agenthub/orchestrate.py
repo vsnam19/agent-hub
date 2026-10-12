@@ -545,14 +545,15 @@ def touched_findings(jobs: list[dict], workdir: Path, head: str) -> list[dict]:
 
 
 def _passed_gate(j: dict, head: str) -> bool:
-    """Whether job `j` is a gate that passed on `head`; a gate job must also have run every repo default gate."""
+    """Whether job `j` is a gate that passed on `head`; a gate job must also have completed (status ok, not cancelled
+    after some gates) and have run every repo default gate."""
     if j.get("kind") not in ("implement", "gate") or j.get("head") != head or not j.get("gate"):
         return False
     if not all(g.get("rc") == 0 and g.get("sha") == head for g in j["gate"]):
         return False
     if j["kind"] == "gate":
         ran = {g.get("cmd") for g in j["gate"]}
-        return bool(j.get("repo_gates")) and set(j["repo_gates"]) <= ran
+        return j.get("status") == "ok" and bool(j.get("repo_gates")) and set(j["repo_gates"]) <= ran
     return True
 
 

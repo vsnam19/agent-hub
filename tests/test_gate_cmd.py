@@ -292,3 +292,32 @@ def test_cancelled_gate_job_skips_gateguard(env_sandbox, repo, capsys, monkeypat
     assert out["status"] == "cancelled"
     assert calls == []
     assert out["gate_touched"] == []
+
+
+def test_review_cancel_after_last_repo_gate_is_not_a_pass(env_sandbox, repo, capsys, monkeypatch):
+    set_repo_gates(repo, ["true"])
+    head = git_head(repo)
+    calls = []
+
+    def sigterm_after_repo_gate(inv, cwd, env, attempt_dir, timeout, on_start):
+        calls.append(inv.argv)
+        (attempt_dir / "stdout").write_text("")
+        (attempt_dir / "stderr").write_text("")
+        os.kill(os.getpid(), signal.SIGTERM)
+        return process.Ran(rc=0, timed_out=False, duration_s=0.0, pgid=0)
+
+    monkeypatch.setattr(process, "run", sigterm_after_repo_gate)
+
+    rc = main(["gate", "-d", str(repo), "--gate", "echo extra", "--json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 130
+    assert out["status"] == "cancelled"
+    assert [g["cmd"] for g in out["gate"]] == ["true"]
+    assert len(calls) == 1
+
+    rc = main(["ready", "-d", str(repo), "--json"])
+
+    ready_out = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert f"no passing gate on {head}" in ready_out["problems"]

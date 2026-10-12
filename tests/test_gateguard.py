@@ -632,3 +632,30 @@ def test_latin1_test_file_does_not_crash_and_uses_line_rule(repo):
     test_file.write_bytes("def test_a():\n    # caf\xe9\n    assert x == 1\n".encode("latin-1"))
     res = gateguard.inspect_diff(guards.inspect(repo), since)
     assert res == [{"file": "test_l.py", "kind": "assert-removed", "lines": [3]}]
+
+
+def test_review_if_made_always_false_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    if x:\n        assert y == 1\n",
+        "def test_a():\n    if False:\n        assert y == 1\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_review_for_emptied_iterable_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a(items):\n    for v in items:\n        assert v == 1\n",
+        "def test_a(items):\n    for v in []:\n        assert v == 1\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_review_except_type_changed_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    try:\n        assert x == 1\n    except ValueError:\n        pass\n",
+        "def test_a():\n    try:\n        assert x == 1\n    except AssertionError:\n        pass\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [4]}]

@@ -150,8 +150,9 @@ def _test_index(source: bytes | None) -> dict[str, TestDef] | None:
 
 def _weakened(base: TestDef, new: TestDef) -> bool:
     """A base assertion the new test does not keep. A statement assertion is kept by the same assertion in the same
-    place (same enclosing statement kinds), or as a direct statement of the new test anywhere (see _kept_tokens). A
-    nested assertion is kept only by the identical nested one in the same place, never by a statement. Containment in
+    place (same enclosing statements and their guards), or as a direct statement of the new test anywhere (see
+    _kept_tokens). A nested assertion is kept only by the identical nested one in the same place, never by a statement.
+    Containment in
     a larger expression (`x == 1 or True`, `not (x == 1)`) keeps nothing. An identical test is never weakened."""
     if base.dump == new.dump:
         return False
@@ -180,8 +181,8 @@ def _assertion_key(node: ast.AST) -> str:
 
 
 def _assertion_places(fn: ast.AST) -> list[tuple[tuple[str, ...], ast.AST]]:
-    """Each assertion in the function with its place: the enclosing compound statements, each as `Kind.field`
-    (`Try.body`, `If.body`). Statements directly in the function body add no label."""
+    """Each assertion in the function with its place: the enclosing compound statements, each as `Kind.field` with its
+    guard (see _place_label). Statements directly in the function body add no label."""
     places = []
     dead = _dead_ids(fn)
 
@@ -291,12 +292,20 @@ def _dead_ids(fn: ast.AST) -> set[int]:
 
 
 def _place_label(node: ast.AST, field: str) -> str:
-    """`Kind.field`; a `raises/warns` body adds its with-items, so the exception is part of the place."""
+    """`Kind.field`, plus what guards the statement: a `raises/warns` body adds its with-items, an `if`/`while` its
+    test, a `for` its iterable and a `try` its handler types. An assertion keeps its place only under the same guard,
+    so `if x:` made `if False:` or `except ValueError` made `except AssertionError` is a different place."""
     label = f"{type(node).__name__}.{field}"
     if isinstance(node, (ast.With, ast.AsyncWith)) and field == "body":
         raises = [ast.dump(i) for i in node.items if _is_raises(i.context_expr)]
         if raises:
             label += f"[{' '.join(raises)}]"
+    elif isinstance(node, (ast.If, ast.While)):
+        label += f"[{ast.dump(node.test)}]"
+    elif isinstance(node, (ast.For, ast.AsyncFor)):
+        label += f"[{ast.dump(node.iter)}]"
+    elif isinstance(node, (ast.Try, ast.TryStar)):
+        label += f"[{' '.join(ast.dump(h.type) if h.type else 'bare' for h in node.handlers)}]"
     return label
 
 

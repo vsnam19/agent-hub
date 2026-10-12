@@ -67,7 +67,8 @@ def parse_touched_entries(reply: str) -> list[dict]:
         if len(parts) < 2:
             continue
         # `[152, 165]` reads as `152,165`, so the list form splits like the comma form
-        target = re.sub(r"\[([^\]]*)\]", lambda m: m.group(1).replace(" ", ""), parts[0]).split()
+        # A target wrapped in backticks (`t.py assert-removed lines 2`) reads as its bare form
+        target = re.sub(r"\[([^\]]*)\]", lambda m: m.group(1).replace(" ", ""), parts[0].replace("`", "")).split()
         judgement = parts[1].strip().lower().rstrip(".,;:")
         if len(target) != 4 or target[2] != "lines" or judgement not in ("legitimate", "weakening"):
             continue
