@@ -1,0 +1,61 @@
+diff --git a/src/inventory.cpp b/src/inventory.cpp
+index 40537f3..f5c2e33 100644
+--- a/src/inventory.cpp
++++ b/src/inventory.cpp
+@@ -1,11 +1,41 @@
+ #include "minilib/inventory.hpp"
+ 
++#include <cstddef>
+ #include <fstream>
+-#include <sstream>
+ #include <stdexcept>
+ 
+ namespace minilib {
+ 
++namespace {
++
++// Splits one CSV line on commas; a field in double quotes may contain commas ("" is a literal quote).
++std::vector<std::string> split_csv_line(const std::string& line) {
++    std::vector<std::string> parts(1);
++    bool quoted = false;
++    for (std::size_t i = 0; i < line.size(); ++i) {
++        const char c = line[i];
++        if (quoted) {
++            if (c == '"' && i + 1 < line.size() && line[i + 1] == '"') {
++                parts.back() += '"';
++                ++i;
++            } else if (c == '"') {
++                quoted = false;
++            } else {
++                parts.back() += c;
++            }
++        } else if (c == '"') {
++            quoted = true;
++        } else if (c == ',') {
++            parts.emplace_back();
++        } else {
++            parts.back() += c;
++        }
++    }
++    return parts;
++}
++
++}  // namespace
++
+ std::vector<Item> load_items(const std::string& path) {
+     std::ifstream in(path);
+     if (!in) {
+@@ -21,12 +51,7 @@ std::vector<Item> load_items(const std::string& path) {
+         if (line.empty()) {
+             continue;
+         }
+-        std::vector<std::string> parts;
+-        std::istringstream fields(line);
+-        std::string field;
+-        while (std::getline(fields, field, ',')) {
+-            parts.push_back(field);
+-        }
++        const std::vector<std::string> parts = split_csv_line(line);
+         if (parts.size() < 3) {
+             throw std::runtime_error("bad row: " + line);
+         }

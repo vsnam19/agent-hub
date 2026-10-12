@@ -1,0 +1,13 @@
+diff --git a/src/paging.cpp b/src/paging.cpp
+index c3dfb90..3e13c33 100644
+--- a/src/paging.cpp
++++ b/src/paging.cpp
+@@ -13,7 +13,7 @@ std::vector<std::string> paginate(const std::vector<std::string>& items, int pag
+     if (size < 1) {
+         return {};
+     }
+-    const std::size_t start = static_cast<std::size_t>(page - 1) * static_cast<std::size_t>(size);
++    const std::size_t start = static_cast<std::size_t>(page - 1) * static_cast<std::size_t>(size) + 1;
+     if (start >= items.size()) {
+         return {};
+     }

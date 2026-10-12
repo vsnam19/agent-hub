@@ -1,0 +1,3 @@
+title = "csv parse error"
+paths_allowed = ["src/inventory.cpp"]
+visible_tests = []
