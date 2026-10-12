@@ -165,7 +165,8 @@ attempt (stdout, stderr, reply), `gate/<n>.log`, `diff.patch` for reviews, and `
 
 - B — the hub: install skills (including `telaf`, `aspice`) for agy, codex and opencode, not only Claude (D-019, D-077).
 - C — a C++ fixture for the gwen bench before C++ tasks go to gwen (D-077).
-- `docs/follow-ups.md`: review findings and small items, good `implement-small` work on small repositories.
+- `docs/next-phase.md`: the resume note — Phase B (one skill set for every worker, learned from addyosmani/agent-skills), then C.
+- `docs/follow-ups.md`: open items.
 - `plan merge` (merge `done` branches through `agent-hub ready`); vsndevenv module and GUI page; GitHub remotes.
 
 ## 10. Decision index
