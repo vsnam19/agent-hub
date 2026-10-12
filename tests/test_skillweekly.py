@@ -60,12 +60,16 @@ class Fake:
         self.install_rc = opts.get("install_rc", 0)
         self.ready_rc = opts.get("ready_rc", 0)
         self.gate_rc = opts.get("gate_rc", 0)
+        self.crash = opts.get("crash", False)
+        self.cleanup_rc = opts.get("cleanup_rc", 0)
         self.drafts = 0
         self.reply = "## Notes\n- MCP proposal: foo-query — a lookup text cannot carry\n"
 
     def __call__(self, argv, cwd, timeout):
         self.calls.append(list(argv))
         assert timeout > 0
+        if argv[0] == "git" and self.cleanup_rc and argv[1:3] in (["worktree", "remove"], ["branch", "-d"]):
+            return Proc(self.cleanup_rc, "", "cleanup refused\n")
         if argv[0] == "git":
             done = subprocess.run(argv, cwd=cwd, capture_output=True, text=True)
             return Proc(done.returncode, done.stdout, done.stderr)
@@ -83,6 +87,8 @@ class Fake:
         if words[:2] == ["hub", "install"]:
             return Proc(self.install_rc, "", "install refused\n" if self.install_rc else "")
         if words[0] == "gate":
+            if self.crash:
+                raise RuntimeError("gate exploded")
             return Proc(self.gate_rc, "gate\n", "")
         if words[0] == "ready":
             return Proc(self.ready_rc, "not ready: x\n" if self.ready_rc else "ready\n", "")
@@ -360,6 +366,40 @@ def test_install_failure_after_merge_finishes_run(tmp_path):
     assert "install: failed" in text
     notified = [c[2] for c in env.fake.words("notify-send")]
     assert notified == [f"skills weekly {DATE}: released, install failed: hub install --apply: install refused"]
+
+
+def test_unexpected_exception_writes_report(tmp_path):
+    env = Env(tmp_path, crash=True)
+    env.cfg.notify = True
+    before = git(env.repo, "rev-parse", "master")
+    report = env.run()
+    assert report.exit_code == 1
+    assert report.outcome == "crashed: RuntimeError: gate exploded"
+    assert git(env.repo, "rev-parse", "master") == before
+    assert not env.last_run.exists()
+    text = (env.out / "report.md").read_text()
+    assert "Outcome: crashed: RuntimeError: gate exploded" in text
+    assert "crash: failed" in text
+    crash_text = (env.out / "crash.txt").read_text()
+    assert "Traceback" in crash_text
+    assert "RuntimeError: gate exploded" in crash_text
+    notified = [c[2] for c in env.fake.words("notify-send")]
+    assert notified == [f"skills weekly {DATE}: crashed: RuntimeError: gate exploded"]
+
+
+def test_cleanup_failure_after_merge_still_finishes(tmp_path):
+    env = Env(tmp_path, cleanup_rc=1)
+    before = git(env.repo, "rev-parse", "master")
+    report = env.run()
+    assert report.exit_code == 0, report.stop_reason
+    assert git(env.repo, "rev-parse", "master") != before
+    assert len(git(env.repo, "log", "-1", "--format=%P", "master").split()) == 2
+    assert BRANCH in env.branches()
+    assert env.last_run.read_text().strip() == NOW.isoformat()
+    text = (env.out / "report.md").read_text()
+    assert "cleanup: warning" in text
+    assert "git worktree remove: cleanup refused" in text
+    assert "Outcome: released learned-worker 0.1.1" in text
 
 
 def test_never_pushes(tmp_path):

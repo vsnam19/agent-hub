@@ -9,6 +9,7 @@ import shutil
 import string
 import subprocess
 import sys
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -66,7 +67,7 @@ class Config:
 @dataclass
 class Step:
     name: str
-    status: str  # ok | stopped | would | skipped | failed
+    status: str  # ok | stopped | would | skipped | failed | warning
     detail: str = ""
 
 
@@ -153,6 +154,7 @@ def weekly(cfg: Config, now: datetime, runner: Runner, dry_run: bool) -> Report:
             return report
         run = _Run(cfg, now, runner, report)
         finished = False
+        crash = ""
         try:
             run.pipeline()
             finished = True
@@ -163,8 +165,15 @@ def weekly(cfg: Config, now: datetime, runner: Runner, dry_run: bool) -> Report:
             report.stop_reason = stop.reason
             report.exit_code = stop.code
             report.steps.append(Step("stop", "stopped", stop.reason))
+        except Exception as error:  # an unexpected failure still writes the report and the notification
+            report.outcome = f"crashed: {type(error).__name__}: {error}"
+            report.exit_code = EXIT_STOPPED
+            report.steps.append(Step("crash", "failed", "see crash.txt"))
+            crash = traceback.format_exc()
         run.out.mkdir(parents=True, exist_ok=True)
         (run.out / "report.md").write_text(report.render(), encoding="utf-8")
+        if crash:
+            (run.out / "crash.txt").write_text(crash, encoding="utf-8")
         if finished:
             (skills_dir / "last-run").write_text(now.isoformat() + "\n", encoding="utf-8")
         run.notify(report.one_line())
@@ -495,13 +504,20 @@ class _Run:
         self.step("merge", f"{self.branch} into master")
         # The merge is already on master, so an install failure must not stop the run before cleanup and last-run.
         failure = self.install()
-        self.git("worktree", "remove", "--force", str(self.wt))
-        self.git("branch", "-d", self.branch)
+        self.cleanup()
         if failure:
             self.report.outcome = f"released, install failed: {failure}"
             self.report.exit_code = EXIT_STOPPED
         else:
             self.report.outcome = "released " + ", ".join(self.report.released)
+
+    def cleanup(self) -> None:
+        """Remove the worktree and branch after the merge; a failure is a warning, never a stop."""
+        for args in (("worktree", "remove", "--force", str(self.wt)), ("branch", "-d", self.branch)):
+            proc = self.git(*args, check=False)
+            if proc.rc != 0:
+                reason = (proc.stderr or proc.stdout).strip()[:200]
+                self.report.steps.append(Step("cleanup", "warning", f"git {args[0]} {args[1]}: {reason}"))
 
     def install(self) -> str:
         """Run the post-merge installs; return the failure reason, or "" when all of them succeed."""
