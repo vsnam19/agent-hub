@@ -57,6 +57,7 @@ class Fake:
         self.director = opts.get("director", False)
         self.director_fix = opts.get("director_fix", False)
         self.plugin_rc = opts.get("plugin_rc", 0)
+        self.install_rc = opts.get("install_rc", 0)
         self.ready_rc = opts.get("ready_rc", 0)
         self.gate_rc = opts.get("gate_rc", 0)
         self.drafts = 0
@@ -79,6 +80,8 @@ class Fake:
             return self.implement(words)
         if words[0] == "run":
             return self.review()
+        if words[:2] == ["hub", "install"]:
+            return Proc(self.install_rc, "", "install refused\n" if self.install_rc else "")
         if words[0] == "gate":
             return Proc(self.gate_rc, "gate\n", "")
         if words[0] == "ready":
@@ -315,11 +318,34 @@ def test_claude_update_failure_stops_after_merge(tmp_path):
     before = git(env.repo, "rev-parse", "master")
     report = env.run()
     assert report.exit_code == 1
-    assert "merged, but claude plugin update failed: update refused" in report.stop_reason
+    assert report.stop_reason == ""
+    assert report.outcome == "released, install failed: claude plugin update: update refused"
     assert git(env.repo, "rev-parse", "master") != before
     assert len(git(env.repo, "log", "-1", "--format=%P", "master").split()) == 2
     assert ["claude", "plugin", "update", "learned-director@agent-plugins"] not in env.fake.calls
-    assert not env.last_run.exists()
+    assert env.last_run.read_text().strip() == NOW.isoformat()
+    assert not env.worktree.exists()
+    assert env.branches() == ["master"]
+
+
+def test_install_failure_after_merge_finishes_run(tmp_path):
+    env = Env(tmp_path, install_rc=1)
+    env.cfg.notify = True
+    before = git(env.repo, "rev-parse", "master")
+    report = env.run()
+    assert report.exit_code == 1
+    assert report.stop_reason == ""
+    assert report.outcome == "released, install failed: hub install --apply: install refused"
+    assert git(env.repo, "rev-parse", "master") != before
+    assert len(git(env.repo, "log", "-1", "--format=%P", "master").split()) == 2
+    assert not env.worktree.exists()
+    assert env.branches() == ["master"]
+    assert env.last_run.read_text().strip() == NOW.isoformat()
+    text = (env.out / "report.md").read_text()
+    assert "Outcome: released, install failed: hub install --apply: install refused" in text
+    assert "install: failed" in text
+    notified = [c[2] for c in env.fake.words("notify-send")]
+    assert notified == [f"skills weekly {DATE}: released, install failed: hub install --apply: install refused"]
 
 
 def test_never_pushes(tmp_path):

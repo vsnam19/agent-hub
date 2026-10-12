@@ -65,7 +65,7 @@ class Config:
 @dataclass
 class Step:
     name: str
-    status: str  # ok | stopped | would | skipped
+    status: str  # ok | stopped | would | skipped | failed
     detail: str = ""
 
 
@@ -492,17 +492,29 @@ class _Run:
             self.git("merge", "--abort", check=False)
             raise Stop(f"merge failed: {(merged.stderr or merged.stdout).strip()[:300]}")
         self.step("merge", f"{self.branch} into master")
-        installed = self.hub("hub", "install", "--apply", timeout=INSTALL_TIMEOUT)
-        if installed.rc != 0:
-            raise Stop(f"merged, but hub install failed: {(installed.stdout or installed.stderr).strip()[-300:]}")
-        self.step("install", "hub install --apply")
-        if any(item.startswith("learned-director ") for item in self.report.released):
-            self.update_director_plugin()
+        # The merge is already on master, so an install failure must not stop the run before cleanup and last-run.
+        failure = self.install()
         self.git("worktree", "remove", "--force", str(self.wt))
         self.git("branch", "-d", self.branch)
-        self.report.outcome = "released " + ", ".join(self.report.released)
+        if failure:
+            self.report.outcome = f"released, install failed: {failure}"
+            self.report.exit_code = EXIT_STOPPED
+        else:
+            self.report.outcome = "released " + ", ".join(self.report.released)
 
-    def update_director_plugin(self) -> None:
+    def install(self) -> str:
+        """Run the post-merge installs; return the failure reason, or "" when all of them succeed."""
+        installed = self.hub("hub", "install", "--apply", timeout=INSTALL_TIMEOUT)
+        if installed.rc != 0:
+            reason = (installed.stdout or installed.stderr).strip()[-300:]
+            self.report.steps.append(Step("install", "failed", "hub install --apply"))
+            return f"hub install --apply: {reason}"
+        self.step("install", "hub install --apply")
+        if any(item.startswith("learned-director ") for item in self.report.released):
+            return self.update_director_plugin()
+        return ""
+
+    def update_director_plugin(self) -> str:
         commands = (
             ("plugin", "marketplace", "update", "agent-plugins"),
             ("plugin", "update", "learned-director@agent-plugins"),
@@ -511,8 +523,10 @@ class _Run:
             proc = self.runner(["claude", *args], None, CLAUDE_TIMEOUT)
             if proc.rc != 0:
                 reason = (proc.stderr or proc.stdout).strip()[:300]
-                raise Stop(f"merged, but claude plugin update failed: {reason}")
+                self.report.steps.append(Step("claude", "failed", " ".join(args)))
+                return f"claude plugin update: {reason}"
         self.step("claude", "claude plugin update learned-director@agent-plugins")
+        return ""
 
 
 def _plugin_of(path: str) -> str:
