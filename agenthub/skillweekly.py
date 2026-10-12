@@ -309,10 +309,12 @@ class _Run:
         path = found if found.is_absolute() else self.wt / found
         path.parent.mkdir(parents=True, exist_ok=True)
         text = path.read_text(encoding="utf-8") if path.exists() else ""
-        if ".agent-hub/learned/" not in text.splitlines():
-            if text and not text.endswith("\n"):
-                text += "\n"
-            path.write_text(text + ".agent-hub/learned/\n", encoding="utf-8")
+        for pattern in (".agent-hub/learned/", ".worktrees/"):
+            if pattern not in text.splitlines():
+                if text and not text.endswith("\n"):
+                    text += "\n"
+                text += pattern + "\n"
+        path.write_text(text, encoding="utf-8")
 
     def existing_skills(self, plugin: str) -> str:
         found = sorted(p.name for p in (self.wt / "plugins" / plugin / "skills").glob("*") if p.is_dir())
@@ -366,15 +368,29 @@ class _Run:
             if parts[2] == "skills":
                 found.add((plugin, parts[3]))
             elif parts[2] == "evals":
-                names = [p.name for p in (self.wt / "plugins" / plugin / "skills").glob("*") if p.is_dir()]
-                owners = [n for n in names if parts[3].startswith(n + "-")]
-                if owners:
-                    found.add((plugin, max(owners, key=len)))
+                owner = self.owner(plugin, parts[3])
+                if owner:
+                    found.add((plugin, owner))
         return sorted(found)
+
+    def owner(self, plugin: str, case: str) -> str | None:
+        """The longest skill name that the eval case directory name starts with, so review-loop-x is not review's."""
+        names = [p.name for p in (self.wt / "plugins" / plugin / "skills").glob("*") if p.is_dir()]
+        owners = [n for n in names if case.startswith(n + "-")]
+        return max(owners, key=len) if owners else None
+
+    def eval_cases(self, plugin: str, skill: str) -> list[str]:
+        evals = self.wt / "plugins" / plugin / "evals"
+        cases = sorted(p.name for p in evals.glob("*") if p.is_dir() and self.owner(plugin, p.name) == skill)
+        if not cases:
+            raise Stop(f"no eval cases for {skill}")
+        return cases
 
     def commit(self, message: str) -> None:
         self.git("add", "-A", "--", *(f"plugins/{p}" for p in PLUGINS), cwd=self.wt)
-        self.git("commit", "-m", message, cwd=self.wt)
+        # A fix job may have committed its own changes already; there is nothing to commit then.
+        if self.git("diff", "--cached", "--quiet", cwd=self.wt, check=False).rc:
+            self.git("commit", "-m", message, cwd=self.wt)
         left = self.git("status", "--porcelain", "-uall", cwd=self.wt).stdout.strip()
         if left:
             raise Stop(f"files outside the learned plugins changed: {left.splitlines()[0][3:]}")
@@ -425,9 +441,10 @@ class _Run:
             if remaining <= 0:
                 raise Stop(f"eval budget ${self.cfg.max_cost_usd} spent before {skill}")
             target = self.out / f"eval-{skill}.json"
+            cases = [arg for case in self.eval_cases(plugin, skill) for arg in ("--case", case)]
             proc = self.runner(
                 [
-                    "claude", "plugin", "eval", str(self.wt / "plugins" / plugin), "--case", f"{skill}-*",
+                    "claude", "plugin", "eval", str(self.wt / "plugins" / plugin), *cases,
                     "--ablation", "with-without", "--max-cost-usd", f"{remaining:.2f}", "--json", str(target),
                     "--no-publish", "--trust-plugin",
                 ],
@@ -495,6 +512,7 @@ class _Run:
             "- Do not commit and do not change versions.\n",
             encoding="utf-8",
         )
+        before = self.git("rev-parse", "HEAD", cwd=self.wt).stdout.strip()
         proc = self.hub(
             "run", "--role", DRAFT_ROLE, "--brief", str(brief), "-d", str(self.wt), "--json",
             timeout=JOB_TIMEOUT,
@@ -502,7 +520,7 @@ class _Run:
         result = self.job(f"fix round {round_no}", proc)
         if result.get("status") != "ok":
             raise Stop(f"fix round {round_no} job {result.get('status')}")
-        changed = self.changed("HEAD")
+        changed = self.changed(before)
         if not changed:
             raise Stop(f"fix round {round_no} changed nothing")
         released = self.bump_touched(self.changed("master"))

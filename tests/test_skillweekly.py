@@ -53,6 +53,12 @@ def make_state(state: Path, findings: int = 3) -> None:
     make_job(state, "20261010-100000-review-aaaa", reply=review_reply(*lines))
 
 
+def make_eval_case(workdir: Path, plugin: str, skill: str, case: str) -> None:
+    """Create a skill and one of its eval cases under a plugin in the given checkout."""
+    (workdir / "plugins" / plugin / "skills" / skill).mkdir(parents=True, exist_ok=True)
+    (workdir / "plugins" / plugin / "evals" / case).mkdir(parents=True, exist_ok=True)
+
+
 def eval_json(with_score: float, without_score: float, cost: float = 0.1) -> dict:
     arms = {"with": [{"score": with_score}], "without": [{"score": without_score}]}
     return {"costUsd": cost, "cases": [{"name": "case", "arms": arms}]}
@@ -69,6 +75,7 @@ class Fake:
         self.draft = opts.get("draft", True)
         self.director = opts.get("director", False)
         self.director_fix = opts.get("director_fix", False)
+        self.commit_fix = opts.get("commit_fix", False)
         self.plugin_rc = opts.get("plugin_rc", 0)
         self.install_rc = opts.get("install_rc", 0)
         self.ready_rc = opts.get("ready_rc", 0)
@@ -126,6 +133,10 @@ class Fake:
             skill = workdir / "plugins/learned-director/skills/bar/SKILL.md"
             skill.parent.mkdir(parents=True, exist_ok=True)
             skill.write_text("---\nname: bar\n---\ndirector draft\n")
+            make_eval_case(workdir, "learned-director", "bar", "bar-pos")
+        if self.commit_fix and self.drafts > 1:
+            git(workdir, "add", "-A")
+            git(workdir, "commit", "-m", "fix by job")
         return self.job("draft", status="ok")
 
     def review(self) -> Proc:
@@ -230,6 +241,29 @@ def test_fix_round_bumps_newly_touched_plugin(tmp_path):
     assert "claude plugin update learned-director" in (env.out / "report.md").read_text()
 
 
+def test_fix_job_that_commits_still_counts(tmp_path):
+    env = Env(tmp_path, verdicts=["request-changes", "approve"], commit_fix=True)
+    report = env.run()
+    assert report.exit_code == 0, report.stop_reason
+    # One eval for the draft and one for the fix round: the committed fix was seen as a change.
+    assert len(env.fake.words("claude", "plugin", "eval")) == 2
+
+
+def test_eval_cases_exclude_longer_skill_names(tmp_path):
+    env = Env(tmp_path)
+    skills = env.worktree / "plugins" / "learned-worker" / "skills"
+    for name in ("review", "review-loop"):
+        (skills / name).mkdir(parents=True)
+    evals = env.worktree / "plugins" / "learned-worker" / "evals"
+    for name in ("review-a", "review-loop-x", "review-loop-y"):
+        (evals / name).mkdir(parents=True)
+    env.out.mkdir(parents=True)
+    run = skillweekly._Run(env.cfg, NOW, env.fake, skillweekly.Report(date=DATE))
+    run.evaluate([("learned-worker", "review"), ("learned-worker", "review-loop")])
+    cases = [[c[i + 1] for i, arg in enumerate(c) if arg == "--case"] for c in env.fake.words("plugin", "eval")]
+    assert cases == [["review-a"], ["review-loop-x", "review-loop-y"]]
+
+
 def test_eval_below_baseline_stops_and_keeps_branch(tmp_path):
     env = Env(tmp_path, evals=[eval_json(0.9, 0.95)])
     report = env.run()
@@ -329,7 +363,9 @@ def test_extract_ignored_without_repo_gitignore(tmp_path):
     git(env.repo, "commit", "-m", "drop agent-hub ignore")
     report = env.run()
     assert report.exit_code == 0, report.stop_reason
-    assert ".agent-hub/learned/" in (env.repo / ".git" / "info" / "exclude").read_text().splitlines()
+    excluded = (env.repo / ".git" / "info" / "exclude").read_text().splitlines()
+    assert ".agent-hub/learned/" in excluded
+    assert ".worktrees/" in excluded
     assert env.branches() == ["master"]
 
 
@@ -391,6 +427,7 @@ def test_failed_eval_cost_counted(tmp_path):
     for name, data, expected in scenarios:
         (tmp_path / name).mkdir()
         env = Env(tmp_path / name, evals=[data])
+        make_eval_case(env.worktree, "learned-worker", "foo", "foo-pos")
         env.out.mkdir(parents=True)
         run = skillweekly._Run(env.cfg, NOW, env.fake, skillweekly.Report(date=DATE))
         with pytest.raises(skillweekly.Stop, match="malformed score"):
@@ -410,6 +447,8 @@ def test_eval_cost_missing_or_string_counts_budget(tmp_path):
     for name, data in scenarios:
         (tmp_path / name).mkdir()
         env = Env(tmp_path / name, evals=[data, eval_json(1.0, 0.0)])
+        make_eval_case(env.worktree, "learned-worker", "foo", "foo-pos")
+        make_eval_case(env.worktree, "learned-worker", "bar", "bar-pos")
         env.out.mkdir(parents=True)
         run = skillweekly._Run(env.cfg, NOW, env.fake, skillweekly.Report(date=DATE))
         with pytest.raises(skillweekly.Stop, match=r"eval budget \$3\.0 spent before bar"):
