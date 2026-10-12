@@ -325,6 +325,45 @@ def test_same_name_other_class_deleted_flagged(repo):
     assert res == [{"file": "test_i.py", "kind": "test-deleted", "lines": [2]}]
 
 
+def test_nested_class_test_deleted_flagged(repo):
+    test_file = repo / "test_k.py"
+    test_file.write_text(
+        "class TestOuter:\n    class TestInner:\n        def test_x(self):\n            assert 1\n"
+        "    def test_y(self):\n        assert 1\n"
+    )
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add tests")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("class TestOuter:\n    def test_y(self):\n        assert 1\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == [{"file": "test_k.py", "kind": "test-deleted", "lines": [3]}]
+
+
+def test_test_under_module_if_deleted_flagged(repo):
+    test_file = repo / "test_l.py"
+    test_file.write_text("if True:\n    def test_x():\n        assert 1\ndef test_y():\n    assert 1\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add tests")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("def test_y():\n    assert 1\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == [{"file": "test_l.py", "kind": "test-deleted", "lines": [2]}]
+
+
+def test_def_outside_index_deleted_falls_back_to_line_rule(repo):
+    test_file = repo / "test_m.py"
+    test_file.write_text("try:\n    def test_x():\n        assert 1\nexcept ImportError:\n    pass\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add tests")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("try:\n    pass\nexcept ImportError:\n    pass\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert {"file": "test_m.py", "kind": "test-deleted", "lines": [2]} in res
+
+
 def test_unparsable_test_file_falls_back_to_line_rules(repo):
     test_file = repo / "test_j.py"
     test_file.write_text("def test_a():\n    assert 1\n")

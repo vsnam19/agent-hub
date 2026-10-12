@@ -107,21 +107,30 @@ def _is_assertion(node: ast.AST) -> bool:
     return False
 
 
+def _index_tests(body: list[ast.stmt], prefix: str, index: dict[str, ast.AST]) -> None:
+    """Adds the tests of `body` to `index` under their dotted path of enclosing class and function names. Classes,
+    non-test functions and module-level `if` blocks are entered; a test's own body is not."""
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name.startswith("test_"):
+                index[prefix + node.name] = node
+            else:
+                _index_tests(node.body, f"{prefix}{node.name}.", index)
+        elif isinstance(node, ast.ClassDef):
+            _index_tests(node.body, f"{prefix}{node.name}.", index)
+        elif isinstance(node, ast.If):
+            _index_tests(node.body + node.orelse, prefix, index)
+
+
 def _test_index(source: str) -> dict[str, TestDef] | None:
-    """Each test in `source` by identity: `test_name` at module level, `Class.test_name` in a class body.
-    None when the source does not parse."""
+    """Each test in `source` by identity: its dotted path of enclosing class and function names (see _index_tests),
+    e.g. `test_name` at module level, `Class.Inner.test_name` nested in classes. None when the source does not parse."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return None
-    index = {}
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
-            index[node.name] = node
-        elif isinstance(node, ast.ClassDef):
-            for item in node.body:
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name.startswith("test_"):
-                    index[f"{node.name}.{item.name}"] = item
+    index: dict[str, ast.AST] = {}
+    _index_tests(tree.body, "", index)
     return {
         ident: TestDef(
             fn.lineno,
@@ -376,7 +385,12 @@ def inspect_diff(repo: guards.Repo, since: str) -> list[dict]:
             if c.kind == "added" and re.search(r"\b(?:skip|xfail)\b|--ignore|--deselect", c.content):
                 findings.append({"file": c.path, "kind": "skip-added", "line": c.line_num})
             name = _test_def(c.content) if c.kind == "removed" else None
-            if c.path not in compared and name and name not in added_test_names.get(c.path, set()):
+            # A compared file's removed def that an index entry owns is judged by identity (_compare_tests); any other
+            # removed def falls back to the line rule.
+            unowned = c.path not in compared or not any(
+                t.start <= c.line_num <= t.end for t in compared[c.path][0].values()
+            )
+            if unowned and name and name not in added_test_names.get(c.path, set()):
                 findings.append({"file": c.path, "kind": "test-deleted", "line": c.line_num})
 
         if _is_gate_config(c.path):

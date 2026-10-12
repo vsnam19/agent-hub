@@ -275,7 +275,7 @@ def test_review_brief_lists_touched_findings(env_sandbox, repo):
     result = go(repo, ["codex:m1"], role="review", brief="", base="master")
     sent = (job_dir(result) / "brief.md").read_text()
     assert "## Gate-touched findings to judge" in sent
-    assert "- test_a.py assert-removed lines [2]" in sent
+    assert "- test_a.py assert-removed lines 2" in sent
     assert "`## Gate-touched` section" in sent
     assert sent.index("## Gate-touched findings to judge") < sent.index("## Findings")
 
