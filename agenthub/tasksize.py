@@ -11,6 +11,8 @@ DELIVERABLE = re.compile(r"^\d+\.\s+\S")
 TEST_NAME = re.compile(r"`(?:[^`\s]+::)?(test_\w+)`")
 BACKTICKED = re.compile(r"`([^`]+)`")
 FILE_EXTENSION = re.compile(r"\.[A-Za-z][A-Za-z0-9]*$")
+CHANGE_WORD = re.compile(r"\bchanges?\b|\bchanged\b")
+WHITESPACE = re.compile(r"\s")
 
 
 def _sections(text: str) -> dict[str, list[str]]:
@@ -22,6 +24,14 @@ def _sections(text: str) -> dict[str, list[str]]:
         elif current is not None:
             current.append(line)
     return sections
+
+
+def _section(sections: dict[str, list[str]], name: str) -> list[str] | None:
+    """Body of the first heading whose text starts with name, case-insensitively; None if absent."""
+    for heading, body in sections.items():
+        if heading.lower().startswith(name.lower()):
+            return body
+    return None
 
 
 def _only_bullets(lines: list[str]) -> list[str]:
@@ -40,26 +50,29 @@ def _only_bullets(lines: list[str]) -> list[str]:
 
 
 def _paths(text: str) -> set[str]:
-    """Backticked spans that name a file: contain '/' or end in an extension; `path::test` forms are skipped."""
+    """Backticked spans that name a file: no whitespace, has '/' or an extension; `path::test` forms are skipped."""
     return {
-        span for span in BACKTICKED.findall(text) if "::" not in span and ("/" in span or FILE_EXTENSION.search(span))
+        span
+        for span in BACKTICKED.findall(text)
+        if not WHITESPACE.search(span) and "::" not in span and ("/" in span or FILE_EXTENSION.search(span))
     }
 
 
 def check(text: str) -> list[str]:
     """One problem string per violated rule; an empty list means the brief is small enough."""
     sections = _sections(text)
-    problems = [f"missing heading: ## {name}" for name in HEADINGS if name not in sections]
+    problems = [f"missing heading: ## {name}" for name in HEADINGS if _section(sections, name) is None]
+    expected = _section(sections, "Expected output") or []
 
-    deliverables = sum(1 for line in sections.get("Expected output", []) if DELIVERABLE.match(line))
+    deliverables = sum(1 for line in expected if DELIVERABLE.match(line))
     if deliverables > MAX_DELIVERABLES:
         problems.append(f"too many deliverables: {deliverables} (max {MAX_DELIVERABLES})")
 
     files = set()
-    for bullet in _only_bullets(sections.get("Constraints", [])):
-        if "change" in bullet:
+    for bullet in _only_bullets(_section(sections, "Constraints") or []):
+        if CHANGE_WORD.search(bullet):
             files |= _paths(bullet)
-    files |= _paths("\n".join(sections.get("Expected output", [])))
+    files |= _paths("\n".join(expected))
     if len(files) > MAX_FILES:
         problems.append(f"too many files: {len(files)} (max {MAX_FILES})")
 

@@ -72,6 +72,28 @@ def test_wrapped_only_line_counted():
     assert check(make_brief(only_lines=only_lines)) == ["too many files: 4 (max 3)"]
 
 
+def test_commands_not_counted_as_files():
+    # A command with '/' and spaces is not a path; the three Only files are still the whole file count.
+    files = ["agenthub/a.py", "agenthub/b.py", "agenthub/c.py"]
+    extra = ["   Run `grep -r foo agenthub/` first."]
+    assert check(make_brief(files=files, extra_expected=extra)) == []
+
+
+def test_unchanged_is_not_change():
+    # "unchanged" and "changelog" are not the word "change", so their backticked paths are not Only files.
+    files = ["agenthub/a.py", "agenthub/b.py", "agenthub/c.py", "agenthub/d.py"]
+    unchanged = [f"- Only {', '.join(f'`{path}`' for path in files)} are unchanged.", ""]
+    changelog = [f"- Only {', '.join(f'`{path}`' for path in files)} go in changelog.", ""]
+    assert check(make_brief(only_lines=unchanged)) == []
+    assert check(make_brief(only_lines=changelog)) == []
+
+
+def test_heading_with_suffix():
+    # Headings match by their leading name, case-insensitively, so suffixes such as "(E1)" or ":" are allowed.
+    text = make_brief().replace("## Gate", "## Gate: final").replace("## Expected output", "## expected OUTPUT (E1)")
+    assert check(text) == []
+
+
 def test_non_path_backticks_ignored():
     # Commands, bare words and path::test names are not files, so the brief stays within the file limit.
     extra = [
