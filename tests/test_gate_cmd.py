@@ -1,6 +1,11 @@
 import json
+import os
+import signal
 import subprocess
 
+import pytest
+
+from agenthub import gateguard, process
 from agenthub.cli import main
 from agenthub.config import paths
 from agenthub.jobs import list_jobs
@@ -48,6 +53,16 @@ def test_gate_cmd_records_head_and_sha(env_sandbox, repo, capsys):
     assert [g["sha"] for g in out["gate"]] == [head]
     [recorded] = list_jobs(paths(), 10)
     assert recorded["id"] == out["id"]
+
+
+def test_gate_has_no_base_option(env_sandbox, repo, capsys):
+    set_repo_gates(repo, ["true"])
+
+    rc = main(["gate", "-d", str(repo), "--base", "HEAD"])
+
+    assert rc == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
+    assert list_jobs(paths(), 10) == []
 
 
 def test_gate_cmd_failure_exit_9(env_sandbox, repo, capsys):
@@ -111,7 +126,7 @@ def test_gate_job_records_gate_touched_and_ready_reports_it(env_sandbox, repo, c
 
     ready_out = json.loads(capsys.readouterr().out)
     assert rc == 1
-    assert "gate touched: 1 findings — inspect before merging" in ready_out["problems"]
+    assert "gate touched: 1 findings not judged by the reviewer" in ready_out["problems"]
 
 
 def test_gate_cmd_repo_gates_run_before_cli_gates(env_sandbox, repo, capsys):
@@ -163,7 +178,7 @@ def test_weakened_config_in_head_is_ignored_and_flagged(env_sandbox, repo, capsy
 
     ready_out = json.loads(capsys.readouterr().out)
     assert rc == 1
-    assert "gate touched: 1 findings — inspect before merging" in ready_out["problems"]
+    assert "gate touched: 1 findings not judged by the reviewer" in ready_out["problems"]
 
 
 def test_gate_job_falls_back_to_worktree_config_when_base_has_none(env_sandbox, repo, capsys):
@@ -218,3 +233,91 @@ def test_gate_refuses_only_when_no_gates_anywhere(env_sandbox, repo, capsys):
     assert rc == 0
     assert out["repo_gates_source"] == "worktree"
     assert [g["cmd"] for g in out["gate"]] == ["test -f feature.txt"]
+
+
+def test_gate_job_sigterm_marks_cancelled(env_sandbox, repo, capsys, monkeypatch):
+    set_repo_gates(repo, ["true"])
+
+    def sigterm_during_gate(inv, cwd, env, attempt_dir, timeout, on_start):
+        (attempt_dir / "stdout").write_text("")
+        (attempt_dir / "stderr").write_text("")
+        os.kill(os.getpid(), signal.SIGTERM)
+        return process.Ran(rc=-15, timed_out=False, duration_s=0.0, pgid=0)
+
+    monkeypatch.setattr(process, "run", sigterm_during_gate)
+
+    rc = main(["gate", "-d", str(repo), "--json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 130
+    assert out["status"] == "cancelled"
+    assert [j["status"] for j in list_jobs(paths(), 100) if j["kind"] == "gate"] == ["cancelled"]
+
+
+def test_gate_job_exception_marks_failed(env_sandbox, repo, monkeypatch):
+    set_repo_gates(repo, ["true"])
+
+    def crash(*args, **kwargs):
+        raise OSError("boom")
+
+    monkeypatch.setattr(process, "run", crash)
+
+    with pytest.raises(OSError, match="boom"):
+        main(["gate", "-d", str(repo)])
+
+    assert [j["status"] for j in list_jobs(paths(), 100) if j["kind"] == "gate"] == ["failed"]
+
+
+def test_cancelled_gate_job_skips_gateguard(env_sandbox, repo, capsys, monkeypatch):
+    set_repo_gates(repo, ["true"])
+    calls = []
+
+    def fake_inspect(repo_, since):
+        calls.append(since)
+        return [{"file": "test_a.py", "kind": "assert-removed", "lines": [1]}]
+
+    def sigterm_during_gate(inv, cwd, env, attempt_dir, timeout, on_start):
+        (attempt_dir / "stdout").write_text("")
+        (attempt_dir / "stderr").write_text("")
+        os.kill(os.getpid(), signal.SIGTERM)
+        return process.Ran(rc=-15, timed_out=False, duration_s=0.0, pgid=0)
+
+    monkeypatch.setattr(process, "run", sigterm_during_gate)
+    monkeypatch.setattr(gateguard, "inspect_diff", fake_inspect)
+
+    rc = main(["gate", "-d", str(repo), "--json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 130
+    assert out["status"] == "cancelled"
+    assert calls == []
+    assert out["gate_touched"] == []
+
+
+def test_review_cancel_after_last_repo_gate_is_not_a_pass(env_sandbox, repo, capsys, monkeypatch):
+    set_repo_gates(repo, ["true"])
+    head = git_head(repo)
+    calls = []
+
+    def sigterm_after_repo_gate(inv, cwd, env, attempt_dir, timeout, on_start):
+        calls.append(inv.argv)
+        (attempt_dir / "stdout").write_text("")
+        (attempt_dir / "stderr").write_text("")
+        os.kill(os.getpid(), signal.SIGTERM)
+        return process.Ran(rc=0, timed_out=False, duration_s=0.0, pgid=0)
+
+    monkeypatch.setattr(process, "run", sigterm_after_repo_gate)
+
+    rc = main(["gate", "-d", str(repo), "--gate", "echo extra", "--json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 130
+    assert out["status"] == "cancelled"
+    assert [g["cmd"] for g in out["gate"]] == ["true"]
+    assert len(calls) == 1
+
+    rc = main(["ready", "-d", str(repo), "--json"])
+
+    ready_out = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert f"no passing gate on {head}" in ready_out["problems"]

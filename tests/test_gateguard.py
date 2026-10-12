@@ -285,3 +285,377 @@ def test_agent_hub_config_is_gate_config(repo):
     res = gateguard.inspect_diff(guards.inspect(repo), since)
     assert {"file": ".agent-hub/config.toml", "kind": "gate-config-changed", "lines": [1]} in res
     assert {"file": ".agent-hub/standing-orders.md", "kind": "gate-config-changed", "lines": [1]} in res
+
+
+def test_assert_replaced_by_stronger_not_flagged(repo):
+    test_file = repo / "test_g.py"
+    test_file.write_text("def test_a():\n    assert x == 1\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("def test_a():\n    assert x == 1 and y == 2\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == []
+
+
+def test_assert_count_drop_flagged(repo):
+    test_file = repo / "test_h.py"
+    test_file.write_text("def test_a():\n    assert 1\n    assert 2\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("def test_a():\n    assert 1\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == [{"file": "test_h.py", "kind": "assert-removed", "lines": [3]}]
+
+
+def test_same_name_other_class_deleted_flagged(repo):
+    test_file = repo / "test_i.py"
+    test_file.write_text(
+        "class TestA:\n    def test_x(self):\n        assert 1\nclass TestB:\n    def test_x(self):\n        assert 1\n"
+    )
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add tests")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("class TestB:\n    def test_x(self):\n        assert 1\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == [{"file": "test_i.py", "kind": "test-deleted", "lines": [2]}]
+
+
+def test_nested_class_test_deleted_flagged(repo):
+    test_file = repo / "test_k.py"
+    test_file.write_text(
+        "class TestOuter:\n    class TestInner:\n        def test_x(self):\n            assert 1\n"
+        "    def test_y(self):\n        assert 1\n"
+    )
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add tests")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("class TestOuter:\n    def test_y(self):\n        assert 1\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == [{"file": "test_k.py", "kind": "test-deleted", "lines": [3]}]
+
+
+def test_test_under_module_if_deleted_flagged(repo):
+    test_file = repo / "test_l.py"
+    test_file.write_text("if True:\n    def test_x():\n        assert 1\ndef test_y():\n    assert 1\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add tests")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("def test_y():\n    assert 1\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == [{"file": "test_l.py", "kind": "test-deleted", "lines": [2]}]
+
+
+def test_def_outside_index_deleted_falls_back_to_line_rule(repo):
+    test_file = repo / "test_m.py"
+    test_file.write_text("try:\n    def test_x():\n        assert 1\nexcept ImportError:\n    pass\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add tests")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("try:\n    pass\nexcept ImportError:\n    pass\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert {"file": "test_m.py", "kind": "test-deleted", "lines": [2]} in res
+
+
+def test_unparsable_test_file_falls_back_to_line_rules(repo):
+    test_file = repo / "test_j.py"
+    test_file.write_text("def test_a():\n    assert 1\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("def test_a(:\n    pass\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert {"file": "test_j.py", "kind": "assert-removed", "lines": [2]} in res
+
+
+def _weaken_test(repo, before, after):
+    test_file = repo / "test_k.py"
+    test_file.write_text(before)
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text(after)
+    return gateguard.inspect_diff(guards.inspect(repo), since)
+
+
+def test_or_true_is_flagged(repo):
+    res = _weaken_test(repo, "def test_a():\n    assert x == 1\n", "def test_a():\n    assert x == 1 or True\n")
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_negated_assert_is_flagged(repo):
+    res = _weaken_test(repo, "def test_a():\n    assert x == 1\n", "def test_a():\n    assert not (x == 1)\n")
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_assert_moved_under_if_false_is_flagged(repo):
+    res = _weaken_test(
+        repo, "def test_a():\n    assert x == 1\n", "def test_a():\n    if False:\n        assert x == 1\n"
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_assert_wrapped_in_try_except_is_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    assert x == 1\n",
+        "def test_a():\n    try:\n        assert x == 1\n    except AssertionError:\n        pass\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_assert_call_inside_false_and_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a(self):\n    self.assertEqual(x, 1)\n",
+        "def test_a(self):\n    False and self.assertEqual(x, 1)\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_assert_call_inside_lambda_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a(self):\n    self.assertEqual(x, 1)\n",
+        "def test_a(self):\n    f = lambda: self.assertEqual(x, 1)\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_assert_call_inside_comprehension_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a(self):\n    self.assertEqual(x, 1)\n",
+        "def test_a(self):\n    [self.assertEqual(v, 1) for v in x]\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_and_conjunction_with_original_not_flagged(repo):
+    res = _weaken_test(repo, "def test_a():\n    assert x == 1\n", "def test_a():\n    assert x == 1 and y\n")
+    assert res == []
+
+
+def test_assert_inside_pytest_raises_is_kept(repo):
+    res = _weaken_test(
+        repo,
+        "import pytest\n\n\ndef test_a():\n    with pytest.raises(ValueError):\n        int('a')\n",
+        "import pytest\n\n\ndef test_a():\n    with pytest.raises(ValueError):\n        int('a')\n    assert 1\n",
+    )
+    assert res == []
+
+
+def test_pytest_raises_replaced_by_other_exception_is_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "import pytest\n\n\ndef test_a():\n    with pytest.raises(ValueError):\n        int('a')\n",
+        "import pytest\n\n\ndef test_a():\n    with pytest.raises(KeyError):\n        int('a')\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [5]}]
+
+
+def test_assert_moved_into_raises_assertionerror_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    assert x == 1\n",
+        "import pytest\n\n\ndef test_a():\n    with pytest.raises(AssertionError):\n        assert x == 1\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_assert_after_raise_in_raises_block_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    assert x == 1\n",
+        "import pytest\n\n\ndef test_a():\n    with pytest.raises(ValueError):\n"
+        "        raise ValueError\n        assert x == 1\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_assert_kept_in_same_raises_block_not_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "import pytest\n\n\ndef test_a():\n    with pytest.raises(ValueError):\n"
+        "        int('a')\n        assert y == 2\n",
+        "import pytest\n\n\ndef test_a():\n    with pytest.raises(ValueError):\n"
+        "        y = 1\n        int('a')\n        assert y == 2\n",
+    )
+    assert res == []
+
+
+UNITTEST_HEAD = "import unittest\n\n\nclass TestA(unittest.TestCase):\n    def test_a(self):\n"
+
+
+def test_direct_unittest_assert_call_kept(repo):
+    res = _weaken_test(
+        repo,
+        UNITTEST_HEAD + "        self.assertEqual(x, 1)\n",
+        UNITTEST_HEAD + "        self.assertEqual(x, 1)\n        self.assertTrue(y)\n",
+    )
+    assert res == []
+
+
+def test_unittest_assert_call_under_if_is_flagged(repo):
+    res = _weaken_test(
+        repo,
+        UNITTEST_HEAD + "        self.assertEqual(x, 1)\n",
+        UNITTEST_HEAD + "        if False:\n            self.assertEqual(x, 1)\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [6]}]
+
+
+TRY_ASSERT_TEST = "def test_a():\n    try:\n        assert x == 1\n    except ValueError:\n        pass\n"
+
+
+def test_unchanged_test_with_try_asserts_not_flagged(repo):
+    test_file = repo / "test_l.py"
+    test_file.write_text(TRY_ASSERT_TEST)
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    # the file is touched, the test is not: a new test is added beside it
+    test_file.write_text(TRY_ASSERT_TEST + "\n\ndef test_b():\n    assert 1\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == []
+
+
+def test_changed_test_with_try_assert_removed_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    try:\n        assert x == 1\n    except ValueError:\n        pass\n    assert y\n",
+        "def test_a():\n    try:\n        pass\n    except ValueError:\n        pass\n    assert y\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [3]}]
+
+
+def test_assert_after_early_return_flagged(repo):
+    res = _weaken_test(repo, "def test_a():\n    assert x == 1\n", "def test_a():\n    return\n    assert x == 1\n")
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [1]}]
+
+
+def test_assert_after_conditional_return_not_flagged(repo):
+    res = _weaken_test(
+        repo, "def test_a():\n    assert x == 1\n", "def test_a():\n    if x:\n        return\n    assert x == 1\n"
+    )
+    assert res == []
+
+
+def test_unchanged_nested_comprehension_assert_not_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a(self):\n    [self.assertEqual(v, 1) for v in x]\n    assert y\n",
+        "def test_a(self):\n    [self.assertEqual(v, 1) for v in x]\n    assert y\n    assert z\n",
+    )
+    assert res == []
+
+
+def test_assert_moved_out_of_try_to_top_level_not_flagged(repo):
+    res = _weaken_test(
+        repo,
+        TRY_ASSERT_TEST,
+        "def test_a():\n    assert x == 1\n    try:\n        pass\n    except ValueError:\n        pass\n",
+    )
+    assert res == []
+
+
+def test_renamed_and_edited_test_file_assert_removal_flagged(repo):
+    test_file = repo / "test_old.py"
+    test_file.write_text(
+        "def test_foo():\n    assert 1 == 1\n    assert 2 == 2\n    assert 3 == 3\n    assert 4 == 4\n"
+    )
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    run_git(repo, "mv", "test_old.py", "test_new.py")
+    (repo / "test_new.py").write_text("def test_foo():\n    assert 1 == 1\n    assert 2 == 2\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == [{"file": "test_old.py", "kind": "test-deleted", "lines": [1]}]
+
+
+def test_unreadable_base_falls_back_to_line_rule(repo, monkeypatch):
+    test_file = repo / "test_u.py"
+    test_file.write_text("def test_foo():\n    assert 1 == 1\n    assert 2 == 2\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("def test_foo():\n    assert 1 == 1\n")
+    monkeypatch.setattr(gateguard, "_git_show", lambda *args: None)
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == [{"file": "test_u.py", "kind": "assert-removed", "lines": [3]}]
+
+
+def test_if_true_return_above_assert_flagged(repo):
+    res = _weaken_test(
+        repo, "def test_a():\n    assert x == 1\n", "def test_a():\n    if True:\n        return\n    assert x == 1\n"
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [1]}]
+
+
+def test_not_false_raise_above_assert_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    assert x == 1\n",
+        "def test_a():\n    while not False:\n        raise ValueError\n    assert x == 1\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [1]}]
+
+
+def test_while_true_with_break_above_assert_not_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    assert x == 1\n",
+        "def test_a():\n    while True:\n        break\n    assert x == 1\n",
+    )
+    assert res == []
+
+
+def test_latin1_test_file_does_not_crash_and_uses_line_rule(repo):
+    test_file = repo / "test_l.py"
+    test_file.write_text("def test_a():\n    assert x == 1\n    assert y == 2\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_bytes("def test_a():\n    # caf\xe9\n    assert x == 1\n".encode("latin-1"))
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == [{"file": "test_l.py", "kind": "assert-removed", "lines": [3]}]
+
+
+def test_review_if_made_always_false_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    if x:\n        assert y == 1\n",
+        "def test_a():\n    if False:\n        assert y == 1\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_review_for_emptied_iterable_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a(items):\n    for v in items:\n        assert v == 1\n",
+        "def test_a(items):\n    for v in []:\n        assert v == 1\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_review_except_type_changed_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    try:\n        assert x == 1\n    except ValueError:\n        pass\n",
+        "def test_a():\n    try:\n        assert x == 1\n    except AssertionError:\n        pass\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [4]}]

@@ -17,7 +17,7 @@ from agenthub import brief as briefmod
 from agenthub import env, gateguard, guards, handoff, process
 from agenthub.agents import Classified, Outcome, Request, registry
 from agenthub.config import ConfigError, Paths, Pool
-from agenthub.jobs import Job, new_job
+from agenthub.jobs import Job, list_jobs, new_job
 from agenthub.pool import Cooldowns, Link
 from agenthub.procinfo import start_time
 
@@ -101,19 +101,30 @@ def merge_gates(repo: list[str], cli: list[str]) -> list[str]:
     return merged
 
 
-def run_gates(gates: list[str], workdir: Path, gate_dir: Path, sha: str) -> tuple[list[dict], bool]:
-    """Run gate commands in order in `workdir`, logs under `gate_dir`, stopping at the first failure.
-    Returns the gate records, each stamped with `sha`, and whether every gate passed."""
+def run_gates(
+    gates: list[str], workdir: Path, gate_dir: Path, sha: str, cancel: "_Cancel | None" = None
+) -> tuple[list[dict], bool]:
+    """Run gate commands in order in `workdir`, logs under `gate_dir`, stopping at the first failure or once `cancel`
+    has been signalled. Returns the gate records, each stamped with `sha`, and whether every gate passed."""
     gate_env, _ = env.child_env(os.environ, ())
     gate_dir.mkdir(exist_ok=True)
 
     records: list[dict] = []
     for n, cmd in enumerate(gates, start=1):
+        if cancel is not None and cancel.cancelled:
+            return records, False
         attempt_dir = gate_dir / str(n)
         attempt_dir.mkdir(exist_ok=True)
 
         inv = process.Invocation(argv=["bash", "-c", cmd], stdin_path=None)
-        ran = process.run(inv, workdir, gate_env, attempt_dir, timedelta(seconds=GATE_TIMEOUT_S))
+
+        def on_start(pgid: int) -> None:
+            if cancel is not None:
+                cancel.pgid = pgid
+
+        ran = process.run(inv, workdir, gate_env, attempt_dir, timedelta(seconds=GATE_TIMEOUT_S), on_start=on_start)
+        if cancel is not None:
+            cancel.pgid = None
 
         stdout_text = (attempt_dir / "stdout").read_text(errors="replace")
         stderr_text = (attempt_dir / "stderr").read_text(errors="replace")
@@ -180,8 +191,17 @@ def run_gate_job(
         "diffstat": "",
         "reply_path": None,
     }
-    record["gate"], passed = run_gates(merge_gates(defaults, cli_gates), repo.root, job.dir / "gate", head)
-    record["gate_touched"] = gateguard.inspect_diff(repo, since)
+    with _Cancel() as cancel:
+        try:
+            record["gate"], passed = run_gates(
+                merge_gates(defaults, cli_gates), repo.root, job.dir / "gate", head, cancel
+            )
+            record["gate_touched"] = [] if cancel.cancelled else gateguard.inspect_diff(repo, since)
+        except BaseException:
+            _finish(job, record, "failed", now, started)
+            raise
+    if cancel.cancelled:
+        return _finish(job, record, "cancelled", now, started)
     return _finish(job, record, "ok" if passed else "gate-failed", now, started)
 
 
@@ -272,7 +292,8 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     if kind == "implement":
         text += "\n" + handoff.FOOTER
     else:
-        text += "\n\n" + handoff.REVIEW_FOOTER
+        judge = _touched_section(touched_findings(list_jobs(p, 100000), workdir, guards.head(repo))) if repo else ""
+        text += "\n\n" + judge + handoff.REVIEW_FOOTER
     (job.dir / "brief.md").write_text(text)
     pid = os.getpid()
     (job.dir / "pid").write_text(json.dumps({"pid": pid, "start_time": start_time(pid)}))
@@ -402,7 +423,9 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         record["handoff_missing"] = False
         reply_path = record.get("reply_path")
         if status == "ok" and reply_path and Path(reply_path).is_file():
-            record["verdict"] = handoff.parse_verdict(Path(reply_path).read_text())
+            reply_text = Path(reply_path).read_text()
+            record["verdict"] = handoff.parse_verdict(reply_text)
+            record["touched_review"] = handoff.parse_touched_entries(reply_text)
 
     record["gate"] = []
     if status == "ok" and kind == "implement" and gates:
@@ -431,9 +454,9 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     return _finish(job, record, status or "exhausted", now, started)
 
 
-def readiness(jobs: list[dict], workdir: Path, head: str, accept_touched: bool = False) -> list[str]:
+def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
     """What still blocks a merge of `workdir` at `head`; empty when ready. `jobs` are result records, newest first.
-    `accept_touched` lifts the block on gate_touched findings once the director has read them."""
+    Gate-touched findings are never waved through: an approving non-implementer review of `head` must judge each."""
     mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == workdir.resolve()]
 
     def who(j: dict) -> str:
@@ -445,42 +468,92 @@ def readiness(jobs: list[dict], workdir: Path, head: str, accept_touched: bool =
     problems = []
     if not gated:
         problems.append(f"no passing gate on {head}")
-    elif not accept_touched:
-        touched = touched_findings(jobs, workdir, head)
-        if touched:
-            problems.append(f"gate touched: {len(touched)} findings — inspect before merging")
     if not implementers:
         problems.append("no implementer recorded: cannot check reviewer independence")
+    judges: list[dict] = []
     if not reviews:
         problems.append("no review")
-        return problems
-    on_head = [r for r in reviews if r.get("head") == head]
-    if not on_head:
-        problems.append(f"review is stale (reviewed {reviews[0].get('head')})")
-        return problems
-    approved = [r for r in on_head if r["verdict"] == "approve"]
-    if not approved:
-        problems.append(f"review verdict {on_head[0]['verdict']}")
-    elif all(who(r) in implementers for r in approved):
-        problems.append("reviewer is the implementer")
+    else:
+        on_head = [r for r in reviews if r.get("head") == head]
+        if not on_head:
+            problems.append(f"review is stale (reviewed {reviews[0].get('head')})")
+        else:
+            approved = [r for r in on_head if r["verdict"] == "approve"]
+            if not approved:
+                problems.append(f"review verdict {on_head[0]['verdict']}")
+            elif all(who(r) in implementers for r in approved):
+                problems.append("reviewer is the implementer")
+            judges = [r for r in on_head if who(r) not in implementers]
+    if gated:
+        problems.extend(_touched_problems(touched_findings(jobs, workdir, head), judges))
     return problems
 
 
+def _touched_problems(findings: list[dict], judges: list[dict]) -> list[str]:
+    """Problems with `findings` given the independent reviews of head `judges`: weakening or unjudged ones. A
+    weakening judgement counts from any verdict and blocks whatever the other reviews say; a legitimate one only from
+    an approval."""
+    weakened: set[tuple[str, str, tuple[int, ...]]] = set()
+    legitimate: set[tuple[str, str, tuple[int, ...]]] = set()
+    for r in judges:
+        for e in r.get("touched_review") or []:
+            key = (e.get("file"), e.get("kind"), tuple(sorted(e.get("lines") or [])))
+            if e.get("judgement") == "weakening":
+                weakened.add(key)
+            elif e.get("judgement") == "legitimate" and r["verdict"] == "approve":
+                legitimate.add(key)
+    problems = []
+    unjudged = 0
+    for f in findings:
+        key = (f["file"], f["kind"], tuple(sorted(f["lines"])))
+        if key in weakened:
+            lines = ",".join(str(n) for n in f["lines"])
+            problems.append(f"reviewer judged {f['file']} {f['kind']} lines {lines} as weakening")
+        elif key not in legitimate:
+            unjudged += 1
+    if unjudged:
+        problems.insert(0, f"gate touched: {unjudged} findings not judged by the reviewer")
+    return problems
+
+
+def _touched_section(findings: list[dict]) -> str:
+    """The review-brief section asking the reviewer to judge each gate-touched finding; empty when there are none."""
+    if not findings:
+        return ""
+    lines = "\n".join(f"- {f['file']} {f['kind']} lines {','.join(str(n) for n in f['lines'])}" for f in findings)
+    return (
+        "## Gate-touched findings to judge\n\n"
+        "The gate guard flagged these changes to the checks themselves. Read each hunk and judge it independently.\n\n"
+        f"{lines}\n\n"
+        "In your final message add a `## Gate-touched` section with one line per finding:\n"
+        "`<file> <kind> lines <l1,l2> — legitimate|weakening — <reason>`, naming the same lines as the finding.\n"
+        "A judgement covers only the lines it names.\n\n"
+    )
+
+
 def touched_findings(jobs: list[dict], workdir: Path, head: str) -> list[dict]:
-    """The gate_touched findings of the first passing gate on `head` for `workdir`; empty when none."""
+    """The gate_touched findings of every passing gate on `head` for `workdir`, deduplicated by (file, kind, lines);
+    empty when none. A later clean gate does not hide an earlier finding. `jobs` are result records, newest first."""
     mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == workdir.resolve()]
-    return next((j["gate_touched"] for j in mine if _passed_gate(j, head) and j.get("gate_touched")), [])
+    found: dict[tuple[str, str, tuple[int, ...]], dict] = {}
+    for j in mine:
+        if not _passed_gate(j, head):
+            continue
+        for f in j.get("gate_touched") or []:
+            found.setdefault((f["file"], f["kind"], tuple(sorted(f["lines"]))), f)
+    return list(found.values())
 
 
 def _passed_gate(j: dict, head: str) -> bool:
-    """Whether job `j` is a gate that passed on `head`; a gate job must also have run every repo default gate."""
+    """Whether job `j` is a gate that passed on `head`; a gate job must also have completed (status ok, not cancelled
+    after some gates) and have run every repo default gate."""
     if j.get("kind") not in ("implement", "gate") or j.get("head") != head or not j.get("gate"):
         return False
     if not all(g.get("rc") == 0 and g.get("sha") == head for g in j["gate"]):
         return False
     if j["kind"] == "gate":
         ran = {g.get("cmd") for g in j["gate"]}
-        return bool(j.get("repo_gates")) and set(j["repo_gates"]) <= ran
+        return j.get("status") == "ok" and bool(j.get("repo_gates")) and set(j["repo_gates"]) <= ran
     return True
 
 

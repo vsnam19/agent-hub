@@ -1,4 +1,5 @@
-from agenthub.handoff import FOOTER, REVIEW_FOOTER, parse, parse_verdict
+from agenthub.handoff import FOOTER, REVIEW_FOOTER, parse, parse_touched_review, parse_verdict
+from agenthub.orchestrate import _touched_section
 
 
 def test_parse_full_handoff():
@@ -141,3 +142,39 @@ def test_review_footer_asks_for_findings_and_verdict_in_final_message():
     assert "## Verdict" in REVIEW_FOOTER
     assert "only part of your answer that is kept" in REVIEW_FOOTER
     assert REVIEW_FOOTER.index("## Findings") < REVIEW_FOOTER.index("## Verdict")
+
+
+def test_parse_touched_review():
+    reply = (
+        "## Findings\n(none)\n\n## Gate-touched\n"
+        "- a/test_x.py assert-removed lines 4,2 — legitimate — assertion moved into a helper\n"
+        "b.toml gate-config-changed lines 1 — weakening — drops the lint gate\n"
+        "garbage line\n"
+        "c.py test-deleted — maybe — unsure\n"
+        "d.py assert-removed lines 3 — legitimate — ok\n"
+        "d.py assert-removed lines 3 — weakening — but not really\n\n"
+        "## Verdict\napprove\n"
+    )
+    assert parse_touched_review(reply) == {
+        ("a/test_x.py", "assert-removed", (2, 4)): "legitimate",
+        ("b.toml", "gate-config-changed", (1,)): "weakening",
+        ("d.py", "assert-removed", (3,)): "weakening",
+    }
+    assert parse_touched_review("## Verdict\napprove\n") == {}
+
+
+def test_review_backticked_target_is_parsed():
+    reply = "## Gate-touched\n`t.py assert-removed lines 2` — legitimate — ok\n"
+    assert parse_touched_review(reply) == {("t.py", "assert-removed", (2,)): "legitimate"}
+
+
+def test_review_brief_lines_format_parses():
+    brief = _touched_section([{"file": "t.py", "kind": "assert-removed", "lines": [152, 165]}])
+    assert "- t.py assert-removed lines 152,165\n" in brief
+    assert "lines [" not in brief
+    assert parse_touched_review("## Gate-touched\nt.py assert-removed lines 152,165 — legitimate — ok\n") == {
+        ("t.py", "assert-removed", (152, 165)): "legitimate",
+    }
+    assert parse_touched_review("## Gate-touched\nt.py assert-removed lines [152, 165] — weakening — no\n") == {
+        ("t.py", "assert-removed", (152, 165)): "weakening",
+    }

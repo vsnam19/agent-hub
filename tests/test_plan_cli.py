@@ -330,3 +330,26 @@ def test_plan_cancel_missing_plan_repo(env_sandbox, tmp_path, capsys):
     finally:
         runner.kill()
         runner.wait()
+
+
+def test_plan_cancel_corrupt_state(env_sandbox, tmp_path, capsys):
+    repo = tmp_path / "repo"
+    make_repo(repo)
+    plan_file = make_plan_file(tmp_path, repo)
+    state_file = plan_file.parent / "state.json"
+    runner = _sleeper()
+    try:
+        (plan_file.parent / "runner.pid").write_text(
+            json.dumps({"pid": runner.pid, "start_time": start_time(runner.pid)})
+        )
+        state_file.write_text('{"runner": ')
+
+        assert main(["plan", "cancel", str(plan_file), "-d", str(repo)]) == 2
+
+        assert runner.wait(timeout=10) == -15
+        captured = capsys.readouterr()
+        assert f"plan state unreadable: {state_file}" in captured.err
+        assert f"sent SIGTERM to runner {runner.pid}" in captured.out
+    finally:
+        runner.kill()
+        runner.wait()

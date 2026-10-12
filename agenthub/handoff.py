@@ -52,6 +52,52 @@ def parse_verdict(reply: str) -> str | None:
     return None
 
 
+def parse_touched_entries(reply: str) -> list[dict]:
+    """The lines under the last `## Gate-touched` heading as {file, kind, lines, judgement, reason}. A line reads
+    `<file> <kind> lines <l1,l2> — legitimate|weakening — reason` (`lines [l1, l2]` is accepted too); bad lines are
+    skipped."""
+    matches = list(re.finditer(r"^#{2,}\s+gate-touched\s*$", reply, re.IGNORECASE | re.MULTILINE))
+    if not matches:
+        return []
+    entries = []
+    for line in reply[matches[-1].end() :].splitlines():
+        if re.match(r"^#{2,}\s", line):
+            break
+        parts = re.split(r"\s+[—–]\s+", line.strip().removeprefix("- ").removeprefix("* ").strip("`"), maxsplit=2)
+        if len(parts) < 2:
+            continue
+        # `[152, 165]` reads as `152,165`, so the list form splits like the comma form
+        # A target wrapped in backticks (`t.py assert-removed lines 2`) reads as its bare form
+        target = re.sub(r"\[([^\]]*)\]", lambda m: m.group(1).replace(" ", ""), parts[0].replace("`", "")).split()
+        judgement = parts[1].strip().lower().rstrip(".,;:")
+        if len(target) != 4 or target[2] != "lines" or judgement not in ("legitimate", "weakening"):
+            continue
+        try:
+            lines = sorted(int(n) for n in target[3].split(","))
+        except ValueError:
+            continue
+        entries.append(
+            {
+                "file": target[0],
+                "kind": target[1],
+                "lines": lines,
+                "judgement": judgement,
+                "reason": parts[2].strip() if len(parts) > 2 else "",
+            }
+        )
+    return entries
+
+
+def parse_touched_review(reply: str) -> dict[tuple[str, str, tuple[int, ...]], str]:
+    """The reviewer's judgement per (file, kind, lines) under `## Gate-touched`; weakening wins over legitimate."""
+    out: dict[tuple[str, str, tuple[int, ...]], str] = {}
+    for e in parse_touched_entries(reply):
+        key = (e["file"], e["kind"], tuple(e["lines"]))
+        if out.get(key) != "weakening":
+            out[key] = e["judgement"]
+    return out
+
+
 def parse(reply: str) -> dict | None:
     # find the last ## Status heading, case-insensitively, any level >= 2
     # e.g., ## status, ### Status
