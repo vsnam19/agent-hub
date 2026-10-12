@@ -1,4 +1,5 @@
 from agenthub.handoff import FOOTER, REVIEW_FOOTER, parse, parse_touched_review, parse_verdict
+from agenthub.orchestrate import _touched_section
 
 
 def test_parse_full_handoff():
@@ -160,3 +161,15 @@ def test_parse_touched_review():
         ("d.py", "assert-removed", (3,)): "weakening",
     }
     assert parse_touched_review("## Verdict\napprove\n") == {}
+
+
+def test_review_brief_lines_format_parses():
+    brief = _touched_section([{"file": "t.py", "kind": "assert-removed", "lines": [152, 165]}])
+    assert "- t.py assert-removed lines 152,165\n" in brief
+    assert "lines [" not in brief
+    assert parse_touched_review("## Gate-touched\nt.py assert-removed lines 152,165 — legitimate — ok\n") == {
+        ("t.py", "assert-removed", (152, 165)): "legitimate",
+    }
+    assert parse_touched_review("## Gate-touched\nt.py assert-removed lines [152, 165] — weakening — no\n") == {
+        ("t.py", "assert-removed", (152, 165)): "weakening",
+    }

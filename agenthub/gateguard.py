@@ -167,6 +167,7 @@ def _assertion_places(fn: ast.AST) -> list[tuple[tuple[str, ...], ast.AST]]:
     """Each assertion in the function with its place: the enclosing compound statements, each as `Kind.field`
     (`Try.body`, `If.body`). Statements directly in the function body add no label."""
     places = []
+    dead = _dead_ids(fn)
 
     def visit(node: ast.AST, place: tuple[str, ...]) -> None:
         for field, value in ast.iter_fields(node):
@@ -175,8 +176,8 @@ def _assertion_places(fn: ast.AST) -> list[tuple[tuple[str, ...], ast.AST]]:
                     continue
                 child = place
                 if node is not fn and isinstance(item, (ast.stmt, ast.excepthandler)):
-                    child = (*place, f"{type(node).__name__}.{field}")
-                if _is_assertion(item):
+                    child = (*place, _place_label(node, field))
+                if _is_assertion(item) and id(item) not in dead:
                     places.append((child, item))
                 else:
                     visit(item, child)
@@ -188,8 +189,9 @@ def _assertion_places(fn: ast.AST) -> list[tuple[tuple[str, ...], ast.AST]]:
 def _kept_tokens(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[tuple]:
     """What a test keeps, one token per form of each assertion. A direct assertion keeps its form wherever it moved
     (`("direct", dump)`); any other keeps it only in the same place (`("placed", place, dump)`). Direct: a top-level
-    `assert` or assertion call, a `with` header call, and the body of a `with pytest.raises/warns` block. An assert's
-    forms are its test and, for an `and`, each direct operand."""
+    `assert` or assertion call and a `with` header call. A `raises/warns` body is a place of its own, keyed by its
+    with-items, so an assertion there keeps only in a block with the same exception. An assert's forms are its test
+    and, for an `and`, each direct operand."""
     direct = _direct_ids(fn.body)
     tokens = []
     for place, node in _assertion_places(fn):
@@ -213,9 +215,33 @@ def _direct_ids(body: list[ast.stmt]) -> set[int]:
             for item in stmt.items:
                 if _is_assertion(item.context_expr):
                     ids.add(id(item.context_expr))
-            if any(_is_raises(item.context_expr) for item in stmt.items):
-                ids |= _direct_ids(stmt.body)
     return ids
+
+
+def _dead_ids(fn: ast.AST) -> set[int]:
+    """Ids of the assertions in a `raises/warns` body that follow an unconditional `raise` in that body: they never
+    run, so they keep nothing."""
+    dead = set()
+    for node in ast.walk(fn):
+        if not isinstance(node, (ast.With, ast.AsyncWith)) or not any(_is_raises(i.context_expr) for i in node.items):
+            continue
+        raised = False
+        for stmt in node.body:
+            if raised:
+                dead.update(id(inner) for inner in ast.walk(stmt))
+            elif isinstance(stmt, ast.Raise):
+                raised = True
+    return dead
+
+
+def _place_label(node: ast.AST, field: str) -> str:
+    """`Kind.field`; a `raises/warns` body adds its with-items, so the exception is part of the place."""
+    label = f"{type(node).__name__}.{field}"
+    if isinstance(node, (ast.With, ast.AsyncWith)) and field == "body":
+        raises = [ast.dump(i) for i in node.items if _is_raises(i.context_expr)]
+        if raises:
+            label += f"[{' '.join(raises)}]"
+    return label
 
 
 def _compare_tests(path: str, base: dict[str, TestDef], new: dict[str, TestDef], removed: list[Change]) -> list[dict]:

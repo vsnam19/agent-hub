@@ -514,7 +514,7 @@ def _touched_section(findings: list[dict]) -> str:
     """The review-brief section asking the reviewer to judge each gate-touched finding; empty when there are none."""
     if not findings:
         return ""
-    lines = "\n".join(f"- {f['file']} {f['kind']} lines {f['lines']}" for f in findings)
+    lines = "\n".join(f"- {f['file']} {f['kind']} lines {','.join(str(n) for n in f['lines'])}" for f in findings)
     return (
         "## Gate-touched findings to judge\n\n"
         "The gate guard flagged these changes to the checks themselves. Read each hunk and judge it independently.\n\n"

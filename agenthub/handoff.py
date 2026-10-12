@@ -54,7 +54,8 @@ def parse_verdict(reply: str) -> str | None:
 
 def parse_touched_entries(reply: str) -> list[dict]:
     """The lines under the last `## Gate-touched` heading as {file, kind, lines, judgement, reason}. A line reads
-    `<file> <kind> lines <l1,l2> — legitimate|weakening — reason`; bad lines are skipped."""
+    `<file> <kind> lines <l1,l2> — legitimate|weakening — reason` (`lines [l1, l2]` is accepted too); bad lines are
+    skipped."""
     matches = list(re.finditer(r"^#{2,}\s+gate-touched\s*$", reply, re.IGNORECASE | re.MULTILINE))
     if not matches:
         return []
@@ -65,7 +66,9 @@ def parse_touched_entries(reply: str) -> list[dict]:
         parts = re.split(r"\s+[—–]\s+", line.strip().removeprefix("- ").removeprefix("* ").strip("`"), maxsplit=2)
         if len(parts) < 2:
             continue
-        target, judgement = parts[0].split(), parts[1].strip().lower().rstrip(".,;:")
+        # `[152, 165]` reads as `152,165`, so the list form splits like the comma form
+        target = re.sub(r"\[([^\]]*)\]", lambda m: m.group(1).replace(" ", ""), parts[0]).split()
+        judgement = parts[1].strip().lower().rstrip(".,;:")
         if len(target) != 4 or target[2] != "lines" or judgement not in ("legitimate", "weakening"):
             continue
         try:

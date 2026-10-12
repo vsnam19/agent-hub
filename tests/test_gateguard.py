@@ -397,6 +397,36 @@ def test_pytest_raises_replaced_by_other_exception_is_flagged(repo):
     assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [5]}]
 
 
+def test_assert_moved_into_raises_assertionerror_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    assert x == 1\n",
+        "import pytest\n\n\ndef test_a():\n    with pytest.raises(AssertionError):\n        assert x == 1\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_assert_after_raise_in_raises_block_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    assert x == 1\n",
+        "import pytest\n\n\ndef test_a():\n    with pytest.raises(ValueError):\n"
+        "        raise ValueError\n        assert x == 1\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_assert_kept_in_same_raises_block_not_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "import pytest\n\n\ndef test_a():\n    with pytest.raises(ValueError):\n"
+        "        int('a')\n        assert y == 2\n",
+        "import pytest\n\n\ndef test_a():\n    with pytest.raises(ValueError):\n"
+        "        y = 1\n        int('a')\n        assert y == 2\n",
+    )
+    assert res == []
+
+
 UNITTEST_HEAD = "import unittest\n\n\nclass TestA(unittest.TestCase):\n    def test_a(self):\n"
 
 
