@@ -483,27 +483,33 @@ def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
                 problems.append(f"review verdict {on_head[0]['verdict']}")
             elif all(who(r) in implementers for r in approved):
                 problems.append("reviewer is the implementer")
-            judges = [r for r in approved if who(r) not in implementers]
+            judges = [r for r in on_head if who(r) not in implementers]
     if gated:
         problems.extend(_touched_problems(touched_findings(jobs, workdir, head), judges))
     return problems
 
 
 def _touched_problems(findings: list[dict], judges: list[dict]) -> list[str]:
-    """Problems with `findings` given the approving independent reviews `judges`: weakening or unjudged ones."""
-    judged: dict[tuple[str, str, tuple[int, ...]], str] = {}
+    """Problems with `findings` given the independent reviews of head `judges`: weakening or unjudged ones. A
+    weakening judgement counts from any verdict and blocks whatever the other reviews say; a legitimate one only from
+    an approval."""
+    weakened: set[tuple[str, str, tuple[int, ...]]] = set()
+    legitimate: set[tuple[str, str, tuple[int, ...]]] = set()
     for r in judges:
         for e in r.get("touched_review") or []:
             key = (e.get("file"), e.get("kind"), tuple(sorted(e.get("lines") or [])))
-            if e.get("judgement") == "weakening" or key not in judged:
-                judged[key] = e.get("judgement")
+            if e.get("judgement") == "weakening":
+                weakened.add(key)
+            elif e.get("judgement") == "legitimate" and r["verdict"] == "approve":
+                legitimate.add(key)
     problems = []
     unjudged = 0
     for f in findings:
-        verdict = judged.get((f["file"], f["kind"], tuple(sorted(f["lines"]))))
-        if verdict == "weakening":
-            problems.append(f"reviewer judged {f['file']} {f['kind']} as weakening")
-        elif verdict != "legitimate":
+        key = (f["file"], f["kind"], tuple(sorted(f["lines"])))
+        if key in weakened:
+            lines = ",".join(str(n) for n in f["lines"])
+            problems.append(f"reviewer judged {f['file']} {f['kind']} lines {lines} as weakening")
+        elif key not in legitimate:
             unjudged += 1
     if unjudged:
         problems.insert(0, f"gate touched: {unjudged} findings not judged by the reviewer")

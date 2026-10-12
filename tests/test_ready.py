@@ -150,8 +150,8 @@ TOUCHED = [{"file": "test_a.py", "kind": "assert-removed", "lines": [2]}]
 TWO_FINDINGS = [TOUCHED[0], {"file": "test_a.py", "kind": "assert-removed", "lines": [5]}]
 
 
-def add_judged_review(repo, head, judgements, *, model="m2", n=2, lines=(2,)):
-    add_job(repo, "review", head, model=model, verdict="approve", n=n)
+def add_judged_review(repo, head, judgements, *, model="m2", n=2, lines=(2,), verdict="approve"):
+    add_job(repo, "review", head, model=model, verdict=verdict, n=n)
     job = sorted(paths().jobs_dir.iterdir())[-1]
     record = json.loads((job / "result.json").read_text())
     record["touched_review"] = [
@@ -176,7 +176,17 @@ def test_ready_blocked_on_weakening_judgement(env_sandbox, repo, capsys):
     add_judged_review(repo, head, ["weakening"])
     rc, out = ready(repo, capsys)
     assert rc == 1
-    assert out["problems"] == ["reviewer judged test_a.py assert-removed as weakening"]
+    assert out["problems"] == ["reviewer judged test_a.py assert-removed lines 2 as weakening"]
+
+
+def test_weakening_judgement_blocks_even_if_another_review_approves(env_sandbox, repo, capsys):
+    head = git_head(repo)
+    add_job(repo, "implement", head, model="m1", n=1, touched=TOUCHED)
+    add_judged_review(repo, head, ["legitimate"], model="m2", n=2)
+    add_judged_review(repo, head, ["weakening"], model="m3", n=3, verdict="request-changes")
+    rc, out = ready(repo, capsys)
+    assert rc == 1
+    assert out["problems"] == ["reviewer judged test_a.py assert-removed lines 2 as weakening"]
 
 
 def test_ready_passes_when_all_legitimate(env_sandbox, repo, capsys):

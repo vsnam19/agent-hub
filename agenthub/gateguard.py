@@ -10,6 +10,9 @@ from agenthub import guards
 # Repo-relative `.agent-hub/` files that set how the gates run (repo gates, standing orders).
 AGENT_HUB_GATE_CONFIG = {".agent-hub/config.toml", ".agent-hub/standing-orders.md"}
 
+# Statements that end their statement list unconditionally (see _dead_ids).
+_TERMINATORS = (ast.Return, ast.Raise, ast.Continue, ast.Break)
+
 
 @dataclass
 class Change:
@@ -24,8 +27,9 @@ class TestDef:
     start: int
     end: int
     dump: str  # ast.dump of the whole function, decorators included: an identical test is never judged
-    asserts: list[tuple[tuple[str, ...], str]]  # (place, ast.dump) of each assertion; see _assertion_places
-    kept: list[tuple]  # what the test keeps: ("direct", dump) or ("placed", place, dump) per form (see _kept_tokens)
+    # (place, ast.dump, nested) of each assertion; see _assertion_places
+    asserts: list[tuple[tuple[str, ...], str, bool]]
+    kept: list[tuple]  # what the test keeps: ("direct", dump), ("placed", place, dump) or ("nested", place, dump)
 
 
 def _parse_diff(diff_text: str) -> list[Change]:
@@ -131,33 +135,33 @@ def _test_index(source: str) -> dict[str, TestDef] | None:
         return None
     index: dict[str, ast.AST] = {}
     _index_tests(tree.body, "", index)
-    return {
-        ident: TestDef(
-            fn.lineno,
-            fn.end_lineno,
-            ast.dump(fn, include_attributes=False),
-            [(place, _assertion_key(node)) for place, node in _assertion_places(fn)],
-            _kept_tokens(fn),
+    tests = {}
+    for ident, fn in index.items():
+        statements = _statement_ids(fn)
+        asserts = [(place, _assertion_key(node), id(node) not in statements) for place, node in _assertion_places(fn)]
+        tests[ident] = TestDef(
+            fn.lineno, fn.end_lineno, ast.dump(fn, include_attributes=False), asserts, _kept_tokens(fn)
         )
-        for ident, fn in index.items()
-    }
+    return tests
 
 
 def _weakened(base: TestDef, new: TestDef) -> bool:
-    """A base assertion the new test does not keep. Kept: the same assertion in the same place (same enclosing
-    statement kinds), or as a direct statement of the new test anywhere (see _kept_tokens). Containment in a larger
-    expression (`x == 1 or True`, `not (x == 1)`) keeps nothing. An identical test is never weakened."""
+    """A base assertion the new test does not keep. A statement assertion is kept by the same assertion in the same
+    place (same enclosing statement kinds), or as a direct statement of the new test anywhere (see _kept_tokens). A
+    nested assertion is kept only by the identical nested one in the same place, never by a statement. Containment in
+    a larger expression (`x == 1 or True`, `not (x == 1)`) keeps nothing. An identical test is never weakened."""
     if base.dump == new.dump:
         return False
     pool = Counter(new.kept)
     unmatched = []
-    for place, key in base.asserts:
-        if pool[("placed", place, key)]:
-            pool[("placed", place, key)] -= 1
+    for place, key, nested in base.asserts:
+        token = ("nested", place, key) if nested else ("placed", place, key)
+        if pool[token]:
+            pool[token] -= 1
         else:
-            unmatched.append(key)
-    for key in unmatched:
-        if not pool[("direct", key)]:
+            unmatched.append((nested, key))
+    for nested, key in unmatched:
+        if nested or not pool[("direct", key)]:
             return True
         pool[("direct", key)] -= 1
     return False
@@ -200,12 +204,14 @@ def _kept_tokens(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[tuple]:
     (`("direct", dump)`); any other keeps it only in the same place (`("placed", place, dump)`). Direct: a top-level
     `assert` or assertion call and a `with` header call. A `raises/warns` body is a place of its own, keyed by its
     with-items, so an assertion there keeps only in a block with the same exception. An assert's forms are its test
-    and, for an `and`, each direct operand. An assertion nested in another expression keeps nothing."""
+    and, for an `and`, each direct operand. An assertion nested in another expression keeps only the identical nested
+    assertion in the same place (`("nested", place, dump)`), never a statement."""
     direct = _direct_ids(fn.body)
     statements = _statement_ids(fn)
     tokens = []
     for place, node in _assertion_places(fn):
         if id(node) not in statements:
+            tokens.append(("nested", place, _assertion_key(node)))
             continue
         forms = [_assertion_key(node)]
         if isinstance(node, ast.Assert) and isinstance(node.test, ast.BoolOp) and isinstance(node.test.op, ast.And):
@@ -245,18 +251,17 @@ def _direct_ids(body: list[ast.stmt]) -> set[int]:
 
 
 def _dead_ids(fn: ast.AST) -> set[int]:
-    """Ids of the assertions in a `raises/warns` body that follow an unconditional `raise` in that body: they never
-    run, so they keep nothing."""
+    """Ids of the nodes in a statement list that follow an unconditional `return`, `raise`, `continue` or `break` in
+    that same list: they never run, so an assertion there keeps nothing."""
     dead = set()
     for node in ast.walk(fn):
-        if not isinstance(node, (ast.With, ast.AsyncWith)) or not any(_is_raises(i.context_expr) for i in node.items):
-            continue
-        raised = False
-        for stmt in node.body:
-            if raised:
-                dead.update(id(inner) for inner in ast.walk(stmt))
-            elif isinstance(stmt, ast.Raise):
-                raised = True
+        for _, value in ast.iter_fields(node):
+            if not isinstance(value, list):
+                continue
+            end = next((i for i, s in enumerate(value) if isinstance(s, _TERMINATORS)), None)
+            if end is not None:
+                for stmt in value[end + 1 :]:
+                    dead.update(id(inner) for inner in ast.walk(stmt))
     return dead
 
 

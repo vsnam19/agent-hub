@@ -539,6 +539,27 @@ def test_changed_test_with_try_assert_removed_flagged(repo):
     assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [3]}]
 
 
+def test_assert_after_early_return_flagged(repo):
+    res = _weaken_test(repo, "def test_a():\n    assert x == 1\n", "def test_a():\n    return\n    assert x == 1\n")
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [1]}]
+
+
+def test_assert_after_conditional_return_not_flagged(repo):
+    res = _weaken_test(
+        repo, "def test_a():\n    assert x == 1\n", "def test_a():\n    if x:\n        return\n    assert x == 1\n"
+    )
+    assert res == []
+
+
+def test_unchanged_nested_comprehension_assert_not_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a(self):\n    [self.assertEqual(v, 1) for v in x]\n    assert y\n",
+        "def test_a(self):\n    [self.assertEqual(v, 1) for v in x]\n    assert y\n    assert z\n",
+    )
+    assert res == []
+
+
 def test_assert_moved_out_of_try_to_top_level_not_flagged(repo):
     res = _weaken_test(
         repo,
