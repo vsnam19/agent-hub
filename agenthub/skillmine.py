@@ -44,6 +44,8 @@ _CONTINUATION_MIN_LEN = 8
 _TOKEN_MIN_ENTROPY = 3.0
 _DIGIT_GROUP_MAX = 8
 _PART_SPLIT = re.compile(r"[_+-]+")
+_SNAKE_IDENTIFIER = re.compile(r"[a-z0-9]{1,12}(?:_[a-z0-9]{1,12}){2,}")
+_ASCII_RUN = re.compile(r"[\x00-\x7f]+")
 _WORD = re.compile(r"(?:[A-Z]+(?![a-z])|[A-Z]?[a-z]{3,})+")
 _IDENT_WORD = re.compile(r"(?:[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]{3,})+")
 _JOB_ID = re.compile(r"\d{8}-\d{6}-[a-z]+(?:-[a-z]+)*-[0-9a-f]{4}(?:\.\w+)?")
@@ -116,7 +118,10 @@ def _redact_token(token: str) -> str:
 
 
 def _looks_secret(piece: str, min_len: int = _TOKEN_MIN_LEN) -> bool:
-    if len(piece) < min_len:
+    if not piece.isascii():
+        # only the ASCII runs are judged: a symbol or accented letter must not hide an identifier, nor a secret
+        return any(_looks_secret(run, min_len) for run in _ASCII_RUN.findall(piece))
+    if len(piece) < min_len or _SNAKE_IDENTIFIER.fullmatch(piece):
         return False
     classes = (any(c.islower() for c in piece), any(c.isupper() for c in piece), any(c.isdigit() for c in piece))
     if sum(classes) < 2 or _entropy(piece) < _TOKEN_MIN_ENTROPY or _JOB_ID.fullmatch(piece):

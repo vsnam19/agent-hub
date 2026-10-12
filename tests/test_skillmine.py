@@ -717,6 +717,17 @@ def test_real_false_positives_stay():
         "docs/superpowers/specs/2026-10-12-phase-b-skill-hub-design.md",
         "docs/superpowers/specs/2026-10-12-phase-b-skill-hub-design.md.",
         "FastAPI+SQLite+React",
+        "test_hash_token_is_sha256_hex",
+        "test_new_id_is_uuid4_string",
+        "test_no_merge_outside_24h_or_different_account",
+        "test_orders_exit_1_on_bare_line",
+        "test_parse_multipart_and_base64",
+        "test_payload_codec_valid_utf8_is_stored_verbatim",
+        "test_plan_wait_no_state_exit_2",
+        "test_python_suite_loads_t1_to_t6",
+        "test_redact_base64url",
+        "test_uploaded_file_unique_per_tenant_sha256",
+        "✔Validationpassed",
     ]
     for text in keep:
         assert skillmine.redact(f"see {text} now") == f"see {text} now", text
