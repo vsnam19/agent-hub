@@ -164,3 +164,8 @@ just smoke    # real agents, run by hand; spends quota
 
 Tests never run a real agent. Design decisions and their reasons are in [docs/decisions.md](docs/decisions.md);
 the design is in `docs/superpowers/specs/`.
+
+## Credits
+
+The rationalization tables in the brief template and the principle skills follow the idea in
+[agent-skills](https://github.com/addyosmani/agent-skills) by Addy Osmani (MIT License).

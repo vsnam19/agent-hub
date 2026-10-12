@@ -15,4 +15,9 @@ The director decomposes, briefs, verifies and merges. Implementation goes to the
 - When a worker's output is nearly right, re-brief with the exact gap or escalate a tier; do not hand-patch it.
 - Small fixes to the verification itself (a commit message, a merge conflict between verified branches) are yours.
 
+**Rationalizations:**
+- "It is a one-line fix, faster than a brief" → write the brief; the pool does the edit.
+- "The worker's output is nearly right, I will patch it" → re-brief with the exact gap or escalate a tier.
+- "Coding it myself keeps the director's context small" → it grows the context; delegate it.
+
 **Boundaries:** Design, planning, research, reading diffs and running gates stay with the director. When every link is exhausted and the work is urgent, taking over is allowed; say so in the report.
