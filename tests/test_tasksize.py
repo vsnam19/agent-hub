@@ -6,16 +6,21 @@ def make_brief(
     files: list[str] | None = None,
     tests: list[str] | None = None,
     skip: str | None = None,
+    extra_expected: list[str] | None = None,
+    only_lines: list[str] | None = None,
 ) -> str:
     files = ["agenthub/tasksize.py", "tests/test_tasksize.py"] if files is None else files
     tests = ["test_small_brief_has_no_problems"] if tests is None else tests
+    if only_lines is None:
+        only_lines = [f"- Only {', '.join(f'`{path}`' for path in files)} change. Stdlib only.", ""]
     sections = {
         "Goal": ["Check that a brief is small enough.", ""],
         "Input": ["- `agenthub/brief.py`", ""],
         "Expected output": [f"{number}. Deliverable {number}." for number in range(1, deliverables + 1)]
         + [f"   Covered by `{name}`." for name in tests]
+        + (extra_expected or [])
         + ["", "Done means: `just lint` and `uv run pytest -q` pass.", ""],
-        "Constraints": [f"- Only {', '.join(f'`{path}`' for path in files)} change. Stdlib only.", ""],
+        "Constraints": only_lines,
         "Gate": ["`just lint` and `uv run pytest -q`.", ""],
     }
     lines = ["# Brief: sample", ""]
@@ -51,5 +56,26 @@ def test_too_many_tests():
 
 def test_counts_unique_tests_only():
     tests = [f"test_case_{index}" for index in range(MAX_TESTS)]
-    # Six unique names, each mentioned again: 6 + 6 = 12 mentions, but still within the limit.
+    # Six unique names, each mentioned three times: 6 + 6 + 6 = 18 mentions, but still within the limit.
     assert check(make_brief(tests=tests + tests + [f"tests/test_x.py::{name}" for name in tests])) == []
+
+
+def test_files_under_expected_output_counted():
+    # Two files in the Only line plus two more under Expected output: four in all, over the limit of three.
+    extra = ["   Also edits `docs/notes.md`.", "   And `agenthub/extra.py`."]
+    assert check(make_brief(extra_expected=extra)) == ["too many files: 4 (max 3)"]
+
+
+def test_wrapped_only_line_counted():
+    # The Only bullet wraps onto an indented continuation line that also names files and ends with "change".
+    only_lines = ["- Only `agenthub/a.py`, `agenthub/b.py`,", "  `agenthub/c.py` and `agenthub/d.py` change.", ""]
+    assert check(make_brief(only_lines=only_lines)) == ["too many files: 4 (max 3)"]
+
+
+def test_non_path_backticks_ignored():
+    # Commands, bare words and path::test names are not files, so the brief stays within the file limit.
+    extra = [
+        "   Run `uv run ruff check .` and `agent-hub run`.",
+        "   Covers `agenthub/x.py::test_a` and `agenthub/y.py::test_b`.",
+    ]
+    assert check(make_brief(extra_expected=extra)) == []

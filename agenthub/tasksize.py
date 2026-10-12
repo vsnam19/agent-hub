@@ -10,6 +10,7 @@ HEADINGS = ("Goal", "Input", "Expected output", "Constraints", "Gate")
 DELIVERABLE = re.compile(r"^\d+\.\s+\S")
 TEST_NAME = re.compile(r"`(?:[^`\s]+::)?(test_\w+)`")
 BACKTICKED = re.compile(r"`([^`]+)`")
+FILE_EXTENSION = re.compile(r"\.[A-Za-z][A-Za-z0-9]*$")
 
 
 def _sections(text: str) -> dict[str, list[str]]:
@@ -23,6 +24,28 @@ def _sections(text: str) -> dict[str, list[str]]:
     return sections
 
 
+def _only_bullets(lines: list[str]) -> list[str]:
+    """Each `- Only …` bullet joined with its indented continuation lines."""
+    bullets: list[list[str]] = []
+    current: list[str] | None = None
+    for line in lines:
+        if line.startswith("- Only "):
+            current = [line]
+            bullets.append(current)
+        elif current is not None and line[:1].isspace() and line.strip():
+            current.append(line)
+        else:
+            current = None
+    return ["\n".join(bullet) for bullet in bullets]
+
+
+def _paths(text: str) -> set[str]:
+    """Backticked spans that name a file: contain '/' or end in an extension; `path::test` forms are skipped."""
+    return {
+        span for span in BACKTICKED.findall(text) if "::" not in span and ("/" in span or FILE_EXTENSION.search(span))
+    }
+
+
 def check(text: str) -> list[str]:
     """One problem string per violated rule; an empty list means the brief is small enough."""
     sections = _sections(text)
@@ -32,12 +55,11 @@ def check(text: str) -> list[str]:
     if deliverables > MAX_DELIVERABLES:
         problems.append(f"too many deliverables: {deliverables} (max {MAX_DELIVERABLES})")
 
-    files = {
-        path
-        for line in sections.get("Constraints", [])
-        if line.startswith("- Only ") and "change" in line
-        for path in BACKTICKED.findall(line)
-    }
+    files = set()
+    for bullet in _only_bullets(sections.get("Constraints", [])):
+        if "change" in bullet:
+            files |= _paths(bullet)
+    files |= _paths("\n".join(sections.get("Expected output", [])))
     if len(files) > MAX_FILES:
         problems.append(f"too many files: {len(files)} (max {MAX_FILES})")
 
