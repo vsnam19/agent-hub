@@ -115,6 +115,14 @@ def _build_parser() -> argparse.ArgumentParser:
     ready.add_argument("-d", "--dir", default=".", dest="workdir", help="work tree to check")
     ready.add_argument("--json", action="store_true")
 
+    hub = sub.add_parser("hub", help="worker plugins in the installed hosts (codex, agy)")
+    hub_sub = hub.add_subparsers(dest="hub_command", required=True, parser_class=_Parser)
+    hub_status = hub_sub.add_parser("status", help="show per host and plugin whether it is installed and current")
+    hub_status.add_argument("--json", action="store_true")
+    hub_install = hub_sub.add_parser("install", help="install or refresh worker plugins (dry-run unless --apply)")
+    hub_install.add_argument("--apply", action="store_true", help="run the commands")
+    hub_install.add_argument("--host", action="append", choices=["codex", "agy"], help="only this host (repeatable)")
+
     gate = sub.add_parser("gate", help="run the gates on the committed HEAD and record them (exit 9 if one fails)")
     gate.add_argument("-d", "--dir", default=".", dest="workdir", help="clean work tree to gate")
     gate.add_argument("--gate", action="append", dest="gates", help="gate command to run after the repo gates")
@@ -138,6 +146,7 @@ def main(argv: list[str] | None = None) -> int:
             "orders": _cmd_orders,
             "ready": _cmd_ready,
             "gate": _cmd_gate,
+            "hub": _cmd_hub,
         }[args.command]
         return handler(args)
     except SystemExit as e:  # --help
@@ -232,6 +241,17 @@ def _cmd_run(args) -> int:
     else:
         _emit(_summary(result))
     return EXIT[result["status"]]
+
+
+def _cmd_hub(args) -> int:
+    from agenthub import hub
+
+    config_dir = paths().config_dir
+    if args.hub_command == "status":
+        rows = hub.status(config_dir)
+        print(_safe(hub.rows_json(rows) if args.json else hub.format_rows(rows)))
+        return 0
+    return hub.install(config_dir, args.apply, tuple(args.host or hub.HOSTS), emit=lambda text: print(_safe(text)))
 
 
 def _cmd_pool(args) -> int:

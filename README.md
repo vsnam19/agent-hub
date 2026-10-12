@@ -136,6 +136,23 @@ only name plugins from `[plugins]`. Without `workers.toml` no worker gets extra 
 `--plugin-dir` per plugin; gwen workers get `skills.paths` and run with `OPENCODE_DISABLE_EXTERNAL_SKILLS=1`, so they
 index only these skills. codex and agy read their globally installed plugins and are not affected.
 
+codex and agy are installed hosts: they get the union of `[plugins]` through their own plugin commands. For codex
+add the marketplace directory (holds `.agents/plugins/marketplace.json`) to `workers.toml`:
+
+```toml
+[hub]
+codex_marketplace = "~/Workspaces/tools/agent-plugins"
+```
+
+```sh
+agent-hub hub status [--json]                    # per host × plugin: current, stale, missing, per-run, stray …
+agent-hub hub install [--apply] [--host codex]   # dry-run prints the commands; --apply runs them (exit 1 on failure)
+```
+
+`status` is read-only. `install` uses `codex plugin marketplace add` / `codex plugin add` and
+`agy plugin validate` / `agy plugin install`; it never edits tool config and never deletes stray hand-copied skills
+in `$CODEX_HOME/skills/` (they are only reported).
+
 ## Exit codes
 
 | Exit | Status | Meaning |
