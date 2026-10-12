@@ -6,7 +6,7 @@ import subprocess
 import sys
 import time
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from agenthub import guards
@@ -127,6 +127,15 @@ def _build_parser() -> argparse.ArgumentParser:
     hub_install.add_argument("--apply", action="store_true", help="run the commands")
     hub_install.add_argument("--host", action="append", choices=["codex", "agy"], help="only this host (repeatable)")
 
+    skills = sub.add_parser("skills", help="learn skills from past work")
+    skills_sub = skills.add_subparsers(dest="skills_command", required=True, parser_class=_Parser)
+    mine = skills_sub.add_parser("mine", help="extract what repeats from job records and transcripts, redacted")
+    mine.add_argument("--since", help="start of the window, a date or ISO timestamp")
+    mine.add_argument("--days", type=int, help="window of the last N days (overrides --since)")
+    mine.add_argument("--out", help="output directory (default: <state>/skills/<date>)")
+    mine.add_argument("--transcripts", help="Claude Code projects directory (default: ~/.claude/projects)")
+    mine.add_argument("--json", action="store_true")
+
     gate = sub.add_parser("gate", help="run the gates on the committed HEAD and record them (exit 9 if one fails)")
     gate.add_argument("-d", "--dir", default=".", dest="workdir", help="clean work tree to gate")
     gate.add_argument("--gate", action="append", dest="gates", help="gate command to run after the repo gates")
@@ -151,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
             "ready": _cmd_ready,
             "gate": _cmd_gate,
             "hub": _cmd_hub,
+            "skills": _cmd_skills,
         }[args.command]
         return handler(args)
     except SystemExit as e:  # --help
@@ -257,6 +267,48 @@ def _cmd_hub(args) -> int:
         print(_safe(hub.rows_json(rows) if args.json else hub.format_rows(rows)))
         return 0
     return hub.install(config_dir, args.apply, tuple(args.host or hub.HOSTS), emit=lambda text: print(_safe(text)))
+
+
+def _cmd_skills(args) -> int:
+    from agenthub import skillmine
+
+    state_dir = paths().state_dir
+    now = _now()
+    since = _mine_window(args, state_dir, now)
+    if args.transcripts:
+        transcripts = Path(args.transcripts)
+    else:
+        transcripts = Path(os.environ.get("HOME", "~")).expanduser() / ".claude" / "projects"
+    out = Path(args.out) if args.out else state_dir / "skills" / now.strftime("%Y-%m-%d")
+    extract = skillmine.mine(state_dir, transcripts, since, now)
+    try:
+        summary = skillmine.write(extract, out)
+    except OSError as e:
+        raise UsageError(f"cannot write {out}: {e.strerror or e}") from None
+    text = _safe(json.dumps(extract.to_json(), indent=2, ensure_ascii=False) if args.json else summary)
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    print(text.encode(encoding, errors="backslashreplace").decode(encoding))
+    return 0
+
+
+def _mine_window(args, state_dir: Path, now: datetime) -> datetime:
+    if args.days is not None:
+        if not 1 <= args.days <= 3650:
+            raise UsageError("--days must be between 1 and 3650")
+        return now - timedelta(days=args.days)
+    if args.since:
+        try:
+            since = datetime.fromisoformat(args.since)
+        except ValueError:
+            raise UsageError(f"invalid --since: {args.since!r}") from None
+        return since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+    since = now - timedelta(days=28)
+    try:
+        last_run = (state_dir / "skills" / "last-run").read_text(encoding="utf-8", errors="replace")
+        last = datetime.fromisoformat(last_run.strip())
+    except (OSError, ValueError):
+        return since
+    return min(since, last if last.tzinfo else last.replace(tzinfo=timezone.utc))
 
 
 def _cmd_pool(args) -> int:
