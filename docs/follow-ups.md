@@ -10,5 +10,5 @@ small repository, or `implement` here (D-079).
 | 2026-10-12 | Repeat the skill checks that could not run: a live `codex exec` with an installed plugin (quota back 2026-11-07) and a gwen run with `skills.paths` (Mac host was down) | D-083 |
 | 2026-10-12 | Owner's call: hand-copied `~/.codex/skills/telaf-api` and `telaf-legato` duplicate the installed `telaf` plugin; `agent-hub hub status` reports them as `stray` and never deletes them | D-089 |
 | 2026-10-12 | Phase C: a live `--suite cpp` Stage A run (opencode × qwen3.5-9b-4bit) when the Mac host answers, then decide whether gwen takes C++ tasks (D-077, D-090) | D-090 |
-| 2026-10-12 | Flaky under parallel load: `test_switch_writes_flags_via_stdin` failed in a haiku job's gate while three full suites ran at once (job 20261012-142732-implement-fda5); the same HEAD passed alone. Find the timing assumption and fix it (small task) | job fda5 |
+| 2026-10-12 | `test_switch_writes_flags_via_stdin` fails when the pytest tmp dir number contains 512 (substring check on the joined argv); fixing on `fix/flaky-512` | job fda5 |
 | 2026-10-12 | Phase E E5 must also: sort tasks topologically before writing, treat `"reason": null` as empty, and reject a task whose brief fails `tasksize.check` headings (from review ff04) | review ff04 |
