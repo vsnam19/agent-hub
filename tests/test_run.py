@@ -680,3 +680,23 @@ def test_no_skills_no_section(env_sandbox, repo):
     result = go(repo, ["agy:m1"])
     brief = (job_dir(result) / "brief.md").read_text()
     assert "## Skills" not in brief
+
+
+def test_named_skill_plugin_is_added_for_per_run_hosts(env_sandbox, repo, tmp_path):
+    _skills_layout(env_sandbox, tmp_path)
+    telaf = (tmp_path / "telaf").resolve()
+    worker = (tmp_path / "worker-plugin").resolve()
+
+    result = go(repo, ["claude:sonnet"], skills=["telaf"])
+    assert result["status"] == "ok"
+    argv = fake_calls(env_sandbox.fakelog, "claude")[0]["argv"]
+    assert [argv[i + 1] for i, a in enumerate(argv) if a == "--plugin-dir"] == [str(telaf)]
+
+    # the plugin already in the default list is not listed twice
+    (env_sandbox.config / "workers.toml").write_text(
+        f'default = ["worker"]\n[plugins]\nworker = "{worker}"\ntelaf = "{telaf}"\n'
+    )
+    result = go(repo, ["claude:sonnet"], skills=["debug-playbook", "telaf"])
+    assert result["status"] == "ok"
+    argv = fake_calls(env_sandbox.fakelog, "claude")[1]["argv"]
+    assert [argv[i + 1] for i, a in enumerate(argv) if a == "--plugin-dir"] == [str(worker), str(telaf)]

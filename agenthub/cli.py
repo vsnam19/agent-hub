@@ -20,6 +20,7 @@ from agenthub.plan import load as load_plan
 from agenthub.planrun import run_plan
 from agenthub.pool import Cooldowns, parse_link
 from agenthub.procinfo import start_time
+from agenthub.workers import available_skills
 
 WAIT_POLL_S = 1.0
 WAIT_APPEAR_S = 10.0
@@ -618,6 +619,12 @@ def _cmd_plan(args) -> int:
 
     if args.plan_command == "run":
         from agenthub.planstate import load_or_init
+
+        known_skills = available_skills(paths().config_dir) if any(t.skills for t in plan.tasks) else {}
+        for task in plan.tasks:
+            for skill in task.skills:
+                if skill not in known_skills:
+                    raise UsageError(f"task {task.name}: unknown skill {skill}")
 
         state = load_or_init(plan)
         _claim_runner(state, plan_dir)

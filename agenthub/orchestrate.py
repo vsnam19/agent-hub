@@ -20,7 +20,7 @@ from agenthub.config import ConfigError, Paths, Pool
 from agenthub.jobs import Job, list_jobs, new_job
 from agenthub.pool import Cooldowns, Link
 from agenthub.procinfo import start_time
-from agenthub.workers import available_skills, worker_plugins
+from agenthub.workers import available_skills, skill_plugin_dirs, worker_plugins
 
 EXIT = {
     "ok": 0,
@@ -280,6 +280,10 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     plugin_dirs = ()
     if refusal is None:
         plugin_dirs = worker_plugins(p.config_dir, repo.root if repo else workdir, repo_config)
+        if args.skills:
+            # a named skill must be loadable even when its plugin is not in this run's default list
+            skill_dirs = skill_plugin_dirs(p.config_dir, [known_skills[s] for s in args.skills])
+            plugin_dirs = (*plugin_dirs, *(d for d in skill_dirs if d not in plugin_dirs))
 
     if kind == "review" and base is None:
         base = args.base or (repo.default_branch if repo else "HEAD")

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from agenthub.cli import main
 from agenthub.config import paths
-from agenthub.jobs import new_job
+from agenthub.jobs import list_jobs, new_job
 from agenthub.procinfo import start_time
 from tests.gitrepo import make_repo
 
@@ -353,3 +353,24 @@ def test_plan_cancel_corrupt_state(env_sandbox, tmp_path, capsys):
     finally:
         runner.kill()
         runner.wait()
+
+
+def test_plan_run_rejects_unknown_skill_before_running(env_sandbox, tmp_path):
+    repo = tmp_path / "repo"
+    make_repo(repo)
+    plan_content = {
+        "goal": "do it",
+        "repo": str(repo),
+        "base": "master",
+        "slug": "plan-1",
+        "tasks": [
+            {"name": "t1", "role": "implement", "brief": "b1.md"},
+            {"name": "t2", "role": "implement", "brief": "b2.md", "skills": ["nope"]},
+        ],
+    }
+    plan_file = make_plan_file(tmp_path, repo, plan_content)
+    res = run_cli_plan(env_sandbox, plan_file, "run")
+    assert res.returncode == 2
+    assert "task t2: unknown skill nope" in res.stderr
+    assert not (plan_file.parent / "state.json").exists()
+    assert list_jobs(paths(), 100) == []

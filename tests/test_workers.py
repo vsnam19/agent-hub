@@ -121,3 +121,13 @@ def test_available_skills_maps_skill_to_plugin(layout, tmp_path):
     _user(config, f'default = ["telaf"]\n[plugins]\ntelaf = "{telaf}"\naspice = "{aspice}"\n')
     assert available_skills(config) == {"telaf": "telaf", "spice": "aspice"}
     assert available_skills(tmp_path / "absent") == {}
+
+
+def test_available_skills_bad_plugin_path_is_error(layout, tmp_path):
+    config, _, telaf, _ = layout
+    (telaf / "skills" / "telaf").mkdir()
+    (telaf / "skills" / "telaf" / "SKILL.md").write_text("# telaf\n")
+    missing = tmp_path / "missing"
+    _user(config, f'default = []\n[plugins]\ntelaf = "{telaf}"\ngone = "{missing}"\n')
+    with pytest.raises(ConfigError, match="'gone' has no skills/ directory"):
+        available_skills(config)
