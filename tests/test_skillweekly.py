@@ -70,7 +70,7 @@ class Fake:
         if argv[0] == "claude":
             return self.eval(argv)
         words = argv[3:]
-        if words[0] == "run" and "implement-hard" in words:
+        if words[0] == "run" and "implement" in words:
             return self.implement(words)
         if words[0] == "run":
             return self.review()
@@ -210,6 +210,16 @@ def test_review_fix_rounds_capped_at_two(tmp_path):
     assert fix_brief.startswith("# Brief: round 1 fixes")
     assert "- high — plugins/x.md — Needs a table" in fix_brief
     assert BRANCH in env.branches()
+
+
+def test_draft_and_fix_jobs_use_implement_role(tmp_path):
+    env = Env(tmp_path, verdicts=["request-changes"])
+    env.run()
+    jobs = env.fake.words("--role", "implement")
+    assert len(jobs) == 3  # one draft, then two fix rounds
+    for call in jobs:
+        assert call[call.index("--role") + 1] == "implement"
+    assert env.fake.words("implement-hard") == []
 
 
 def test_ready_failure_stops_before_merge(tmp_path):

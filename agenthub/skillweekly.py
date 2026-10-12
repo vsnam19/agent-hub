@@ -27,6 +27,7 @@ JOB_TIMEOUT = 2 * 60 * 60  # outer safety net; agent-hub enforces its own per-ro
 GATE_TIMEOUT = 30 * 60
 READY_TIMEOUT = 120
 INSTALL_TIMEOUT = 10 * 60
+DRAFT_ROLE = "implement"  # drafts and fix rounds run on haiku (D-093)
 EXIT_STOPPED = 1
 EXIT_LOCKED = 3
 _VERSION = re.compile(r'("version"\s*:\s*")(\d+)\.(\d+)\.(\d+)(")')
@@ -226,7 +227,7 @@ class _Run:
             add(Step("stop", "would", "nothing to learn; advance last-run"))
             return
         add(Step("worktree", "would", f"{self.wt} on new branch {self.branch} from master"))
-        add(Step("draft", "would", "write the drafting brief; agent-hub run --role implement-hard"))
+        add(Step("draft", "would", f"write the drafting brief; agent-hub run --role {DRAFT_ROLE}"))
         add(Step("version", "would", "bump the patch version of each changed plugin in 3 manifests; commit"))
         add(Step("eval", "would", f"claude plugin eval per skill, ablation with-without, max ${self.cfg.max_cost_usd}"))
         add(Step("review", "would", f"gate, review, up to {FIX_ROUNDS} fix rounds, then ready"))
@@ -308,7 +309,7 @@ class _Run:
         brief = self.out / "brief.md"
         brief.write_text(self.brief(), encoding="utf-8")
         proc = self.hub(
-            "run", "--role", "implement-hard", "--brief", str(brief), "-d", str(self.wt), "--json",
+            "run", "--role", DRAFT_ROLE, "--brief", str(brief), "-d", str(self.wt), "--json",
             timeout=JOB_TIMEOUT,
         )  # fmt: skip
         result = self.job("draft", proc)
@@ -453,7 +454,7 @@ class _Run:
             encoding="utf-8",
         )
         proc = self.hub(
-            "run", "--role", "implement-hard", "--brief", str(brief), "-d", str(self.wt), "--json",
+            "run", "--role", DRAFT_ROLE, "--brief", str(brief), "-d", str(self.wt), "--json",
             timeout=JOB_TIMEOUT,
         )  # fmt: skip
         result = self.job(f"fix round {round_no}", proc)
