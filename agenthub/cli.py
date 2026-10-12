@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -27,9 +28,16 @@ WAIT_APPEAR_S = 10.0
 PLAN_WAIT_POLL_S = 1.0
 PLAN_WAIT_APPEAR_S = float(os.environ.get("AGENT_HUB_PLAN_WAIT_APPEAR_S", "10.0"))
 ALL_JOBS = 100000  # every job record, for filters that must see past any --limit
+SCHEDULE_UNIT = "agent-hub-skills-weekly"
+SCHEDULE_DEFAULT_AT = "Sun *-*-* 20:17"
+SCHEDULE_TIMEOUT_S = 30
 
 
 class UsageError(Exception):
+    pass
+
+
+class ScheduleError(Exception):
     pass
 
 
@@ -139,6 +147,15 @@ def _build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--dry-run", action="store_true", help="print the steps; run nothing, write nothing")
     weekly.add_argument("--max-cost-usd", type=float, default=3.0, help="eval budget in USD (default 3)")
     skills_sub.add_parser("report", help="print the newest weekly report")
+    schedule = skills_sub.add_parser(
+        "schedule", help="run skills weekly on a systemd user timer (dry-run unless --apply)"
+    )
+    schedule_mode = schedule.add_mutually_exclusive_group()
+    schedule_mode.add_argument("--apply", action="store_true", help="write the units and enable the timer")
+    schedule_mode.add_argument("--remove", action="store_true", help="disable the timer and delete its units")
+    schedule.add_argument(
+        "--at", default=SCHEDULE_DEFAULT_AT, help='systemd calendar expression (default "Sun *-*-* 20:17")'
+    )
 
     gate = sub.add_parser("gate", help="run the gates on the committed HEAD and record them (exit 9 if one fails)")
     gate.add_argument("-d", "--dir", default=".", dest="workdir", help="clean work tree to gate")
@@ -318,6 +335,113 @@ def _cmd_skills_report() -> int:
     return 0
 
 
+def _unit_dir() -> Path:
+    config_home = os.environ.get("XDG_CONFIG_HOME") or Path(os.environ.get("HOME", "~")).expanduser() / ".config"
+    return Path(config_home) / "systemd" / "user"
+
+
+def _systemd_word(value: str) -> str:
+    """Quote a unit-file value only when it has characters systemd would split or expand."""
+    if not any(c in value for c in ' \t"\\%'):
+        return value
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    return f'"{escaped}"'
+
+
+def _unit_texts(exe: str, at: str) -> tuple[str, str]:
+    service = (
+        "[Unit]\n"
+        "Description=agent-hub learned skills, weekly\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"ExecStart={_systemd_word(exe)} skills weekly\n"
+        f"Environment={_systemd_word('PATH=' + os.environ.get('PATH', ''))}\n"
+        "TimeoutStartSec=6h\n"
+        "Nice=10\n"
+    )
+    timer = (
+        "[Unit]\n"
+        "Description=Run agent-hub learned skills weekly\n"
+        "\n"
+        "[Timer]\n"
+        f"OnCalendar={at}\n"
+        "Persistent=true\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+    return service, timer
+
+
+def _schedule_run(argv: list[str]) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=SCHEDULE_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise ScheduleError(f"{argv[0]}: {e}") from None
+
+
+def _systemctl(*args: str) -> None:
+    done = _schedule_run(["systemctl", "--user", *args])
+    if done.returncode != 0:
+        raise ScheduleError((done.stderr or done.stdout).strip() or f"systemctl --user {' '.join(args)} failed")
+
+
+def _check_calendar(at: str) -> None:
+    if not at.strip() or "\n" in at:
+        raise UsageError(f"invalid --at: {at!r}")
+    done = _schedule_run(["systemd-analyze", "calendar", at])
+    if done.returncode != 0:
+        raise UsageError(f"invalid --at {at!r}: {(done.stderr or done.stdout).strip()}")
+
+
+def _read_unit(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
+def _cmd_skills_schedule(args) -> int:
+    unit_dir = _unit_dir()
+    service_path = unit_dir / f"{SCHEDULE_UNIT}.service"
+    timer_path = unit_dir / f"{SCHEDULE_UNIT}.timer"
+    timer = timer_path.name
+    try:
+        if args.remove:
+            _systemctl("disable", "--now", timer)
+            service_path.unlink(missing_ok=True)
+            timer_path.unlink(missing_ok=True)
+            _systemctl("daemon-reload")
+            print(_safe(f"removed: {timer_path}"))
+            return 0
+
+        _check_calendar(args.at)
+        exe = shutil.which("agent-hub")
+        if exe is None:
+            raise ScheduleError("agent-hub is not on PATH")
+        service, timer_text = _unit_texts(os.path.abspath(exe), args.at)
+        if not args.apply:
+            print(_safe(f"# {service_path}\n{service}\n# {timer_path}\n{timer_text}"), end="")
+            print(f"would run: systemctl --user daemon-reload; systemctl --user enable --now {timer}")
+            print("dry run: nothing written; add --apply to schedule")
+            return 0
+
+        if _read_unit(service_path) == service and _read_unit(timer_path) == timer_text:
+            print(_safe(f"already scheduled: {timer_path} ({args.at})"))
+            return 0
+        unit_dir.mkdir(parents=True, exist_ok=True)
+        service_path.write_text(service, encoding="utf-8")
+        timer_path.write_text(timer_text, encoding="utf-8")
+        _systemctl("daemon-reload")
+        _systemctl("enable", "--now", timer)
+        print(_safe(f"scheduled: {timer_path} ({args.at})"))
+        return 0
+    except (ScheduleError, OSError) as e:
+        print(_safe(f"agent-hub: {e}", sys.stderr), file=sys.stderr)
+        return 1
+
+
 def _cmd_skills(args) -> int:
     from agenthub import skillmine
 
@@ -325,6 +449,8 @@ def _cmd_skills(args) -> int:
         return _cmd_skills_weekly(args)
     if args.skills_command == "report":
         return _cmd_skills_report()
+    if args.skills_command == "schedule":
+        return _cmd_skills_schedule(args)
     state_dir = paths().state_dir
     now = _now()
     since = _mine_window(args, state_dir, now)
