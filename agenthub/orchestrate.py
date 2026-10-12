@@ -271,7 +271,9 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     repo_config = None
     if kind == "review":
         repo_config = base_repo_config(repo, base) if repo is not None and base is not None else ""
-    plugin_dirs = worker_plugins(p.config_dir, repo.root if repo else workdir, repo_config)
+    plugin_dirs = ()
+    if refusal is None:
+        plugin_dirs = worker_plugins(p.config_dir, repo.root if repo else workdir, repo_config)
 
     if kind == "review" and base is None:
         base = args.base or (repo.default_branch if repo else "HEAD")

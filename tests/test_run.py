@@ -107,6 +107,20 @@ def test_implement_refused_on_default_branch(env_sandbox, repo):
     assert (job_dir(result) / "brief.md").read_text().startswith(BRIEF)
 
 
+def test_refused_run_is_refused_despite_broken_workers_toml(env_sandbox, repo, tmp_path):
+    import subprocess
+
+    missing = tmp_path / "no-such-plugin"
+    (env_sandbox.config / "workers.toml").write_text(f'default = ["ghost"]\n[plugins]\nghost = "{missing}"\n')
+    subprocess.run(["git", "checkout", "master"], cwd=repo, check=True, capture_output=True)
+    result = go(repo, ["agy:m1"])
+    assert result["status"] == "refused"
+    assert result["exit_code"] == EXIT["refused"] == 3
+    assert result["error"]
+    assert result["attempts"] == []
+    assert fake_calls(env_sandbox.fakelog, "agy") == []
+
+
 def test_fallback_on_quota_sets_cooldown(env_sandbox, repo, monkeypatch):
     scenario(monkeypatch, "agy", "quota,ok")
     result = go(repo, ["agy:m1", "agy:m2"])
