@@ -18,7 +18,8 @@ _PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIV
 _JWT = re.compile(r"\beyJ[\w-]+\.[\w-]+\.[\w-]+")
 _BEARER = re.compile(r"(?i)\bBearer\s+[\w.~+/=-]+")
 _BASIC = re.compile(r"\bBasic\s+([A-Za-z0-9+/_-]{8,}={0,2})(?![\w+/])")
-_URL_CREDS = re.compile(r"(\b[a-z][\w+.-]*://[^\s/:@]*):\S+@", re.I)
+# the password is capped at 256 chars: uncapped, every `scheme://` in a long run of them rescans to the run's end
+_URL_CREDS = re.compile(r"((?<![\w+.-])[a-z][\w+.-]*://[^\s/:@]*):\S{1,256}@", re.I)
 _PREFIXED = re.compile(r"\b(?:sk-[\w-]{16,}|ghp_\w{20,}|xox[a-z]-[\w-]{10,}|AKIA[0-9A-Z]{16})")
 # a secret name contains one of `_LONG_WORDS` (`PGPASSWORD`, `SECRETKEY`, `api_key`), or a part (split on `_`, `-` or a
 # camelCase hump) equals or ends with one of `_PART_WORDS` (`DB_PASS`, `apiKey`, `adminpass`). A `key` ending needs four
@@ -38,7 +39,7 @@ _KV = re.compile(rf"(?i)(?<![\w-])({_NAME})(\s*[=:]\s*){_VALUE}")
 _KV_SPACE = re.compile(rf"(?i)(?<![\w-])({_NAME})(\s+)(?!-|<redacted>){_VALUE}")
 _KV_JSON = re.compile(rf"(?i)(\"{_NAME}\"\s*:\s*)\"[^\"]*\"")
 _BARE_SECRET_WORDS = {"password", "passwd", "pwd", "passphrase"}
-_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _HOME = re.compile(r"(?:^|(?<=[\s\"'`(=:/\[]))(?:/home/[^/\s]+|/Users/[^/\s]+|/root(?![\w.-]))")
 
 # Token rule. Text is split on whitespace, quotes, backticks and `=:,;()<>[]{}?&`; each token is then split on

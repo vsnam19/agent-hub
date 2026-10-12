@@ -905,17 +905,40 @@ def test_session_uuid_kept_short(tmp_path):
     assert uuid not in json.dumps(corrections)
 
 
+def _best_redact_time(text: str, runs: int = 2) -> float:
+    best = float("inf")
+    for _ in range(runs):
+        start = time.perf_counter()
+        skillmine.redact(text)
+        best = min(best, time.perf_counter() - start)
+    return best
+
+
+def _assert_linear(make_text) -> None:
+    # a ratio, not an absolute bound: 4x the input may take up to 6x as long (quadratic would take ~16x)
+    small = _best_redact_time(make_text(10000))
+    large = _best_redact_time(make_text(40000))
+    assert large <= 6 * small + 0.05
+
+
+def test_redact_scales_linearly():
+    for make_text in (
+        lambda n: "x" * n,
+        lambda n: "A" * n,
+        lambda n: "a." * (n // 2),
+    ):
+        _assert_linear(make_text)
+        assert skillmine.redact(make_text(10000)) == make_text(10000)
+
+
 def test_word_check_is_linear_on_long_capitals():
     # the bare runs and their `Basic ` forms: only the latter reach the word check
-    for text in (
-        "A" * 5000 + "b1",
-        "ABCDEFGHIJ" * 300 + "x",
-        "Basic " + "A" * 5000 + "b1",
-        "Basic " + "ABCDEFGHIJ" * 300 + "x",
-    ):
-        start = time.perf_counter()
-        redacted = skillmine.redact(text)
-        elapsed = time.perf_counter() - start
-
-        assert elapsed < 0.5
-        assert redacted
+    makers = (
+        lambda n: "A" * (n // 2) + "b1",
+        lambda n: "ABCDEFGHIJ" * (n // 10) + "x",
+        lambda n: "Basic " + "A" * (n // 2) + "b1",
+        lambda n: "Basic " + "ABCDEFGHIJ" * (n // 10) + "x",
+    )
+    for make_text in makers:
+        _assert_linear(make_text)
+        assert skillmine.redact(make_text(10000))
