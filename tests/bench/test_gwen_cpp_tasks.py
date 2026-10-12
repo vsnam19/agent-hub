@@ -1,6 +1,9 @@
 import fnmatch
+import functools
 import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -9,16 +12,53 @@ from bench.gwen.tasks import install_hidden, load_suites, load_tasks, prepare
 
 TASK_IDS = ["c1", "c2", "c3", "c4", "c5", "c6"]
 BUILD_AND_TEST = "cmake -S . -B build -G Ninja && cmake --build build && ctest --test-dir build --output-on-failure"
+PROBE_CMAKELISTS = "cmake_minimum_required(VERSION 3.24)\nproject(probe CXX)\nfind_package(GTest REQUIRED)\n"
 
 
 def _tasks():
     return {tid: t for tid, t in load_tasks().items() if t.suite == "cpp"}
 
 
+def _missing_tool():
+    """Name the first tool the cpp suite needs that is not on PATH, or return None."""
+    for tool in ("cmake", "ninja"):
+        if not shutil.which(tool):
+            return f"{tool} is missing: the cpp suite needs cmake and ninja on PATH"
+    if not any(shutil.which(cxx) for cxx in ("c++", "g++", "clang++")):
+        return "a C++ compiler is missing: the cpp suite needs c++, g++ or clang++ on PATH"
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def _gtest_missing():
+    """Configure a 3-line CMake project that needs GoogleTest, once per session; return a message or None."""
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = Path(tmp) / "probe"
+        probe.mkdir()
+        (probe / "CMakeLists.txt").write_text(PROBE_CMAKELISTS)
+        res = subprocess.run(
+            ["cmake", "-S", str(probe), "-B", str(Path(tmp) / "build"), "-G", "Ninja"],
+            capture_output=True,
+            text=True,
+        )
+    if res.returncode == 0:
+        return None
+    output = res.stdout + res.stderr
+    if "GTest" in output:
+        return "GoogleTest is missing: CMake cannot find GTest (install the system GoogleTest development package)"
+    return "CMake cannot configure a C++ project: " + output[-500:]
+
+
+def _require_toolchain():
+    """Fail, never skip, with one message naming what is missing."""
+    problem = _missing_tool() or _gtest_missing()
+    if problem:
+        pytest.fail(problem, pytrace=False)
+
+
 def _gate(task, repo, build_dir):
     """Run the cpp suite's own gate steps, as run.py does; returns {step: (rc, output)}."""
-    for tool in ("cmake", "ninja"):
-        assert shutil.which(tool), f"{tool} is required by the cpp suite"
+    _require_toolchain()
     build_dir.mkdir()
     steps = {}
     for name, argv in load_suites()["cpp"].gate.items():
@@ -38,6 +78,15 @@ def _apply(repo, patch):
 def test_cpp_suite_has_six_tasks():
     assert sorted(_tasks()) == TASK_IDS
     assert list(load_suites()["cpp"].gate) == ["configure", "build", "visible", "build-hidden", "hidden"]
+
+
+def test_missing_toolchain_message_names_the_tool(monkeypatch):
+    real_which = shutil.which
+    monkeypatch.setattr(
+        shutil, "which", lambda name, *args, **kwargs: None if name == "ninja" else real_which(name, *args, **kwargs)
+    )
+    with pytest.raises(pytest.fail.Exception, match="ninja"):
+        _require_toolchain()
 
 
 def test_cpp_fixture_builds_and_passes(tmp_path):

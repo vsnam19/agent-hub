@@ -88,8 +88,9 @@ tests build into one executable labelled `visible`; if `tests/hidden/` exists, i
 labelled `hidden`. Tests that read `data/` get the source directory from `MINILIB_SOURCE_DIR`.
 
 Gate steps, in order (all must exit 0): `configure` (`cmake -S . -B {build_dir} -G Ninja -DCMAKE_BUILD_TYPE=Debug`),
-`build` (`cmake --build {build_dir}`), `visible` (`ctest -L visible --no-tests=error`), `hidden` (`ctest -L hidden
---no-tests=error`). The agent's briefs ask it to run `cmake -S . -B build -G Ninja && cmake --build build && ctest
+`build` (`cmake --build {build_dir}`), `visible` (`ctest -L visible --no-tests=error`), `build-hidden` (`cmake --build
+{build_dir} --target minilib_hidden_tests`), `hidden` (`ctest -L hidden --no-tests=error`). Hidden tests are
+`EXCLUDE_FROM_ALL`, so only `build-hidden` builds them; `build` and `visible` never do. The agent's briefs ask it to run `cmake -S . -B build -G Ninja && cmake --build build && ctest
 --test-dir build --output-on-failure`. For aider, `lint_cmd` is a build and `test_cmd` is the build plus `ctest`.
 
 ## How to add a harness
