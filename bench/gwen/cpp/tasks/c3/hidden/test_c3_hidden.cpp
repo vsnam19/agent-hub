@@ -6,13 +6,14 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unistd.h>
 
 #include "minilib/inventory.hpp"
 
 namespace fs = std::filesystem;
 
 TEST(C3Hidden, ReadItemsWorks) {
-    const fs::path path = fs::temp_directory_path() / "minilib_c3_hidden.csv";
+    const fs::path path = fs::temp_directory_path() / ("minilib_c3_hidden_" + std::to_string(::getpid()) + ".csv");
     std::ofstream(path) << "name,qty,price\nX,1,1.0\n";
     const auto items = minilib::read_items(path.string());
     fs::remove(path);

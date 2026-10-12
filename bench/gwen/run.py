@@ -109,7 +109,7 @@ def run_one(
         sys.exit(2)
 
     cfg = harnesses[harness]
-    suite = (load_suites() if suites is None else suites)[task.suite]
+    suite = (load_suites(get_suites_file()) if suites is None else suites)[task.suite]
 
     setup_commit = prepare(task, repo, suite)
 

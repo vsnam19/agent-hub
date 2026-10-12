@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from bench.gwen.run import main, run_one
-from bench.gwen.tasks import load_tasks
+from bench.gwen.tasks import FIXTURE_DIR, TASKS_DIR, load_tasks
 from tests.bench.fakeserver import FakeServer
 
 
@@ -394,3 +394,29 @@ def test_unknown_harness_exit_2(tmp_path, harnesses_file):
     with patch("bench.gwen.run.get_harnesses_file", return_value=harnesses_file):
         rc = main(["--harness", "unknown_harness", "--task", "t1", "--model", "mod1"])
         assert rc == 2
+
+
+def test_run_one_honours_suites_env(tmp_path, fake_upstream, harnesses_file, env_with_fakes):
+    env_with_fakes.setenv("FAKE_HARNESS_MODE", "noop")
+    suites_file = tmp_path / "suites.toml"
+    suites_file.write_text(
+        f'[python]\nfixture = "{FIXTURE_DIR}"\ntasks = "{TASKS_DIR}"\n\n'
+        '[python.gate]\ncustom = ["{python}", "-c", "pass"]\n'
+    )
+    env_with_fakes.setenv("GWEN_BENCH_SUITES", str(suites_file))
+
+    res = run_one(
+        "fake",
+        "model1",
+        load_tasks()["t1"],
+        base_url=fake_upstream.url,
+        api_key="secret",
+        out_root=tmp_path / "out",
+        timeout=60.0,
+        ssh_target=None,
+        harnesses_file=harnesses_file,
+    )
+
+    # The gate comes from the suites file named by the env, not from the default suites.toml.
+    assert res["gate"] == {"custom": 0}
+    assert res["pass"] is True

@@ -5,6 +5,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #include "minilib/cli.hpp"
@@ -12,7 +13,7 @@
 namespace {
 
 std::string write_temp(const std::string& name, const std::string& content) {
-    const auto path = std::filesystem::temp_directory_path() / ("minilib_cli_" + name);
+    const auto path = std::filesystem::temp_directory_path() / ("minilib_cli_" + std::to_string(::getpid()) + "_" + name);
     std::ofstream(path) << content;
     return path.string();
 }

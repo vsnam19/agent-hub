@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 
 #include "minilib/cli.hpp"
 #include "minilib/inventory.hpp"
@@ -19,7 +20,7 @@ TEST(C5Hidden, QuotedNameWithCommaIsOneField) {
 }
 
 TEST(C5Hidden, PlainRowsStillParse) {
-    const fs::path path = fs::temp_directory_path() / "minilib_c5_hidden.csv";
+    const fs::path path = fs::temp_directory_path() / ("minilib_c5_hidden_" + std::to_string(::getpid()) + ".csv");
     std::ofstream(path) << "name,qty,price\nA,2,1.5\n\"B, C\",10,5.0\n";
     const auto items = minilib::load_items(path.string());
     fs::remove(path);

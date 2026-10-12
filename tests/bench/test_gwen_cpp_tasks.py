@@ -94,3 +94,13 @@ def test_cpp_brief_sections_and_gate(tid):
     assert BUILD_AND_TEST in brief
     assert "hidden" not in brief.lower()
     assert task.visible_tests == []
+
+
+def test_cpp_tests_name_temp_files_per_process():
+    # Two bench runs or ctest -j must not share a temp file: every C++ test that uses the temp dir names it by pid.
+    suite = load_suites()["cpp"]
+    sources = [*(suite.fixture / "tests").glob("*.cpp"), *suite.tasks_dir.glob("*/hidden/*.cpp")]
+    users = [p for p in sources if "temp_directory_path" in p.read_text()]
+    assert users
+    for p in users:
+        assert "getpid" in p.read_text(), p

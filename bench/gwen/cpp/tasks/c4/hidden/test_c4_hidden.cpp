@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 
 #include "minilib/cli.hpp"
 
@@ -14,7 +15,7 @@ namespace {
 class StatsJson : public ::testing::Test {
 protected:
     void SetUp() override {
-        path_ = (fs::temp_directory_path() / "minilib_c4_hidden.txt").string();
+        path_ = (fs::temp_directory_path() / ("minilib_c4_hidden_" + std::to_string(::getpid()) + ".txt")).string();
         std::ofstream(path_) << "one two  three\nfour";
     }
     void TearDown() override { fs::remove(path_); }
