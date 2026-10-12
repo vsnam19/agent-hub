@@ -19,7 +19,7 @@ INSTALLABLE = ("missing", "stale")
 class Row:
     host: str
     plugin: str
-    state: str  # current | stale | missing | not-a-worker-plugin | host-not-installed | per-run | stray
+    state: str  # current | stale | missing | error | not-a-worker-plugin | host-not-installed | per-run | stray
     installed_version: str | None = None
     source_version: str | None = None
     detail: str = ""
@@ -57,8 +57,17 @@ def status(config_dir: Path, repo_root: Path | None = None) -> list[Row]:
     cfg = load_config(config_dir)
     rows: list[Row] = []
     listed = _marketplace_names(cfg.marketplace_dir)[1] if cfg.marketplace_dir else set()
-    codex_installed = _codex_installed(cfg) if shutil.which("codex") and cfg.marketplace_name else {}
-    agy_installed = _agy_installed() if shutil.which("agy") else {}
+    errors: list[Row] = []
+    codex_installed: dict[str, str] = {}
+    if shutil.which("codex") and cfg.marketplace_name:
+        codex_installed, failure = _codex_installed(cfg)
+        if failure:
+            errors.append(Row("codex", "-", "error", detail=f"codex list failed: {failure}"))
+    agy_installed: set[str] = set()
+    if shutil.which("agy"):
+        agy_installed, failure = _agy_installed()
+        if failure:
+            errors.append(Row("agy", "-", "error", detail=f"agy list failed: {failure}"))
     for name, directory in cfg.plugins.items():
         row = _codex_row(cfg, name, directory, listed, codex_installed)
         if cfg.marketplace_registered == "name" and row.state in ("current", "stale", "missing"):
@@ -75,15 +84,13 @@ def status(config_dir: Path, repo_root: Path | None = None) -> list[Row]:
     for host in ("claude", "gwen"):
         for directory in resolved:
             rows.append(Row(host, by_dir.get(directory, directory.name), "per-run", detail=str(directory)))
+    rows.extend(errors)
     rows.extend(_strays(cfg))
     return rows
 
 
 def _repo_root() -> Path:
-    try:
-        proc = _run("git", "rev-parse", "--show-toplevel")
-    except OSError:
-        return Path.cwd()
+    proc = _run("git", "rev-parse", "--show-toplevel")
     top = proc.stdout.strip()
     return Path(top) if proc.returncode == 0 and top else Path.cwd()
 
@@ -122,7 +129,7 @@ def install(config_dir: Path, apply: bool, hosts: tuple[str, ...] = HOSTS, emit:
             emit(f"failed: {shlex.join(cmd)}: {exc}")
             return 1
         if proc.returncode != 0:
-            tail = "\n".join(proc.stderr.strip().splitlines()[-10:])
+            tail = "\n".join((proc.stderr.strip() or proc.stdout.strip()).splitlines()[-10:])
             emit(f"failed (exit {proc.returncode}): {shlex.join(cmd)}\n{tail}")
             return 1
     emit("")
@@ -177,7 +184,18 @@ def _name_detail(key: str, name: str) -> str:
 
 
 def _run(*argv: str) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, capture_output=True, text=True)
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(argv, 124, "", "timed out")
+    except OSError:
+        return subprocess.CompletedProcess(argv, 127, "", "<error>")
+
+
+def _failure(proc: subprocess.CompletedProcess) -> str | None:
+    if proc.returncode == 0:
+        return None
+    return "\n".join(proc.stderr.strip().splitlines()[-1:]) or f"exit {proc.returncode}"
 
 
 def _codex_home() -> Path:
@@ -207,21 +225,25 @@ def _registered(directory: Path, name: str | None = None) -> str | None:
     return "name" if by_name else None
 
 
-def _codex_installed(cfg: HubConfig) -> dict[str, str]:
+def _codex_installed(cfg: HubConfig) -> tuple[dict[str, str], str | None]:
     proc = _run("codex", "plugin", "list", "-m", str(cfg.marketplace_name), "--json")
+    if failure := _failure(proc):
+        return {}, failure
     try:
         data = json.loads(proc.stdout)
-        return {p["name"]: str(p.get("version", "")) for p in data.get("installed", [])}
+        return {p["name"]: str(p.get("version", "")) for p in data.get("installed", [])}, None
     except (ValueError, KeyError, TypeError, AttributeError):
-        return {}
+        return {}, None
 
 
-def _agy_installed() -> set[str]:
+def _agy_installed() -> tuple[set[str], str | None]:
     proc = _run("agy", "plugin", "list")
+    if failure := _failure(proc):
+        return set(), failure
     try:
-        return {p["name"] for p in json.loads(proc.stdout).get("imports", [])}
+        return {p["name"] for p in json.loads(proc.stdout).get("imports", [])}, None
     except (ValueError, KeyError, TypeError, AttributeError):
-        return set()
+        return set(), None
 
 
 def _codex_row(cfg: HubConfig, name: str, directory: Path, listed: set[str], installed: dict[str, str]) -> Row:

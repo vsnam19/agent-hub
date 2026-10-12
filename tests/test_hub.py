@@ -137,35 +137,35 @@ def _state(rows, host, plugin="telaf"):
     return next(r for r in rows if r.host == host and r.plugin == plugin).state
 
 
-def test_status_missing_when_not_installed(env):
-    rows = hub.status(env.config)
+def test_status_missing_when_not_installed(env, tmp_path):
+    rows = hub.status(env.config, tmp_path / "repo")
     assert _state(rows, "codex") == "missing"
     assert _state(rows, "agy") == "missing"
 
 
-def test_status_current_when_hash_and_version_match(env):
+def test_status_current_when_hash_and_version_match(env, tmp_path):
     env.install_codex_snapshot()
     env.install_agy_snapshot()
-    rows = hub.status(env.config)
+    rows = hub.status(env.config, tmp_path / "repo")
     assert _state(rows, "codex") == "current"
     assert _state(rows, "agy") == "current"
 
 
-def test_status_stale_when_skills_differ(env):
+def test_status_stale_when_skills_differ(env, tmp_path):
     snap = env.install_codex_snapshot()
     (snap / "skills" / "a" / "SKILL.md").write_text("changed")
     agy = env.install_agy_snapshot()
     (agy / "skills" / "b.md").write_text("extra")
-    rows = hub.status(env.config)
+    rows = hub.status(env.config, tmp_path / "repo")
     assert _state(rows, "codex") == "stale"
     assert _state(rows, "agy") == "stale"
 
 
-def test_status_stale_when_version_differs(env):
+def test_status_stale_when_version_differs(env, tmp_path):
     env.install_codex_snapshot(version="0.9.0")
     agy = env.install_agy_snapshot()
     (agy / "plugin.json").write_text(json.dumps({"name": "telaf", "version": "0.1.0"}))
-    rows = hub.status(env.config)
+    rows = hub.status(env.config, tmp_path / "repo")
     codex = next(r for r in rows if r.host == "codex")
     assert codex.state == "stale"
     assert (codex.installed_version, codex.source_version) == ("0.9.0", "1.0.0")
@@ -181,19 +181,19 @@ def test_status_per_run_rows_for_claude_and_gwen(env, tmp_path):
     assert _state(rows, "gwen") == "per-run"
 
 
-def test_status_reports_stray_codex_skills(env):
+def test_status_reports_stray_codex_skills(env, tmp_path):
     for name in ("telaf-api", "telaf-legato", ".system", "other"):
         (env.codex_home / "skills" / name).mkdir(parents=True)
-    rows = [r for r in hub.status(env.config) if r.state == "stray"]
+    rows = [r for r in hub.status(env.config, tmp_path / "repo") if r.state == "stray"]
     assert sorted(r.plugin for r in rows) == ["telaf-api", "telaf-legato"]
     assert all(r.detail.startswith(str(env.codex_home / "skills")) for r in rows)
     assert (env.codex_home / "skills" / "telaf-api").is_dir()
 
 
-def test_status_host_not_installed(env):
+def test_status_host_not_installed(env, tmp_path):
     (env.bin / "codex").unlink()
     (env.bin / "agy").unlink()
-    rows = hub.status(env.config)
+    rows = hub.status(env.config, tmp_path / "repo")
     assert _state(rows, "codex") == "host-not-installed"
     assert _state(rows, "agy") == "host-not-installed"
 
@@ -206,14 +206,15 @@ def test_install_dry_run_runs_nothing(env, capsys):
     assert env.mutating_calls() == []
 
 
-def test_install_apply_registers_marketplace_once(env):
+def test_install_apply_registers_marketplace_once(env, tmp_path):
     assert hub.install(env.config, apply=True) == 0
     adds = [c for c in env.calls() if c.startswith("codex plugin marketplace add")]
     assert adds == [f"codex plugin marketplace add {env.market}"]
     assert "codex plugin add telaf@agent-plugins" in env.calls()
     assert hub.install(env.config, apply=True) == 0
     assert len([c for c in env.calls() if c.startswith("codex plugin marketplace add")]) == 1
-    assert _state(hub.status(env.config), "codex") == "stale"  # fake snapshot is not copied; refresh stays planned
+    # fake snapshot is not copied; refresh stays planned
+    assert _state(hub.status(env.config, tmp_path / "repo"), "codex") == "stale"
 
 
 def test_install_apply_stops_at_first_failure(env, monkeypatch, capsys):
@@ -256,12 +257,12 @@ def test_status_survives_broken_repo_worker_plugins(env, tmp_path):
     assert err.detail
 
 
-def test_status_matches_by_manifest_name(env):
+def test_status_matches_by_manifest_name(env, tmp_path):
     (env.config / "workers.toml").write_text((env.config / "workers.toml").read_text().replace("telaf =", "key ="))
     (env.src / ".codex-plugin" / "plugin.json").write_text(json.dumps({"name": "telaf", "version": "1.0.0"}))
     env.install_codex_snapshot()
     env.install_agy_snapshot()
-    rows = hub.status(env.config)
+    rows = hub.status(env.config, tmp_path / "repo")
     codex = next(r for r in rows if r.host == "codex" and r.plugin == "key")
     agy = next(r for r in rows if r.host == "agy" and r.plugin == "key")
     assert (codex.state, agy.state) == ("current", "current")
@@ -274,10 +275,10 @@ def test_status_matches_by_manifest_name(env):
     assert ["codex", "plugin", "add", "telaf@agent-plugins"] in planned
 
 
-def test_strays_match_name_dash_prefix_and_skill_names_only(env):
+def test_strays_match_name_dash_prefix_and_skill_names_only(env, tmp_path):
     for name in ("telaf", "telaf-api", "a", "telafx", "other", ".system"):
         (env.codex_home / "skills" / name).mkdir(parents=True)
-    rows = [r for r in hub.status(env.config) if r.state == "stray"]
+    rows = [r for r in hub.status(env.config, tmp_path / "repo") if r.state == "stray"]
     assert sorted(r.plugin for r in rows) == ["a", "telaf", "telaf-api"]
 
 
@@ -298,7 +299,7 @@ def test_status_host_not_installed_ignores_system_path(env, tmp_path, monkeypatc
     (env.bin / "codex").unlink()
     (env.bin / "agy").unlink()
     assert not (env.bin / "codex").exists()
-    rows = hub.status(env.config)
+    rows = hub.status(env.config, tmp_path / "repo")
     assert _state(rows, "codex") == "host-not-installed"
     assert _state(rows, "agy") == "host-not-installed"
     assert env.calls() == []
@@ -359,10 +360,54 @@ def test_marketplace_registered_from_other_root_is_not_readded(env, tmp_path, ca
     cfg = hub.load_config(env.config)
     assert cfg.marketplace_registered == "name"
     assert hub._registered((tmp_path / "market").resolve(), "agent-plugins") == "name"
-    rows = hub.status(env.config)
+    rows = hub.status(env.config, tmp_path / "repo")
     codex = next(r for r in rows if r.host == "codex" and r.plugin == "telaf")
     assert "marketplace agent-plugins is registered from another root" in codex.detail
     assert hub.install(env.config, apply=False) == 0
     out = capsys.readouterr().out
     assert "marketplace add" not in out
     assert "codex plugin add telaf@agent-plugins" in out
+
+
+def _fail_list(monkeypatch, exc):
+    real_run = hub.subprocess.run
+
+    def run(cmd, **kwargs):
+        if "list" in cmd and cmd[0] in ("codex", "agy") and "marketplace" not in cmd:
+            raise exc
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(hub.subprocess, "run", run)
+
+
+def test_status_reports_list_timeout_as_error_row(env, tmp_path, monkeypatch):
+    _fail_list(monkeypatch, hub.subprocess.TimeoutExpired(["x"], 30))
+    rows = hub.status(env.config, tmp_path / "repo")
+    errors = {r.host: r for r in rows if r.state == "error"}
+    assert errors["codex"].detail == "codex list failed: timed out"
+    assert errors["agy"].detail == "agy list failed: timed out"
+    assert errors["codex"].plugin == "-"
+    assert _state(rows, "codex") == "missing"
+
+
+def test_status_reports_unexecutable_tool(env, tmp_path, monkeypatch):
+    _fail_list(monkeypatch, PermissionError(13, "denied"))
+    rows = hub.status(env.config, tmp_path / "repo")
+    errors = {r.host: r for r in rows if r.state == "error"}
+    assert errors["codex"].detail == "codex list failed: <error>"
+    assert errors["agy"].detail == "agy list failed: <error>"
+
+
+def test_install_failure_shows_stdout_when_stderr_empty(env, tmp_path, monkeypatch, capsys):
+    env.install_fake(
+        "codex",
+        FAKE_CODEX.replace(
+            'print("WARNING: noisy", file=sys.stderr)',
+            'print("stdout reason") if args[:2] == ["plugin", "add"] else None',
+        ).replace('print(os.environ.get("FAKE_CODEX_STDERR", "boom\\nlast line"), file=sys.stderr)', "pass"),
+    )
+    monkeypatch.setenv("FAKE_CODEX_FAIL", "1")
+    assert hub.install(env.config, apply=True) == 1
+    out = capsys.readouterr().out
+    assert "exit 3" in out
+    assert "stdout reason" in out
