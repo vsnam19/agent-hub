@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from agenthub import process
+from agenthub import gateguard, process
 from agenthub.cli import main
 from agenthub.config import paths
 from agenthub.jobs import list_jobs
@@ -256,3 +256,29 @@ def test_gate_job_exception_marks_failed(env_sandbox, repo, monkeypatch):
         main(["gate", "-d", str(repo)])
 
     assert [j["status"] for j in list_jobs(paths(), 100) if j["kind"] == "gate"] == ["failed"]
+
+
+def test_cancelled_gate_job_skips_gateguard(env_sandbox, repo, capsys, monkeypatch):
+    set_repo_gates(repo, ["true"])
+    calls = []
+
+    def fake_inspect(repo_, since):
+        calls.append(since)
+        return [{"file": "test_a.py", "kind": "assert-removed", "lines": [1]}]
+
+    def sigterm_during_gate(inv, cwd, env, attempt_dir, timeout, on_start):
+        (attempt_dir / "stdout").write_text("")
+        (attempt_dir / "stderr").write_text("")
+        os.kill(os.getpid(), signal.SIGTERM)
+        return process.Ran(rc=-15, timed_out=False, duration_s=0.0, pgid=0)
+
+    monkeypatch.setattr(process, "run", sigterm_during_gate)
+    monkeypatch.setattr(gateguard, "inspect_diff", fake_inspect)
+
+    rc = main(["gate", "-d", str(repo), "--json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 130
+    assert out["status"] == "cancelled"
+    assert calls == []
+    assert out["gate_touched"] == []

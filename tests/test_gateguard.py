@@ -416,3 +416,37 @@ def test_unittest_assert_call_under_if_is_flagged(repo):
         UNITTEST_HEAD + "        if False:\n            self.assertEqual(x, 1)\n",
     )
     assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [6]}]
+
+
+TRY_ASSERT_TEST = "def test_a():\n    try:\n        assert x == 1\n    except ValueError:\n        pass\n"
+
+
+def test_unchanged_test_with_try_asserts_not_flagged(repo):
+    test_file = repo / "test_l.py"
+    test_file.write_text(TRY_ASSERT_TEST)
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    # the file is touched, the test is not: a new test is added beside it
+    test_file.write_text(TRY_ASSERT_TEST + "\n\ndef test_b():\n    assert 1\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == []
+
+
+def test_changed_test_with_try_assert_removed_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    try:\n        assert x == 1\n    except ValueError:\n        pass\n    assert y\n",
+        "def test_a():\n    try:\n        pass\n    except ValueError:\n        pass\n    assert y\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [3]}]
+
+
+def test_assert_moved_out_of_try_to_top_level_not_flagged(repo):
+    res = _weaken_test(
+        repo,
+        TRY_ASSERT_TEST,
+        "def test_a():\n    assert x == 1\n    try:\n        pass\n    except ValueError:\n        pass\n",
+    )
+    assert res == []

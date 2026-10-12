@@ -196,7 +196,7 @@ def run_gate_job(
             record["gate"], passed = run_gates(
                 merge_gates(defaults, cli_gates), repo.root, job.dir / "gate", head, cancel
             )
-            record["gate_touched"] = gateguard.inspect_diff(repo, since)
+            record["gate_touched"] = [] if cancel.cancelled else gateguard.inspect_diff(repo, since)
         except BaseException:
             _finish(job, record, "failed", now, started)
             raise

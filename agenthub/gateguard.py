@@ -23,8 +23,9 @@ class Change:
 class TestDef:
     start: int
     end: int
-    asserts: list[str]  # ast.dump of each assertion's expression (the whole node for a call such as pytest.raises)
-    kept: list[str]  # ast.dump of each assertion the test states directly (see _kept_keys)
+    dump: str  # ast.dump of the whole function, decorators included: an identical test is never judged
+    asserts: list[tuple[tuple[str, ...], str]]  # (place, ast.dump) of each assertion; see _assertion_places
+    kept: list[tuple]  # what the test keeps: ("direct", dump) or ("placed", place, dump) per form (see _kept_tokens)
 
 
 def _parse_diff(diff_text: str) -> list[Change]:
@@ -122,52 +123,99 @@ def _test_index(source: str) -> dict[str, TestDef] | None:
                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name.startswith("test_"):
                     index[f"{node.name}.{item.name}"] = item
     return {
-        ident: TestDef(fn.lineno, fn.end_lineno, _assertion_keys(fn), _kept_keys(fn.body))
+        ident: TestDef(
+            fn.lineno,
+            fn.end_lineno,
+            ast.dump(fn, include_attributes=False),
+            [(place, _assertion_key(node)) for place, node in _assertion_places(fn)],
+            _kept_tokens(fn),
+        )
         for ident, fn in index.items()
     }
 
 
 def _weakened(base: TestDef, new: TestDef) -> bool:
-    """A base assertion the new test does not keep as a direct statement. Containment in a larger expression
-    (`x == 1 or True`, `not (x == 1)`) or nesting under `if`/`try` does not keep it."""
-    return bool(Counter(base.asserts) - Counter(new.kept))
+    """A base assertion the new test does not keep. Kept: the same assertion in the same place (same enclosing
+    statement kinds), or as a direct statement of the new test anywhere (see _kept_tokens). Containment in a larger
+    expression (`x == 1 or True`, `not (x == 1)`) keeps nothing. An identical test is never weakened."""
+    if base.dump == new.dump:
+        return False
+    pool = Counter(new.kept)
+    unmatched = []
+    for place, key in base.asserts:
+        if pool[("placed", place, key)]:
+            pool[("placed", place, key)] -= 1
+        else:
+            unmatched.append(key)
+    for key in unmatched:
+        if not pool[("direct", key)]:
+            return True
+        pool[("direct", key)] -= 1
+    return False
 
 
 def _is_raises(node: ast.AST) -> bool:
     return isinstance(node, ast.Call) and ast.unparse(node.func).endswith(("raises", "warns"))
 
 
-def _assertion_keys(fn: ast.AST) -> list[str]:
-    """One key per assertion in the test: an `assert`'s test, or a call such as `self.assertEqual(...)` that is not
-    part of an `assert`."""
-    inside_assert = {id(sub) for n in ast.walk(fn) if isinstance(n, ast.Assert) for sub in ast.walk(n)}
-    keys = []
-    for n in ast.walk(fn):
-        if isinstance(n, ast.Assert):
-            keys.append(ast.dump(n.test))
-        elif _is_assertion(n) and id(n) not in inside_assert:
-            keys.append(ast.dump(n))
-    return keys
+def _assertion_key(node: ast.AST) -> str:
+    """The key of an assertion: an `assert`'s test, or the whole call such as `self.assertEqual(...)`."""
+    return ast.dump(node.test) if isinstance(node, ast.Assert) else ast.dump(node)
 
 
-def _kept_keys(body: list[ast.stmt]) -> list[str]:
-    """What a test body keeps: the test of each top-level `assert` and each direct operand of its `and`; each direct
-    assertion call and each `with` header call; the body of a `with pytest.raises/warns` block, read the same way."""
-    kept = []
+def _assertion_places(fn: ast.AST) -> list[tuple[tuple[str, ...], ast.AST]]:
+    """Each assertion in the function with its place: the enclosing compound statements, each as `Kind.field`
+    (`Try.body`, `If.body`). Statements directly in the function body add no label."""
+    places = []
+
+    def visit(node: ast.AST, place: tuple[str, ...]) -> None:
+        for field, value in ast.iter_fields(node):
+            for item in value if isinstance(value, list) else [value]:
+                if not isinstance(item, ast.AST):
+                    continue
+                child = place
+                if node is not fn and isinstance(item, (ast.stmt, ast.excepthandler)):
+                    child = (*place, f"{type(node).__name__}.{field}")
+                if _is_assertion(item):
+                    places.append((child, item))
+                else:
+                    visit(item, child)
+
+    visit(fn, ())
+    return places
+
+
+def _kept_tokens(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[tuple]:
+    """What a test keeps, one token per form of each assertion. A direct assertion keeps its form wherever it moved
+    (`("direct", dump)`); any other keeps it only in the same place (`("placed", place, dump)`). Direct: a top-level
+    `assert` or assertion call, a `with` header call, and the body of a `with pytest.raises/warns` block. An assert's
+    forms are its test and, for an `and`, each direct operand."""
+    direct = _direct_ids(fn.body)
+    tokens = []
+    for place, node in _assertion_places(fn):
+        forms = [_assertion_key(node)]
+        if isinstance(node, ast.Assert) and isinstance(node.test, ast.BoolOp) and isinstance(node.test.op, ast.And):
+            forms.extend(ast.dump(v) for v in node.test.values)
+        for form in forms:
+            tokens.append(("direct", form) if id(node) in direct else ("placed", place, form))
+    return tokens
+
+
+def _direct_ids(body: list[ast.stmt]) -> set[int]:
+    """Ids of the assertion nodes a test body states directly (see _kept_tokens)."""
+    ids = set()
     for stmt in body:
         if isinstance(stmt, ast.Assert):
-            kept.append(ast.dump(stmt.test))
-            if isinstance(stmt.test, ast.BoolOp) and isinstance(stmt.test.op, ast.And):
-                kept.extend(ast.dump(v) for v in stmt.test.values)
+            ids.add(id(stmt))
         elif isinstance(stmt, ast.Expr) and _is_assertion(stmt.value):
-            kept.append(ast.dump(stmt.value))
+            ids.add(id(stmt.value))
         elif isinstance(stmt, (ast.With, ast.AsyncWith)):
             for item in stmt.items:
                 if _is_assertion(item.context_expr):
-                    kept.append(ast.dump(item.context_expr))
+                    ids.add(id(item.context_expr))
             if any(_is_raises(item.context_expr) for item in stmt.items):
-                kept.extend(_kept_keys(stmt.body))
-    return kept
+                ids |= _direct_ids(stmt.body)
+    return ids
 
 
 def _compare_tests(path: str, base: dict[str, TestDef], new: dict[str, TestDef], removed: list[Change]) -> list[dict]:
