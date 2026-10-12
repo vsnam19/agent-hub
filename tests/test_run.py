@@ -591,3 +591,13 @@ def test_no_repo_config_no_extra_gates(env_sandbox, repo, monkeypatch):
     result = go(repo, ["agy:m1"], gates=["test -f agent_wrote.txt"])
     assert result["status"] == "ok"
     assert [g["cmd"] for g in result["gate"]] == ["test -f agent_wrote.txt"]
+
+
+def test_run_passes_worker_plugins_to_adapter(env_sandbox, repo, tmp_path):
+    telaf = tmp_path / "telaf"
+    (telaf / "skills").mkdir(parents=True)
+    (env_sandbox.config / "workers.toml").write_text(f'default = ["telaf"]\n[plugins]\ntelaf = "{telaf}"\n')
+    result = go(repo, ["claude:sonnet"])
+    assert result["status"] == "ok"
+    argv = fake_calls(env_sandbox.fakelog, "claude")[0]["argv"]
+    assert argv[argv.index("--plugin-dir") + 1] == str(telaf.resolve())

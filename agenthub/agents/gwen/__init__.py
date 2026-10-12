@@ -71,6 +71,8 @@ class GwenAdapter(Adapter):
                 }
             }
         }
+        if req.plugin_dirs:
+            config["skills"] = {"paths": [str(d / "skills") for d in req.plugin_dirs]}
         cfg_path = req.attempt_dir / "opencode.json"
         fd = os.open(cfg_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
@@ -80,7 +82,7 @@ class GwenAdapter(Adapter):
         return Invocation(
             argv=[self.config.binary, "run", "--model", f"gwen/{req.model}", text],
             stdin_path=None,
-            env={"OPENCODE_CONFIG": str(cfg_path), "GWEN_API_KEY": key},
+            env={"OPENCODE_CONFIG": str(cfg_path), "GWEN_API_KEY": key, "OPENCODE_DISABLE_EXTERNAL_SKILLS": "1"},
         )
 
     def classify(self, rc: int, attempt_dir: Path) -> Classified:

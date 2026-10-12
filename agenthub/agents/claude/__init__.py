@@ -38,6 +38,10 @@ class ClaudeAdapter(Adapter):
             argv.append("--add-dir")
             argv.append(str(req.brief_path.parent))
 
+        for plugin_dir in req.plugin_dirs:
+            argv.append("--plugin-dir")
+            argv.append(str(plugin_dir))
+
         return Invocation(argv=argv, stdin_path=req.brief_path)
 
     def classify(self, rc: int, attempt_dir: Path) -> Classified:

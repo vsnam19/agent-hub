@@ -20,6 +20,7 @@ from agenthub.config import ConfigError, Paths, Pool
 from agenthub.jobs import Job, list_jobs, new_job
 from agenthub.pool import Cooldowns, Link
 from agenthub.procinfo import start_time
+from agenthub.workers import worker_plugins
 
 EXIT = {
     "ok": 0,
@@ -258,6 +259,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     gates = args.gates
     if kind == "implement" and repo is not None:
         gates = merge_gates(repo_gates(repo.root), args.gates)
+    plugin_dirs = worker_plugins(p.config_dir, repo.root if repo else workdir)
 
     if kind == "review" and base is None:
         base = args.base or (repo.default_branch if repo else "HEAD")
@@ -356,6 +358,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
                 brief_path=job.dir / "brief.md",
                 attempt_dir=attempt_dir,
                 git_common_dir=repo.common_dir,
+                plugin_dirs=plugin_dirs,
             )
             cl = adapter.preflight(req)
             if cl is not None:

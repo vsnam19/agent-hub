@@ -252,3 +252,29 @@ def test_claude_file_not_found_is_not_model(tmp_path, adapter_claude):
     (attempt / "stderr").write_text("config file not found; using default model")
     c = adapter_claude.classify(2, attempt)
     assert c.outcome == Outcome.FAILED
+
+
+def test_claude_build_adds_plugin_dirs(tmp_path):
+    adapter = ClaudeAdapter()
+    adapter.config = type("C", (), {"binary": "claude"})()
+
+    brief = tmp_path / "b.md"
+    brief.write_text("hello")
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    telaf = tmp_path / "telaf"
+    aspice = tmp_path / "aspice"
+
+    req = Request(
+        role="review",
+        model="m",
+        workdir=tmp_path,
+        brief_path=brief,
+        attempt_dir=attempt,
+        git_common_dir=tmp_path / ".git",
+        plugin_dirs=(telaf, aspice),
+    )
+
+    argv = adapter.build(req).argv
+    assert argv[-4:] == ["--plugin-dir", str(telaf), "--plugin-dir", str(aspice)]
+    assert argv[argv.index("--allowedTools") + 1] == "Read,Grep,Glob"

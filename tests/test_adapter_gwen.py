@@ -1,6 +1,7 @@
 import json
 import sys
 import threading
+from dataclasses import replace
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -216,3 +217,25 @@ def test_default_pool_implement_small_starts_with_gwen():
     pool = load_pool()
     chain = pool.roles["implement-small"].chain
     assert [str(link) for link in chain] == ["gwen:qwen3.5-9b-4bit", "claude:haiku"]
+
+
+def test_gwen_config_has_skill_paths(tmp_path, monkeypatch, server):
+    _configure(tmp_path, monkeypatch, server.server_address[1])
+    req = replace(_req(tmp_path), plugin_dirs=(tmp_path / "telaf", tmp_path / "aspice"))
+    inv = _adapter().build(req)
+    cfg = json.loads(Path(inv.env["OPENCODE_CONFIG"]).read_text())
+    assert cfg["skills"] == {"paths": [str(tmp_path / "telaf" / "skills"), str(tmp_path / "aspice" / "skills")]}
+
+
+def test_gwen_config_without_plugins_has_no_skills_key(tmp_path, monkeypatch, server):
+    _configure(tmp_path, monkeypatch, server.server_address[1])
+    inv = _adapter().build(_req(tmp_path))
+    cfg = json.loads(Path(inv.env["OPENCODE_CONFIG"]).read_text())
+    assert "skills" not in cfg
+    assert "provider" in cfg
+
+
+def test_gwen_env_disables_external_skills(tmp_path, monkeypatch, server):
+    _configure(tmp_path, monkeypatch, server.server_address[1])
+    inv = _adapter().build(_req(tmp_path))
+    assert inv.env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] == "1"
