@@ -62,8 +62,73 @@ def test_invalid_json():
 
 
 def test_missing_field():
-    with pytest.raises(DraftError, match="missing field: reason"):
-        parse(_reply({"goal": "g", "tasks": [{"name": "a", "role": "implement", "depends_on": [], "brief": "b"}]}))
+    with pytest.raises(DraftError, match="missing field: brief"):
+        parse(_reply({"goal": "g", "tasks": [{"name": "a", "role": "implement", "depends_on": [], "reason": "r"}]}))
+
+
+@pytest.mark.parametrize(
+    "fence",
+    [
+        "```json",
+        "```JSON",
+        "```Json",
+        "  ```json",
+        "\t```json",
+    ],
+)
+def test_fence_variants(fence):
+    body = json.dumps({"goal": "g", "tasks": [_task("a")]})
+    for reply in (
+        f"{fence}\n{body}\n```\n",
+        f"{fence}\r\n{body}\r\n```\r\n",
+        f"{fence}\n{body}```\n",
+        f"{fence}\n{body}\n  ```  \n",
+    ):
+        draft = parse(reply)
+
+        assert draft.goal == "g"
+        assert [t.name for t in draft.tasks] == ["a"]
+
+
+def test_role_defaults_and_reason_rule():
+    reply = _reply({"goal": "g", "tasks": [{"name": "a", "depends_on": [], "brief": "b"}]})
+
+    draft = parse(reply)
+
+    assert draft.tasks[0].role == "implement"
+    assert draft.tasks[0].reason == ""
+
+    for role in ("implement-small", "implement-hard"):
+        with pytest.raises(DraftError, match="needs a non-empty reason"):
+            parse(_reply({"goal": "g", "tasks": [{"name": "a", "role": role, "depends_on": [], "brief": "b"}]}))
+        with pytest.raises(DraftError, match="needs a non-empty reason"):
+            parse(
+                _reply(
+                    {
+                        "goal": "g",
+                        "tasks": [{"name": "a", "role": role, "depends_on": [], "reason": "   ", "brief": "b"}],
+                    }
+                )
+            )
+
+    kept = parse(_reply({"goal": "g", "tasks": [_task("a", "implement-small")]}))
+    assert kept.tasks[0].reason == "a reason"
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        ({"tasks": [_task("a")]}, "missing field: goal"),
+        ({"goal": "g", "tasks": []}, "tasks must be a non-empty list"),
+        ({"goal": "g", "tasks": "a"}, "tasks must be a non-empty list"),
+        ([{"goal": "g", "tasks": [_task("a")]}], "techlead json must be an object"),
+        ({"goal": "g", "tasks": [{**_task("a"), "depends_on": "core"}]}, "depends_on must be a list of strings"),
+        ({"goal": "g", "tasks": [_task("a", depends_on=["a"])]}, "dependency cycle: a -> a"),
+    ],
+)
+def test_shape_errors(data, message):
+    with pytest.raises(DraftError, match=message):
+        parse(_reply(data))
 
 
 def test_bad_role():

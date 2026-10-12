@@ -4,7 +4,8 @@ from dataclasses import dataclass, field
 
 ROLES = ("implement-small", "implement", "implement-hard")
 NAME_RE = re.compile(r"[a-z0-9-]+")
-BLOCK_RE = re.compile(r"^```json[ \t]*\n(.*?)^```[ \t]*$", re.DOTALL | re.MULTILINE)
+BLOCK_RE = re.compile(r"^[ \t]*```json[ \t]*\r?\n(.*?)```[ \t]*\r?$", re.DOTALL | re.MULTILINE | re.IGNORECASE)
+DEFAULT_ROLE = "implement"
 
 
 class DraftError(Exception):
@@ -66,23 +67,26 @@ def parse(reply: str) -> Draft:
 def _parse_task(index: int, raw: object) -> DraftTask:
     if not isinstance(raw, dict):
         raise DraftError(f"task {index} must be an object")
-    for key in ("name", "role", "depends_on", "reason", "brief"):
+    for key in ("name", "depends_on", "brief"):
         if key not in raw:
             raise DraftError(f"task {index} missing field: {key}")
     name = raw["name"]
     if not isinstance(name, str) or not NAME_RE.fullmatch(name):
         raise DraftError(f"task {index} name must match [a-z0-9-]+: {name!r}")
-    role = raw["role"]
+    role = raw.get("role", DEFAULT_ROLE)
     if role not in ROLES:
         raise DraftError(f"task {name} has bad role {role!r}, expected one of {', '.join(ROLES)}")
     deps = raw["depends_on"]
     if not isinstance(deps, list) or not all(isinstance(d, str) for d in deps):
         raise DraftError(f"task {name} depends_on must be a list of strings")
-    if not isinstance(raw["reason"], str):
+    reason = raw.get("reason", "")
+    if not isinstance(reason, str):
         raise DraftError(f"task {name} reason must be a string")
+    if role != DEFAULT_ROLE and not reason.strip():
+        raise DraftError(f"task {name} has role {role!r} and needs a non-empty reason")
     if not isinstance(raw["brief"], str):
         raise DraftError(f"task {name} brief must be a string")
-    return DraftTask(name=name, role=role, depends_on=list(deps), reason=raw["reason"], brief=raw["brief"])
+    return DraftTask(name=name, role=role, depends_on=list(deps), reason=reason, brief=raw["brief"])
 
 
 def _check_cycles(tasks: list[DraftTask]) -> None:
