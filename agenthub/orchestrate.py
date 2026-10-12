@@ -249,11 +249,11 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         if link.agent not in adapters:
             raise ConfigError(f"unknown agent in chain: {link.agent}")
     briefmod.validate(kind, args.brief)
-    known_skills = available_skills(p.config_dir) if args.skills else {}
-    for skill in args.skills:
+    skills = list(dict.fromkeys(args.skills))
+    known_skills = available_skills(p.config_dir) if skills else {}
+    for skill in skills:
         if skill not in known_skills:
-            listed = ", ".join(sorted(known_skills)) or "none configured"
-            raise ConfigError(f"unknown skill {skill!r}: available skills are {listed}")
+            raise ConfigError(f"unknown skill {skill!r}: {skills_hint(known_skills)}")
 
     started = now()
     workdir = args.workdir
@@ -280,9 +280,9 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     plugin_dirs = ()
     if refusal is None:
         plugin_dirs = worker_plugins(p.config_dir, repo.root if repo else workdir, repo_config)
-        if args.skills:
+        if skills:
             # a named skill must be loadable even when its plugin is not in this run's default list
-            skill_dirs = skill_plugin_dirs(p.config_dir, [known_skills[s] for s in args.skills])
+            skill_dirs = skill_plugin_dirs(p.config_dir, [known_skills[s] for s in skills])
             plugin_dirs = (*plugin_dirs, *(d for d in skill_dirs if d not in plugin_dirs))
 
     if kind == "review" and base is None:
@@ -315,8 +315,8 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     standing = briefmod.standing_orders(p.config_dir, repo.root if repo else None)
     if standing:
         text += "\n\n" + standing
-    if args.skills:
-        text += "\n\n" + _skills_section(args.skills, known_skills) + "\n"
+    if skills:
+        text += "\n\n" + _skills_section(skills, known_skills) + "\n"
     if kind == "implement":
         text += "\n" + handoff.FOOTER
     else:
@@ -543,6 +543,11 @@ def _touched_problems(findings: list[dict], judges: list[dict]) -> list[str]:
     if unjudged:
         problems.insert(0, f"gate touched: {unjudged} findings not judged by the reviewer")
     return problems
+
+
+def skills_hint(known: dict[str, str]) -> str:
+    """The clause naming the skills that can be used, for an unknown-skill error."""
+    return f"available skills are {', '.join(sorted(known))}" if known else "none configured"
 
 
 def _skills_section(skills: list[str], known: dict[str, str]) -> str:

@@ -374,3 +374,29 @@ def test_plan_run_rejects_unknown_skill_before_running(env_sandbox, tmp_path):
     assert "task t2: unknown skill nope" in res.stderr
     assert not (plan_file.parent / "state.json").exists()
     assert list_jobs(paths(), 100) == []
+
+
+def test_plan_unknown_skill_lists_available(env_sandbox, tmp_path):
+    worker = tmp_path / "worker-plugin"
+    (worker / "skills" / "debug-playbook").mkdir(parents=True)
+    (worker / "skills" / "debug-playbook" / "SKILL.md").write_text("# debug\n")
+    telaf = tmp_path / "telaf"
+    (telaf / "skills" / "telaf").mkdir(parents=True)
+    (telaf / "skills" / "telaf" / "SKILL.md").write_text("# telaf\n")
+    (env_sandbox.config / "workers.toml").write_text(
+        f'default = []\n[plugins]\nworker = "{worker}"\ntelaf = "{telaf}"\n'
+    )
+    repo = tmp_path / "repo"
+    make_repo(repo)
+    plan_content = {
+        "goal": "do it",
+        "repo": str(repo),
+        "base": "master",
+        "slug": "plan-1",
+        "tasks": [{"name": "t1", "role": "implement", "brief": "b1.md", "skills": ["nope"]}],
+    }
+    plan_file = make_plan_file(tmp_path, repo, plan_content)
+    res = run_cli_plan(env_sandbox, plan_file, "run")
+    assert res.returncode == 2
+    assert "task t1: unknown skill nope: available skills are debug-playbook, telaf" in res.stderr
+    assert not (plan_file.parent / "state.json").exists()

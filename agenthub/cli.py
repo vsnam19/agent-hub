@@ -14,7 +14,7 @@ from agenthub.agents import registry
 from agenthub.brief import BriefError, order_table
 from agenthub.config import ConfigError, load_pool, parse_duration, paths, role_kind
 from agenthub.jobs import get_job, list_jobs
-from agenthub.orchestrate import EXIT, RunArgs, readiness, run_gate_job, run_job
+from agenthub.orchestrate import EXIT, RunArgs, readiness, run_gate_job, run_job, skills_hint
 from agenthub.plan import PlanError
 from agenthub.plan import load as load_plan
 from agenthub.planrun import run_plan
@@ -624,7 +624,7 @@ def _cmd_plan(args) -> int:
         for task in plan.tasks:
             for skill in task.skills:
                 if skill not in known_skills:
-                    raise UsageError(f"task {task.name}: unknown skill {skill}")
+                    raise UsageError(f"task {task.name}: unknown skill {skill}: {skills_hint(known_skills)}")
 
         state = load_or_init(plan)
         _claim_runner(state, plan_dir)

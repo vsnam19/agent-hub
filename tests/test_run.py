@@ -676,6 +676,22 @@ def test_unknown_skill_is_config_error(env_sandbox, repo, tmp_path):
     assert list_jobs(paths(), 100) == []
 
 
+def test_duplicate_skills_listed_once(env_sandbox, repo, tmp_path):
+    _skills_layout(env_sandbox, tmp_path)
+    telaf = (tmp_path / "telaf").resolve()
+    line = "Load and follow these skills before you start (Claude lists them as <plugin>:<skill>): "
+
+    result = go(repo, ["agy:m1"], skills=["telaf", "debug-playbook", "telaf"])
+    brief = (job_dir(result) / "brief.md").read_text()
+    assert f"## Skills\n\n{line}telaf (telaf), debug-playbook (worker)\n" in brief
+    assert brief.count("telaf (telaf)") == 1
+
+    result = go(repo, ["claude:sonnet"], skills=["telaf", "telaf"])
+    assert result["status"] == "ok"
+    argv = fake_calls(env_sandbox.fakelog, "claude")[0]["argv"]
+    assert [argv[i + 1] for i, a in enumerate(argv) if a == "--plugin-dir"] == [str(telaf)]
+
+
 def test_no_skills_no_section(env_sandbox, repo):
     result = go(repo, ["agy:m1"])
     brief = (job_dir(result) / "brief.md").read_text()
