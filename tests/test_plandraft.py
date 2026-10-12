@@ -1,8 +1,10 @@
 import json
+import re
 
 import pytest
 
-from agenthub.plandraft import DraftError, parse
+from agenthub import tasksize
+from agenthub.plandraft import DraftError, parse, techlead_brief
 
 
 def _reply(data: object, prefix: str = "Here is the plan.\n") -> str:
@@ -194,3 +196,35 @@ def test_unclosed_fence():
     for reply in (f"Plan:\n```json\n{body}\n", f"```JSON\n{body}"):
         with pytest.raises(DraftError, match="the ```json block is not closed"):
             parse(reply)
+
+
+def test_techlead_brief_has_limits_and_spec():
+    text = techlead_brief("docs/spec.md", ["just lint", "uv run pytest -q"])
+
+    assert "`docs/spec.md`" in text
+    assert "`just lint` and `uv run pytest -q`" in text
+    assert f"at most {tasksize.MAX_FILES} files" in text
+    assert f"at most {tasksize.MAX_DELIVERABLES} numbered deliverables" in text
+    assert f"at most {tasksize.MAX_TESTS} named tests" in text
+    assert "$" not in text
+    assert "```json" in text
+
+
+def test_techlead_brief_example_passes_tasksize():
+    text = techlead_brief("docs/spec.md", ["just test"])
+    example = re.search(r"````markdown\n(.*?)\n````", text, re.DOTALL)
+
+    assert example is not None
+    assert "## Gate" in example.group(1)
+    assert "~/" not in example.group(1)
+    assert "/home/" not in example.group(1)
+    assert tasksize.check(example.group(1)) == []
+
+
+def test_techlead_brief_states_file_counting_and_repo_paths():
+    text = techlead_brief("docs/spec.md", ["just test"])
+
+    assert "counts toward the" in text
+    assert "`## Expected output`" in text
+    assert "relative to the repository root" in text
+    assert "home-directory path" in text

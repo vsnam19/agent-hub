@@ -1,8 +1,13 @@
 import json
 import re
+import string
 from dataclasses import dataclass, field
+from pathlib import Path
+
+from agenthub import tasksize
 
 ROLES = ("implement-small", "implement", "implement-hard")
+TEMPLATE = Path(__file__).parent / "templates" / "techlead-brief.md"
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 BLOCK_RE = re.compile(r"^[ \t]*```json[ \t]*\r?\n(.*?)```[ \t]*\r?$", re.DOTALL | re.MULTILINE | re.IGNORECASE)
 OPEN_RE = re.compile(r"^[ \t]*```json[ \t]*\r?$", re.MULTILINE | re.IGNORECASE)
@@ -11,6 +16,28 @@ DEFAULT_ROLE = "implement"
 
 class DraftError(Exception):
     pass
+
+
+def techlead_brief(spec_path: str, gates: list[str]) -> str:
+    """The techlead job's brief: the spec path, the repository gates and the tasksize limits filled in."""
+    if not gates:
+        raise ValueError("techlead brief needs at least one gate")
+    template = string.Template(TEMPLATE.read_text(encoding="utf-8"))
+    return template.substitute(
+        spec_path=spec_path,
+        gates=_join_gates(gates),
+        max_files=tasksize.MAX_FILES,
+        max_deliverables=tasksize.MAX_DELIVERABLES,
+        max_tests=tasksize.MAX_TESTS,
+    )
+
+
+def _join_gates(gates: list[str]) -> str:
+    """`a`, `b` and `c`: each gate backticked, joined the way the example brief joins its gates."""
+    names = [f"`{gate}`" for gate in gates]
+    if len(names) == 1:
+        return names[0]
+    return f"{', '.join(names[:-1])} and {names[-1]}"
 
 
 @dataclass
