@@ -55,6 +55,20 @@ def test_template_has_required_headings():
         assert heading in text
 
 
+def test_brief_template_has_rationalizations_section():
+    text = TEMPLATE.read_text()
+    heading = "## Rationalizations to refuse"
+    assert heading in text
+    assert text.index("## Constraints") < text.index(heading) < text.index("## Gate")
+    start = text.index(heading)
+    end = text.index("\n## ", start + len(heading))
+    section = text[start:end]
+    assert "| Excuse | Answer |" in section
+    rows = [line for line in section.splitlines() if line.startswith("|") and "---" not in line]
+    excuse_rows = [line for line in rows if line != "| Excuse | Answer |"]
+    assert excuse_rows, "the section has at least one excuse row"
+
+
 def test_smoke_script_is_executable_and_shellchecked():
     assert SMOKE.exists()
     assert os.access(SMOKE, os.X_OK)

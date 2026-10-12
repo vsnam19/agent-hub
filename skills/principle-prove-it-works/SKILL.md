@@ -16,4 +16,9 @@ Verify delegated work against the real artifact. The worker's claim is not evide
 - Run the changed behaviour on real input (the command, the CLI path, a real file), not only the unit tests.
 - When a check fails, suspect your observation before the system, then fix the cause.
 
+**Rationalizations:**
+- "The worker said all tests pass" → run the gate yourself.
+- "The gate is green, so it works" → run the changed behaviour on real input.
+- "I read the summary" → read every hunk.
+
 **Boundaries:** Do not re-derive facts a job record already proves (exit code, changed files). A review's findings are input to this check, not a replacement for it.
