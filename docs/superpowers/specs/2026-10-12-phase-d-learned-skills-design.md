@@ -34,7 +34,7 @@ sequences of agent-hub itself.
 
 ### 2. Draft (a worker) — job in the agent-plugins repo
 
-- One `implement-hard` job per weekly run, on branch `learned/<date>` in an agent-plugins worktree, with the
+- One `implement` job (claude:haiku, D-093) per weekly run, on branch `learned/<date>` in an agent-plugins worktree, with the
   extract copied into the worktree's ignored `.agent-hub/` dir. The worker clusters findings into at most **3**
   candidates (each seen ≥ 3 times across ≥ 2 branches, not already covered by an existing skill), and for each writes
   or updates a skill plus its eval cases. Fewer or none is a valid outcome.
