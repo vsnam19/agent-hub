@@ -153,6 +153,13 @@ agent-hub hub install [--apply] [--host codex]   # dry-run prints the commands; 
 `agy plugin validate` / `agy plugin install`; it never edits tool config and never deletes stray hand-copied skills
 in `$CODEX_HOME/skills/` (they are only reported).
 
+A job can name the skills it should use: `agent-hub run --skill debug-playbook --skill telaf ...` (repeatable), or
+`"skills": ["debug-playbook"]` on a plan task. Each name must be a `skills/<skill>/SKILL.md` under any plugin in
+`[plugins]`, not only the ones this run enables; an unknown name is a configuration error (exit 2) that lists the
+available skills, and nothing is recorded. The CLI then appends a `## Skills` section to the brief, after the
+standing orders and before the handoff footer, asking the worker to load and follow them (for implement and review
+jobs alike). Without skills there is no section.
+
 ## Exit codes
 
 | Exit | Status | Meaning |

@@ -14,12 +14,13 @@ from agenthub.agents import registry
 from agenthub.brief import BriefError, order_table
 from agenthub.config import ConfigError, load_pool, parse_duration, paths, role_kind
 from agenthub.jobs import get_job, list_jobs
-from agenthub.orchestrate import EXIT, RunArgs, readiness, run_gate_job, run_job
+from agenthub.orchestrate import EXIT, RunArgs, readiness, run_gate_job, run_job, skills_hint
 from agenthub.plan import PlanError
 from agenthub.plan import load as load_plan
 from agenthub.planrun import run_plan
 from agenthub.pool import Cooldowns, parse_link
 from agenthub.procinfo import start_time
+from agenthub.workers import available_skills
 
 WAIT_POLL_S = 1.0
 WAIT_APPEAR_S = 10.0
@@ -58,6 +59,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--exclude", action="append", default=[], metavar="AGENT:MODEL", help="skip this link (repeatable)"
+    )
+    run.add_argument(
+        "--skill", action="append", default=[], dest="skills", metavar="NAME", help="worker skill to load (repeatable)"
     )
     run.add_argument("--jev", action="store_true", help="use jev fallback for missing handoffs")
     run.add_argument("--json", action="store_true")
@@ -234,6 +238,7 @@ def _cmd_run(args) -> int:
         jev=args.jev or os.environ.get("AGENT_HUB_JEV") == "1",
         exclude=args.exclude,
         allow=args.allow,
+        skills=args.skills,
     )
     result = run_job(run_args, p, pool, _now)
     if args.json:
@@ -634,6 +639,12 @@ def _cmd_plan(args) -> int:
 
     if args.plan_command == "run":
         from agenthub.planstate import load_or_init
+
+        known_skills = available_skills(paths().config_dir) if any(t.skills for t in plan.tasks) else {}
+        for task in plan.tasks:
+            for skill in task.skills:
+                if skill not in known_skills:
+                    raise UsageError(f"task {task.name}: unknown skill {skill}: {skills_hint(known_skills)}")
 
         state = load_or_init(plan)
         _claim_runner(state, plan_dir)

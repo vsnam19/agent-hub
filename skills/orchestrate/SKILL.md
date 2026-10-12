@@ -64,6 +64,7 @@ Read the leaf skill in full for any principle you apply.
    assertions. The CLI refuses briefs lacking `## Input` or `## Expected output`. It then appends your standing
    orders (`~/.config/agent-hub/standing-orders.md`, then `<repo>/.agent-hub/standing-orders.md`) under
    `## Standing orders`, so do not restate them by hand; the text sent is recorded in the job's `brief.md`.
+   Name the worker skills the task needs with `--skill` (e.g. `debug-playbook` for a bug of unknown cause).
 4. **Prepare a worktree** on a feature branch. The CLI refuses the default branch or detached HEAD.
 5. **Run the job, then wait for it.** Start it with the Bash tool's `run_in_background`:
    `agent-hub run --role <tier> --brief brief.md -d <worktree> --json`

@@ -36,6 +36,29 @@ def worker_plugins(config_dir: Path, repo_root: Path, repo_config: str | None = 
     return tuple(_plugin_dir(name, plugins, user_file) for name in dict.fromkeys(names))
 
 
+def available_skills(config_dir: Path) -> dict[str, str]:
+    """Skill name -> plugin name for every `skills/<skill>/SKILL.md` under any plugin in `[plugins]` of
+    `<config_dir>/workers.toml`, whether or not a run enables it. A name found in two plugins maps to the first in
+    table order. Empty without a user file. A plugin whose directory is bad is a ConfigError, as in `worker_plugins`."""
+    user_file = config_dir / USER_FILE
+    if not user_file.is_file():
+        return {}
+    plugins = _plugins(_load(user_file), user_file)
+    found: dict[str, str] = {}
+    for name in plugins:
+        for skill in sorted((_plugin_dir(name, plugins, user_file) / "skills").glob("*/SKILL.md")):
+            found.setdefault(skill.parent.name, name)
+    return found
+
+
+def skill_plugin_dirs(config_dir: Path, plugin_names: list[str]) -> tuple[Path, ...]:
+    """Directories of the named plugins from `[plugins]` of `<config_dir>/workers.toml`, resolved as `worker_plugins`
+    resolves them, in the order given without repeats."""
+    user_file = config_dir / USER_FILE
+    plugins = _plugins(_load(user_file), user_file) if user_file.is_file() else {}
+    return tuple(_plugin_dir(name, plugins, user_file) for name in dict.fromkeys(plugin_names))
+
+
 def _load(path: Path) -> dict:
     try:
         text = path.read_text()

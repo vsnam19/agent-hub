@@ -20,7 +20,7 @@ from agenthub.config import ConfigError, Paths, Pool
 from agenthub.jobs import Job, list_jobs, new_job
 from agenthub.pool import Cooldowns, Link
 from agenthub.procinfo import start_time
-from agenthub.workers import worker_plugins
+from agenthub.workers import available_skills, skill_plugin_dirs, worker_plugins
 
 EXIT = {
     "ok": 0,
@@ -56,6 +56,7 @@ class RunArgs:
     kind: str = ""
     exclude: list[str] = dataclasses.field(default_factory=list)  # agent:model links to skip (e.g. the implementer)
     allow: list[str] = dataclasses.field(default_factory=list)  # repo-relative globs the run may change
+    skills: list[str] = dataclasses.field(default_factory=list)  # worker skills the brief tells the worker to load
 
 
 def repo_gates(root: Path) -> list[str]:
@@ -248,6 +249,11 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         if link.agent not in adapters:
             raise ConfigError(f"unknown agent in chain: {link.agent}")
     briefmod.validate(kind, args.brief)
+    skills = list(dict.fromkeys(args.skills))
+    known_skills = available_skills(p.config_dir) if skills else {}
+    for skill in skills:
+        if skill not in known_skills:
+            raise ConfigError(f"unknown skill {skill!r}: {skills_hint(known_skills)}")
 
     started = now()
     workdir = args.workdir
@@ -274,6 +280,10 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     plugin_dirs = ()
     if refusal is None:
         plugin_dirs = worker_plugins(p.config_dir, repo.root if repo else workdir, repo_config)
+        if skills:
+            # a named skill must be loadable even when its plugin is not in this run's default list
+            skill_dirs = skill_plugin_dirs(p.config_dir, [known_skills[s] for s in skills])
+            plugin_dirs = (*plugin_dirs, *(d for d in skill_dirs if d not in plugin_dirs))
 
     if kind == "review" and base is None:
         base = args.base or (repo.default_branch if repo else "HEAD")
@@ -305,6 +315,8 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     standing = briefmod.standing_orders(p.config_dir, repo.root if repo else None)
     if standing:
         text += "\n\n" + standing
+    if skills:
+        text += "\n\n" + _skills_section(skills, known_skills) + "\n"
     if kind == "implement":
         text += "\n" + handoff.FOOTER
     else:
@@ -537,6 +549,19 @@ def _touched_problems(findings: list[dict], judges: list[dict]) -> list[str]:
     if unjudged:
         problems.insert(0, f"gate touched: {unjudged} findings not judged by the reviewer")
     return problems
+
+
+def skills_hint(known: dict[str, str]) -> str:
+    """The clause naming the skills that can be used, for an unknown-skill error."""
+    return f"available skills are {', '.join(sorted(known))}" if known else "none configured"
+
+
+def _skills_section(skills: list[str], known: dict[str, str]) -> str:
+    """The `## Skills` brief section naming each skill with its plugin, in the order given."""
+    listed = ", ".join(f"{s} ({known[s]})" for s in skills)
+    return (
+        f"## Skills\n\nLoad and follow these skills before you start (Claude lists them as <plugin>:<skill>): {listed}"
+    )
 
 
 def _touched_section(findings: list[dict]) -> str:

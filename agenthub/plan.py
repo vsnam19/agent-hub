@@ -23,6 +23,7 @@ class Task:
     paths_allowed: list[str] = field(default_factory=list)
     depends_on: list[str] = field(default_factory=list)
     agent: str | None = None
+    skills: list[str] = field(default_factory=list)
     max_attempts: int = 2
     timeout: str | None = None
 
@@ -130,6 +131,11 @@ def load(path: Path) -> Plan:
         if agent is not None and not isinstance(agent, str):
             errors.append(f"task {name}: agent must be null or string")
 
+        skills = tdata.get("skills", [])
+        if not isinstance(skills, list) or not all(isinstance(s, str) for s in skills):
+            errors.append(f"task {name}: skills must be a list of strings")
+            skills = []
+
         tasks.append(
             Task(
                 name=name,
@@ -141,6 +147,7 @@ def load(path: Path) -> Plan:
                 paths_allowed=tdata.get("paths_allowed", []),
                 depends_on=depends_on,
                 agent=agent,
+                skills=skills,
                 max_attempts=int(tdata.get("max_attempts", 2)),
                 timeout=tdata.get("timeout"),
             )
