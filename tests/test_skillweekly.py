@@ -399,6 +399,32 @@ def test_failed_eval_cost_counted(tmp_path):
         assert (env.out / "eval-foo.json").is_file()
 
 
+def test_eval_cost_missing_or_string_counts_budget(tmp_path):
+    arms = {"with": [{"score": 1.0}], "without": [{"score": 0.0}]}
+    cases = [{"name": "case", "arms": arms}]
+    scenarios = (
+        ("missing-cost", {"cases": cases}),
+        ("string-cost", {"costUsd": "0.15", "cases": cases}),
+        ("non-numeric-cost", {"costUsd": "n/a", "cases": cases}),
+    )
+    for name, data in scenarios:
+        (tmp_path / name).mkdir()
+        env = Env(tmp_path / name, evals=[data, eval_json(1.0, 0.0)])
+        env.out.mkdir(parents=True)
+        run = skillweekly._Run(env.cfg, NOW, env.fake, skillweekly.Report(date=DATE))
+        with pytest.raises(skillweekly.Stop, match=r"eval budget \$3\.0 spent before bar"):
+            run.evaluate([("learned-worker", "foo"), ("learned-worker", "bar")])
+        assert run.spent == 3.0
+        assert "cost unknown" in run.report.evals["foo"]
+        assert run.report.evals["foo"] == "with 1.00 vs without 0.00 (cost unknown)"
+
+    env = Env(tmp_path / "full-run", evals=[{"cases": cases}])
+    report = env.run()
+    assert report.exit_code == 0, report.stop_reason
+    text = (env.out / "report.md").read_text()
+    assert "foo: with 1.00 vs without 0.00 (cost unknown)" in text
+
+
 def test_claude_update_failure_stops_after_merge(tmp_path):
     env = Env(tmp_path, director=True, plugin_rc=1)
     before = git(env.repo, "rev-parse", "master")
