@@ -91,7 +91,8 @@ class Report:
 
     def render(self) -> str:
         lines = [f"# Skills weekly {self.date}", "", f"Window: {self.window or '(unknown)'}", ""]
-        lines.append("Outcome: " + (self.stop_reason and f"stopped — {self.stop_reason}" or self.outcome or "(dry run)"))
+        outcome = f"stopped — {self.stop_reason}" if self.stop_reason else self.outcome or "(dry run)"
+        lines.append(f"Outcome: {outcome}")
         lines += ["", "## Steps"]
         lines += [f"- {s.name}: {s.status}" + (f" — {s.detail}" if s.detail else "") for s in self.steps]
         lines += ["", "## Metrics (this window vs previous week)"]
