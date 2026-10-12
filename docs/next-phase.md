@@ -1,5 +1,10 @@
 # Next phase — resume note (2026-10-12)
 
+> **Update 2026-10-12, later:** Phase B is done (agent-hub v0.9.0, D-083..D-089). Every worker host now gets
+> `worker`, `telaf`, `aspice`: claude and gwen per run (`~/.config/agent-hub/workers.toml`), codex and agy installed by
+> `agent-hub hub install --apply` (all `current`). Next is **Phase C** below. Open items: `docs/follow-ups.md`.
+
+
 Written before compacting. A fresh session starts here: read this, then `docs/overview.md`, then act.
 
 ## Status at the end of the previous phase

@@ -1,6 +1,6 @@
 # Phase B — one skill set for every worker
 
-Status: spike done (task 1), 2026-10-12. Decisions D-083..D-086. Next: tasks 2–6 below, revised by the spike.
+Status: **done** in agent-hub v0.9.0, 2026-10-12 (tasks 1–6 merged through `agent-hub ready`; decisions D-083..D-089). Open: a live `codex exec` run after 2026-11-07 and a gwen run when the Mac host is up (`docs/follow-ups.md`).
 
 ## Goal
 
@@ -107,7 +107,7 @@ One `skills/` tree per plugin serves all four; only the manifests differ.
 4. **gwen's skill index is cleaned now, not later (D-086):** the gwen adapter sets `OPENCODE_DISABLE_EXTERNAL_SKILLS=1`
    so deleted, synced and Runpod skills stop reaching a 9B model; worker skills come back only through `skills.paths`.
 
-## Tasks 2–6, revised
+## Tasks 2–6, revised (all merged; plus `claude-quota`, `review-fallback`, `agy-review-scope` found on the way, D-088/D-089)
 
 | # | Task | Tier | Done means |
 |---|---|---|---|

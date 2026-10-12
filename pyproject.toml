@@ -1,6 +1,6 @@
 [project]
 name = "agent-hub"
-version = "0.8.0"
+version = "0.9.0"
 description = "Run coding agents from one orchestrator, by role, with quota fallback"
 requires-python = ">=3.12"
 dependencies = []

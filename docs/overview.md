@@ -1,7 +1,7 @@
 # Agent system overview
 
-State on 2026-10-12: agent-hub v0.8.0 (tiered routing, the local agent gwen, pstack trust mechanics), agent-plugins
-marketplace with four plugins. This page explains how the pieces
+State on 2026-10-12: agent-hub v0.9.0 (tiered routing, the local agent gwen, pstack trust mechanics, one skill set for
+every worker), agent-plugins marketplace with five plugins. This page explains how the pieces
 fit together, how this machine is set up, how changes are tested, and what was learned. Commands and flags are in
 `README.md`; every design choice and its reason is in `docs/decisions.md` (D-xxx) and
 `~/Workspaces/tools/agent-plugins/docs/decisions.md` (P-xxx, token audit T-xxx).
@@ -27,7 +27,7 @@ implementer (D-075, D-080). The style follows Lauren Tan's pstack (D-063, D-071.
 | gwen host | MacBook Air M2 16 GB, `scripts/gwen-host.sh`, `scripts/gwen-host/` | Rapid-MLX (pinned 0.15.7) on loopback behind `gwen-tap` on the Tailscale address; output log `~/Library/Logs/gwen/output.log`, live stats `gwen-watch` |
 | gwen bench | `bench/gwen/` | fixture + six tasks with hidden tests, recording proxy, Mac memory sampler, report; results in `bench/gwen/results/` |
 | agent-plugins marketplace | `~/Workspaces/tools/agent-plugins` | The "skills hub": every self-built plugin, installed with one marketplace registration |
-| Plugins | `agent-hub` (code, own repo), `telaf`, `aspice`, `token-audit` (content, in the marketplace repo) | Skills for Claude sessions |
+| Plugins | `agent-hub` (code, own repo), `telaf`, `aspice`, `worker`, `token-audit` (content, in the marketplace repo) | Skills for Claude sessions; `worker`, `telaf`, `aspice` also for every worker (D-083..D-087) |
 | Jev (optional) | `jev-code` CLI + Ollama `nimble` | Cheap local classifier, used only to infer a missing handoff |
 
 ```mermaid
@@ -163,7 +163,8 @@ attempt (stdout, stderr, reply), `gate/<n>.log`, `diff.patch` for reviews, and `
 
 ## 9. Next
 
-- B — the hub: install skills (including `telaf`, `aspice`) for agy, codex and opencode, not only Claude (D-019, D-077).
+- B — done in v0.9.0: `worker`, `telaf`, `aspice` reach every worker — claude/gwen per run from `workers.toml`, codex/agy
+  via `agent-hub hub install` (D-083..D-089).
 - C — a C++ fixture for the gwen bench before C++ tasks go to gwen (D-077).
 - `docs/next-phase.md`: the resume note — Phase B (one skill set for every worker, learned from addyosmani/agent-skills), then C.
 - `docs/follow-ups.md`: open items.
@@ -177,6 +178,7 @@ marketplace · D-030–D-034 handoffs, gates, plan mode (from Cursor's orchestra
 D-036 `wait` robustness · D-037 Jev · D-038 gate guard · D-039–D-056 gwen host, bench, serving · D-057–D-068 tiered
 routing, escalation, standing orders, pstack-style skills · D-069–D-070, D-079 gwen's model and limits · D-071–D-076,
 D-080 pstack trust mechanics (enforced rules, escape hatch, decision trail, verdicts on commits) · D-077 automotive
-repos · D-078 scoped cancel · D-079 gwen on small repos · D-081–D-082 no gate bypass.
+repos · D-078 scoped cancel · D-079 gwen on small repos · D-081–D-082 no gate bypass · D-083–D-089 one skill set for
+every worker (Phase B).
 agent-plugins (`docs/decisions.md`): P-001–P-007 marketplace and the TelAF/ASPICE rewrite · P-008–P-011 evaluation
 · P-012 everything-claude-code (not installed; ideas taken) · P-013 token-audit · token audit T-001–T-007.
