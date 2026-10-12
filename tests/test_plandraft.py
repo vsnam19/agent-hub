@@ -216,4 +216,15 @@ def test_techlead_brief_example_passes_tasksize():
 
     assert example is not None
     assert "## Gate" in example.group(1)
+    assert "~/" not in example.group(1)
+    assert "/home/" not in example.group(1)
     assert tasksize.check(example.group(1)) == []
+
+
+def test_techlead_brief_states_file_counting_and_repo_paths():
+    text = techlead_brief("docs/spec.md", ["just test"])
+
+    assert "counts toward the" in text
+    assert "`## Expected output`" in text
+    assert "relative to the repository root" in text
+    assert "home-directory path" in text
