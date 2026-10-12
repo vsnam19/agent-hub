@@ -536,3 +536,69 @@ def test_fix_brief_titles_extracted(tmp_path):
     assert all(len(t) <= 300 for t in entry["fix_brief_titles"])
     assert "round 1: fix things in ~/repo" in summary
     assert "alice" not in (out / "extract.json").read_text()
+
+
+def test_bold_and_alternate_severity_scales(tmp_path):
+    reply = review_reply(
+        "- **high** — agenthub/a.py:1 — Bold",
+        "- critical — agenthub/b.py — Critical",
+        "- **Important** - agenthub/c.py - Important",
+        "- minor — agenthub/d.py — Minor",
+    )
+    make_job(tmp_path / "state", "20261010-100000-review-aaaa", reply=reply)
+
+    findings = run_mine(tmp_path).findings
+
+    assert [(f["severity"], f["file"]) for f in findings] == [
+        ("high", "agenthub/a.py"),
+        ("high", "agenthub/b.py"),
+        ("medium", "agenthub/c.py"),
+        ("low", "agenthub/d.py"),
+    ]
+
+
+def test_unparsed_findings_counted(tmp_path):
+    reply = review_reply(
+        "- high — agenthub/a.py — Fine",
+        "- something odd without severity",
+        "- high — no separator after file",
+        "not a bullet line",
+    )
+    make_job(tmp_path / "state", "20261010-100000-review-aaaa", reply=reply)
+
+    extract = run_mine(tmp_path)
+
+    assert len(extract.findings) == 1
+    assert extract.unparsed_findings == 2
+    assert skillmine.metrics(extract)["unparsed_findings"] == 2
+
+
+def test_redact_colon_and_flag_passwords():
+    cases = [
+        ("password: hunter2hunter2", "hunter2hunter2"),
+        ("db_password : 'two words'", "two words"),
+        ("run --password hunter2hunter2 --verbose", "hunter2hunter2"),
+        ("--api-token abcd1234", "abcd1234"),
+        ('{"client_secret": "s3cr3tvalue"}', "s3cr3tvalue"),
+        ('{"PWD": "pwdvalue1"}', "pwdvalue1"),
+        ("credential=credvalue1", "credvalue1"),
+        ("user_credentials: credvalue2", "credvalue2"),
+    ]
+    for text, secret in cases:
+        assert secret not in skillmine.redact(text), text
+    assert skillmine.redact("--password --verbose") == "--password --verbose"
+    assert skillmine.redact("run --password hunter2 --verbose") == "run --password <redacted> --verbose"
+
+
+def test_redact_macos_and_root_home():
+    assert skillmine.redact("see /Users/alice/work/x.py") == "see ~/work/x.py"
+    assert skillmine.redact("cd /root/work and p=/root") == "cd ~/work and p=~"
+    assert skillmine.redact("/rootfs/x and https://e.org/Users/alice/x") == "/rootfs/x and https://e.org/Users/alice/x"
+
+
+def test_long_paths_not_redacted():
+    path = "agenthub/superpowers/specs/phase1/design/notes/overview2"
+    assert skillmine.redact(f"see {path}") == f"see {path}"
+    blob = "QUJDREVGR0hJSktMTU5P/UFFSU1RVVldYWVowMTIzNDU2Nzg5abcdefghijklmnop"
+    assert skillmine.redact(f"blob {blob}") == "blob <redacted>"
+    assert skillmine.redact("blob aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE3fG5hI7k/aB3dE5gH") == "blob <redacted>"

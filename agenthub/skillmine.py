@@ -16,18 +16,25 @@ _PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIV
 _JWT = re.compile(r"\beyJ[\w-]+\.[\w-]+\.[\w-]+")
 _BEARER = re.compile(r"(?i)\bBearer\s+[\w.~+/=-]+")
 _PREFIXED = re.compile(r"\b(?:sk-[\w-]{16,}|ghp_\w{20,}|xox[a-z]-[\w-]{10,}|AKIA[0-9A-Z]{16})")
-_KV = re.compile(r"(?i)\b(\w*(?:key|token|secret|password|passwd))(\s*=\s*)(\"[^\"]*\"|'[^']*'|[^\s\"',;]+)")
-_KV_JSON = re.compile(r"(?i)(\"\w*(?:key|token|secret|password|passwd)\"\s*:\s*)\"[^\"]*\"")
+_NAME = r"[\w-]*(?:key|token|secret|password|passwd|pwd|credential)[\w-]*"
+_VALUE = r"(?:\"[^\"]*\"|'[^']*'|[^\s\"',;]+)"
+_KV = re.compile(rf"(?i)(?<![\w-])({_NAME})(\s*[=:]\s*){_VALUE}")
+_KV_FLAG = re.compile(rf"(?i)(?<![\w-])(--{_NAME})(\s+)(?!-){_VALUE}")
+_KV_JSON = re.compile(rf"(?i)(\"{_NAME}\"\s*:\s*)\"[^\"]*\"")
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _HEX = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{32,}(?![0-9A-Za-z])")
 _B64 = re.compile(r"(?<![\w+/=-])[A-Za-z0-9+/]{40,}={0,2}(?![\w+/])")
-_HOME = re.compile(r"(?:^|(?<=[\s\"'`(=:/\[]))/home/[^/\s]+")
+_HOME = re.compile(r"(?:^|(?<=[\s\"'`(=:/\[]))(?:/home/[^/\s]+|/Users/[^/\s]+|/root(?![\w.-]))")
 
 _CORRECTION = re.compile(
     r"không được|\bphải\b|\bđừng\b|\bsai\b|\bdon[’']?t\b|\bnever\b|\bwrong\b|\bmust\b",
     re.I,
 )
-_FINDING = re.compile(r"^\s*[-*]\s+(high|medium|low)\s+(?:—|–|--|-)\s+(.+)$", re.I)
+_FINDING = re.compile(
+    r"^\s*[-*]\s+(?:\*\*|`)?(high|medium|low|critical|important|minor)(?:\*\*|`)?\s+(?:—|–|--|-)\s+(.+)$", re.I
+)
+_SEVERITY = {"critical": "high", "important": "medium", "minor": "low"}
+_BULLET = re.compile(r"^\s*[-*]\s")
 _DASH = re.compile(r"\s+(?:—|–|--|-)\s+")
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 _FIX_BRIEF = re.compile(r"\bround\s+\d+\s*(?::|fix(?:es)?\b|—|–|-)", re.I)
@@ -47,6 +54,7 @@ def redact(text: str) -> str:
     text = _BEARER.sub("Bearer <redacted>", text)
     text = _PREFIXED.sub("<redacted>", text)
     text = _KV.sub(r"\1\2<redacted>", text)
+    text = _KV_FLAG.sub(r"\1\2<redacted>", text)
     text = _KV_JSON.sub(r'\1"<redacted>"', text)
     text = _EMAIL.sub("<email>", text)
     text = _HEX.sub("<redacted>", text)
@@ -55,7 +63,17 @@ def redact(text: str) -> str:
 
 
 def _looks_random(blob: str) -> bool:
-    return any(c.isdigit() for c in blob) and any(c.isalpha() for c in blob)
+    if not (any(c.isdigit() for c in blob) and any(c.isalpha() for c in blob)):
+        return False
+    segments = [seg for seg in blob.split("/") if seg]
+    if len(segments) >= 2 and all(_pathlike(seg) for seg in segments):
+        return False
+    return True
+
+
+def _pathlike(segment: str) -> bool:
+    mixed = any(c.isdigit() for c in segment) and segment != segment.lower() and segment != segment.upper()
+    return len(segment) <= 40 and any(c.isalpha() for c in segment) and not mixed
 
 
 def clean(text: str) -> str:
@@ -88,6 +106,7 @@ class Extract:
     findings: list[dict] = field(default_factory=list)
     groups: list[dict] = field(default_factory=list)
     review_failures: int = 0
+    unparsed_findings: int = 0
     fix_rounds: dict[str, dict] = field(default_factory=dict)
     corrections: list[dict] = field(default_factory=list)
     corrections_total: int = 0
@@ -184,7 +203,9 @@ def _mine_jobs(state_dir: Path, branches: dict[str, str], extract: Extract, sinc
             if verdict:
                 entry["verdicts"].append(clean(verdict))
             repo = Path(str(result.get("repo") or "")).parent.name if result.get("repo") else ""
-            for severity, path, claim in _findings_of(reply):
+            found, unparsed = _findings_of(reply)
+            extract.unparsed_findings += unparsed
+            for severity, path, claim in found:
                 extract.findings.append(
                     {
                         "job": clean(job_dir.name),
@@ -260,20 +281,23 @@ def _verdict_of(reply: str) -> str | None:
     return None
 
 
-def _findings_of(reply: str):
+def _findings_of(reply: str) -> tuple[list[tuple[str, str, str]], int]:
+    found: list[tuple[str, str, str]] = []
+    unparsed = 0
     for line in _section(reply, "findings"):
         match = _FINDING.match(line)
-        if not match:
-            continue
-        parts = _DASH.split(match.group(2), maxsplit=1)
+        parts = _DASH.split(match.group(2), maxsplit=1) if match else []
         if len(parts) != 2:
+            unparsed += bool(_BULLET.match(line))
             continue
         label = parts[0].strip().strip("`*")
         link = _LINK.match(label)
         if link:
             label = link.group(1).strip().strip("`*")
         where = re.match(r"[^\s:,]+", label)
-        yield match.group(1).lower(), where.group(0).strip("`") if where else "", parts[1].strip()
+        severity = match.group(1).lower()
+        found.append((_SEVERITY.get(severity, severity), where.group(0).strip("`") if where else "", parts[1].strip()))
+    return found, unparsed
 
 
 def _mine_transcripts(root: Path, extract: Extract, since: datetime) -> None:
@@ -345,6 +369,7 @@ def metrics(extract: Extract) -> dict:
         "mean_review_rounds": round(sum(rounds) / len(rounds), 2) if rounds else 0,
         "max_review_rounds": max(rounds, default=0),
         "review_failures": extract.review_failures,
+        "unparsed_findings": extract.unparsed_findings,
         "fix_briefs_total": sum(b["fix_briefs"] for b in extract.fix_rounds.values()),
         "corrections_total": extract.corrections_total,
     }
