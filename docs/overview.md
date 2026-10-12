@@ -1,6 +1,6 @@
 # Agent system overview
 
-State on 2026-10-12: agent-hub v0.7.0 (tiered routing, the local agent gwen, pstack trust mechanics), agent-plugins
+State on 2026-10-12: agent-hub v0.8.0 (tiered routing, the local agent gwen, pstack trust mechanics), agent-plugins
 marketplace with four plugins. This page explains how the pieces
 fit together, how this machine is set up, how changes are tested, and what was learned. Commands and flags are in
 `README.md`; every design choice and its reason is in `docs/decisions.md` (D-xxx) and
@@ -66,8 +66,8 @@ A failed gate escalates one tier (plan mode does it, single runs by hand), from 
 6. **Verify yourself** (diff, every `gate_touched` hunk, real data). Commit if the agent did not (plan mode
    autocommits gated work, D-067).
 7. **Gate the commit, review, check**: `agent-hub gate -d <wt>` (gates from the merge base, D-080) → `agent-hub run
-   --role review -d <wt> --base <default>` (never on an implementer's model, D-062) → `agent-hub ready -d <wt>
-   [--accept-touched]` → merge only when it says `ready: <sha>`.
+   --role review -d <wt> --base <default>` (never on an implementer's model, D-062) → `agent-hub ready -d <wt>` → merge only when it says `ready: <sha>`. Gate-touched findings are judged by the
+   independent reviewer (`## Gate-touched`, legitimate/weakening), never by the director; a weakening blocks (D-081).
 8. **Long sessions**: at phase boundaries put state on disk and compact (D-035).
 
 Plan mode (`agent-hub plan run` + `plan wait`) runs a task graph in parallel worktrees, retries by cause, escalates by
@@ -157,6 +157,8 @@ attempt (stdout, stderr, reply), `gate/<n>.log`, `diff.patch` for reviews, and `
 - **Escalation works.** Plan mode escalated gwen → Haiku and Haiku → Sonnet on real tasks, and the higher tier passed.
 - **Dogfooding the merge check found its holes.** Two reviews of the `ready` branch found `--gate true` and a
   weakened `.agent-hub/config.toml` passing it; it merged only after `ready` said yes (D-080).
+- **No bypass, ever** (D-081, D-082). A director-side `--accept-touched` was removed; eight independent review rounds
+  then found and closed real holes in gate-guard before the branch could merge.
 - **Rules need enforcers.** Written standing orders were the weakest layer; most now map to a check (D-071).
 
 ## 9. Next
@@ -174,6 +176,6 @@ marketplace · D-030–D-034 handoffs, gates, plan mode (from Cursor's orchestra
 D-036 `wait` robustness · D-037 Jev · D-038 gate guard · D-039–D-056 gwen host, bench, serving · D-057–D-068 tiered
 routing, escalation, standing orders, pstack-style skills · D-069–D-070, D-079 gwen's model and limits · D-071–D-076,
 D-080 pstack trust mechanics (enforced rules, escape hatch, decision trail, verdicts on commits) · D-077 automotive
-repos · D-078 scoped cancel.
+repos · D-078 scoped cancel · D-079 gwen on small repos · D-081–D-082 no gate bypass.
 agent-plugins (`docs/decisions.md`): P-001–P-007 marketplace and the TelAF/ASPICE rewrite · P-008–P-011 evaluation
 · P-012 everything-claude-code (not installed; ideas taken) · P-013 token-audit · token audit T-001–T-007.
