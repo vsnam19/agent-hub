@@ -123,3 +123,19 @@ def test_cooldown_concurrent_writes(tmp_path):
         link_str = f"agent{i}:m"
         assert link_str in all_cd
         assert all_cd[link_str] == datetime(2026, 10, 8, tzinfo=timezone.utc) + timedelta(hours=i + 1)
+
+
+def test_pool_rejects_effort_on_non_claude_link(monkeypatch, tmp_path):
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    (conf / "pool.toml").write_text('[roles.implement]\nchain = ["agy:m1@low"]\n')
+    monkeypatch.setenv("AGENT_HUB_CONFIG", str(conf))
+    from agenthub.config import paths
+    from agenthub.pool import load_pool
+
+    with pytest.raises(ConfigError, match="agy:m1@low"):
+        load_pool(paths())
+
+    (conf / "pool.toml").write_text('[roles.implement]\nchain = ["claude:opus@low"]\n')
+    pool = load_pool(paths())
+    assert pool.roles["implement"].chain == ["claude:opus@low"]

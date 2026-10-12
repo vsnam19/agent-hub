@@ -12,13 +12,13 @@ from pathlib import Path
 from agenthub import guards
 from agenthub.agents import registry
 from agenthub.brief import BriefError, order_table
-from agenthub.config import ConfigError, load_pool, parse_duration, paths, role_kind
+from agenthub.config import ConfigError, parse_duration, paths, role_kind
 from agenthub.jobs import get_job, list_jobs
 from agenthub.orchestrate import EXIT, RunArgs, readiness, run_gate_job, run_job, skills_hint
 from agenthub.plan import PlanError
 from agenthub.plan import load as load_plan
 from agenthub.planrun import run_plan
-from agenthub.pool import Cooldowns, parse_link
+from agenthub.pool import Cooldowns, load_pool, parse_link
 from agenthub.procinfo import start_time
 from agenthub.workers import available_skills
 
@@ -58,7 +58,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--allow", action="append", default=[], metavar="GLOB", help="only these paths may change (repeatable)"
     )
     run.add_argument(
-        "--exclude", action="append", default=[], metavar="AGENT:MODEL", help="skip this link (repeatable)"
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="AGENT:MODEL[@EFFORT]",
+        help="skip this link (repeatable; effort ignored when matching)",
     )
     run.add_argument(
         "--skill", action="append", default=[], dest="skills", metavar="NAME", help="worker skill to load (repeatable)"
@@ -231,7 +235,10 @@ def _cmd_run(args) -> int:
     pool = load_pool(p)
     kind = role_kind(pool, args.role)
     if args.agent:
-        links = [parse_link(args.agent)]
+        link = parse_link(args.agent)
+        if link.effort and link.agent != "claude":
+            raise ConfigError(f"effort is only supported for claude links: {args.agent}")
+        links = [link]
     else:
         links = [parse_link(x) for x in pool.roles[args.role].chain]
     timeout = parse_duration(args.timeout) if args.timeout else pool.timeouts[args.role]

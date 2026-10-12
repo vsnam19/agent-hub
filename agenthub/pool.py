@@ -6,7 +6,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from agenthub.config import ConfigError
+import agenthub.config
+from agenthub.config import ConfigError, Paths, Pool
+
+_config_load_pool = agenthub.config.load_pool
 
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
@@ -40,6 +43,19 @@ def parse_link(text: str) -> Link:
         levels = ", ".join(EFFORT_LEVELS)
         raise ConfigError(f"Invalid effort in link {text!r}; valid levels: {levels}")
     return Link(agent=parts[0], model=model, effort=effort)
+
+
+def load_pool(p: Paths | None = None) -> Pool:
+    pool = _config_load_pool(p)
+    for role in pool.roles.values():
+        for link_str in role.chain:
+            link = parse_link(link_str)
+            if link.effort and link.agent != "claude":
+                raise ConfigError(f"effort is only supported for claude links: {link_str}")
+    return pool
+
+
+agenthub.config.load_pool = load_pool
 
 
 class Cooldowns:
