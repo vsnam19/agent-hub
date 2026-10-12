@@ -128,3 +128,41 @@ Files: `agenthub/orchestrate.py` (record `repo`), `agenthub/cli.py` (`cancel`, `
   `test_cancel_all_only_own_repo`, `test_jobs_default_scoped_all_flag_lists_everything`,
   `test_legacy_job_without_repo_derived_from_workdir`, `test_plan_cancel_stops_runner_and_jobs`,
   `test_plan_cancel_wrong_pid_start_time_not_signalled`.
+
+---
+
+### Task `touched-review` (implement-hard) — gate-touched findings judged by the reviewer (D-081)
+
+Files: `agenthub/orchestrate.py`, `agenthub/handoff.py`, `agenthub/cli.py`, `skills/orchestrate/SKILL.md`,
+`README.md`; tests in `tests/test_ready.py`, `tests/test_handoff.py`, `tests/test_run.py`.
+- Remove `ready --accept-touched` and the `accepted-touched.jsonl` writer (and their tests; say so in the handoff —
+  this removal is the decision, not a weakening).
+- Review jobs: before running, find the newest passing gate evidence (implement or gate job) on the work tree's HEAD;
+  if it has `gate_touched`, append to the review brief a section `## Gate-touched findings to judge` listing each
+  finding as `<file> <kind> lines <lines>` and asking, in the final message, for
+  `## Gate-touched` with one line per finding: `<file> <kind> — legitimate|weakening — <reason>`.
+- `handoff.parse_touched_review(reply) -> dict[(file, kind), "legitimate"|"weakening"]`; stored in
+  `result.json.touched_review` (list of `{file, kind, judgement, reason}`).
+- `readiness`: when the gate evidence has findings, require an approving review on HEAD by a non-implementer whose
+  `touched_review` covers every finding with `legitimate`; otherwise problems `gate touched: <n> findings not judged
+  by the reviewer` or `reviewer judged <file> <kind> as weakening`.
+- Skill: replace the accept-touched sentence with "gate-touched findings are judged by the reviewer, never by you".
+- Tests: `test_review_brief_lists_touched_findings`, `test_parse_touched_review`,
+  `test_ready_requires_reviewer_to_judge_every_finding`, `test_ready_blocked_on_weakening_judgement`,
+  `test_ready_passes_when_all_legitimate`, `test_accept_touched_flag_removed`.
+
+### Task `guard-precision` (implement) — fewer false findings, remaining review fixes; depends on `touched-review`
+
+Files: `agenthub/gateguard.py`, `agenthub/orchestrate.py`, `agenthub/cli.py`; tests in `tests/test_gateguard.py`,
+`tests/test_gate_cmd.py`, `tests/test_plan_cli.py`, `tests/test_ready.py`.
+- gate-guard for `.py` test files: parse the base and new versions with `ast`; identify tests as `Class.test_name`
+  (or `test_name` at module level); `assert-removed` when a test's assertion count (asserts + `pytest.raises/warns` +
+  `self.assert*` calls) drops; `test-deleted` when an identity disappears; non-Python test files keep the line rules.
+  A syntax error falls back to the line rules.
+- `run_gate_job`: SIGTERM/SIGINT/exceptions mark the job `cancelled`/`failed`, never left `running`.
+- `touched_findings`: use the newest passing gate evidence on HEAD.
+- `plan cancel`: a corrupt `state.json` → exit 2 with `plan state unreadable: <path>`, and still stops a verified
+  runner.
+- Tests: `test_assert_replaced_by_stronger_not_flagged`, `test_assert_count_drop_flagged`,
+  `test_same_name_other_class_deleted_flagged`, `test_gate_job_sigterm_marks_cancelled`,
+  `test_touched_uses_newest_gate`, `test_plan_cancel_corrupt_state`.
