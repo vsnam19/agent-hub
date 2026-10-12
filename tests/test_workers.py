@@ -87,3 +87,25 @@ def test_invalid_toml_names_file(layout):
     with pytest.raises(ConfigError) as err:
         worker_plugins(config, repo)
     assert str(config / "workers.toml") in str(err.value)
+
+
+def test_repo_config_text_overrides_file(layout):
+    config, repo, telaf, aspice = layout
+    _user(config, f'default = ["telaf", "aspice"]\n[plugins]\ntelaf = "{telaf}"\naspice = "{aspice}"\n')
+    _repo(repo, 'worker_plugins = ["telaf"]\n')
+    assert worker_plugins(config, repo, 'worker_plugins = ["aspice"]\n') == (aspice,)
+    assert worker_plugins(config, repo, "") == (telaf, aspice)
+
+
+def test_default_must_be_list_of_names(layout):
+    config, repo, telaf, _ = layout
+    _user(config, f'default = "telaf"\n[plugins]\ntelaf = "{telaf}"\n')
+    with pytest.raises(ConfigError, match="default must be a list"):
+        worker_plugins(config, repo)
+
+
+def test_plugins_values_must_be_strings(layout):
+    config, repo, _, _ = layout
+    _user(config, "default = []\n[plugins]\ntelaf = 1\n")
+    with pytest.raises(ConfigError, match="plugins must be a table"):
+        worker_plugins(config, repo)

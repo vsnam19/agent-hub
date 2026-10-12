@@ -7,12 +7,13 @@ USER_FILE = "workers.toml"
 REPO_FILE = Path(".agent-hub") / "config.toml"
 
 
-def worker_plugins(config_dir: Path, repo_root: Path) -> tuple[Path, ...]:
+def worker_plugins(config_dir: Path, repo_root: Path, repo_config: str | None = None) -> tuple[Path, ...]:
     """Plugin directories that per-run worker hosts load for a run in `repo_root`, in list order.
 
     `<config_dir>/workers.toml` names the plugins (`[plugins]`: name -> plugin directory) and the `default` list.
-    `<repo_root>/.agent-hub/config.toml` may set `worker_plugins`, which replaces the default and can only name
-    plugins from the user's table. Without a user file there are no worker plugins.
+    The repository config may set `worker_plugins`, which replaces the default and can only name plugins from the
+    user's table. That config is `repo_config` (TOML text) when given, else `<repo_root>/.agent-hub/config.toml`.
+    Without a user file there are no worker plugins.
     """
     user_file = config_dir / USER_FILE
     if not user_file.is_file():
@@ -23,18 +24,30 @@ def worker_plugins(config_dir: Path, repo_root: Path) -> tuple[Path, ...]:
     names = _names(user.get("default", []), "default", user_file)
 
     repo_file = repo_root / REPO_FILE
-    if repo_file.is_file():
+    if repo_config is not None:
+        repo = _parse(repo_config, repo_file)
+    elif repo_file.is_file():
         repo = _load(repo_file)
-        if "worker_plugins" in repo:
-            names = _names(repo["worker_plugins"], "worker_plugins", repo_file)
+    else:
+        repo = {}
+    if "worker_plugins" in repo:
+        names = _names(repo["worker_plugins"], "worker_plugins", repo_file)
 
     return tuple(_plugin_dir(name, plugins, user_file) for name in dict.fromkeys(names))
 
 
 def _load(path: Path) -> dict:
     try:
-        return tomllib.loads(path.read_text())
-    except (OSError, ValueError) as e:
+        text = path.read_text()
+    except OSError as e:
+        raise ConfigError(f"{path}: {e}") from e
+    return _parse(text, path)
+
+
+def _parse(text: str, path: Path) -> dict:
+    try:
+        return tomllib.loads(text)
+    except ValueError as e:
         raise ConfigError(f"{path}: {e}") from e
 
 
