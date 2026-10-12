@@ -28,6 +28,10 @@ What agent-skills (MIT, github.com/addyosmani/agent-skills, read 2026-10-12) sho
 
 One `skills/` directory, same `name` + `description` frontmatter, serves all of them; no duplication.
 
+**Task 1 (spike) done 2026-10-12** — findings and the revised task list (2, 3a, 3b, 4–6) are in
+`docs/superpowers/specs/2026-10-12-phase-b-skill-hub-design.md`; decisions D-083..D-086. The list below is the
+original plan; the spec's table supersedes it.
+
 ### Tasks (tiers per D-059; run as an agent-hub plan, merge only through `agent-hub ready`)
 
 1. **Spike (director, read-only):** on this machine, verify each host's real mechanism with the installed versions
