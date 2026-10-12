@@ -846,3 +846,36 @@ def test_repo_at_home_root_not_user_name(tmp_path):
 
     assert repos == {"20261010-100000-review-aaaa": "~", "20261010-110000-review-bbbb": "project"}
     assert "alice" not in json.dumps(repos)
+
+
+def test_branch_at_home_root_not_user_name(tmp_path):
+    state = tmp_path / "state"
+    reply = review_reply("- low — docs/a.md — Typo in heading")
+    make_job(state, "20261010-100000-review-aaaa", workdir="/home/alice", reply=reply, verdict="request-changes")
+    make_job(
+        state,
+        "20261010-110000-review-bbbb",
+        workdir="/home/alice/repo/.worktrees/feat",
+        reply=reply,
+        verdict="request-changes",
+    )
+
+    branches = {f["job"]: f["branch"] for f in run_mine(tmp_path).findings}
+
+    assert branches == {"20261010-100000-review-aaaa": "~", "20261010-110000-review-bbbb": "feat"}
+    assert "alice" not in json.dumps(branches)
+
+
+def test_session_uuid_kept_short(tmp_path):
+    uuid = "3f2a9c1e-7b4d-4e8a-9f10-2c5d6e7f8a9b"
+    records = [
+        user_msg("never edit the justfile", session=uuid),
+        user_msg("that is wrong", session=uuid),
+        user_msg("you must run lint", session="s1"),
+    ]
+    write_transcript(tmp_path / "claude", records)
+
+    corrections = run_mine(tmp_path).corrections
+
+    assert [c["session"] for c in corrections] == ["3f2a9c1e", "3f2a9c1e", "s1"]
+    assert uuid not in json.dumps(corrections)

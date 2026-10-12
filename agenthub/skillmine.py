@@ -65,6 +65,7 @@ _ASCII_RUN = re.compile(r"[\x00-\x7f]+")
 _WORD = re.compile(r"(?:[A-Z]+(?![a-z])|[A-Z]?[a-z]{3,})+")
 _IDENT_WORD = re.compile(r"(?:[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]{3,})+")
 _JOB_ID = re.compile(r"\d{8}-\d{6}-[a-z]+(?:-[a-z]+)*-[0-9a-f]{4}(?:\.\w+)?")
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
 _CORRECTION = re.compile(
     r"không được|\bphải\b|\bđừng\b|\bsai\b|\bdon[’']?t\b|\bnever\b|\bwrong\b|\bmust\b",
@@ -273,7 +274,7 @@ def _mine_jobs(state_dir: Path, branches: dict[str, str], extract: Extract, sinc
             counts[status] = counts.get(status, 0) + 1
 
         workdir = result.get("workdir") if isinstance(result.get("workdir"), str) else ""
-        dirname = Path(workdir).name
+        dirname = _dir_label(workdir)
         branch = clean(branches.get(dirname, dirname) or "unknown")
         entry = per_branch.setdefault(branch, {"fix_briefs": 0, "fix_brief_titles": [], "reviews": 0, "verdicts": []})
         reply = _read_reply(job_dir, result)
@@ -307,10 +308,14 @@ def _mine_jobs(state_dir: Path, branches: dict[str, str], extract: Extract, sinc
     extract.fix_rounds = per_branch
 
 
+def _dir_label(path: str) -> str:
+    """Directory name; `~` at a home directory, so a user name is not taken for a repo or branch name."""
+    directory = Path(path)
+    return "~" if _HOME.fullmatch(str(directory)) else directory.name
+
+
 def _repo_name(git_dir: str) -> str:
-    """Directory name of the repo; `~` when the repo sits at a home directory, so a user name is not a repo name."""
-    root = Path(git_dir).parent
-    return "~" if _HOME.fullmatch(str(root)) else root.name
+    return _dir_label(str(Path(git_dir).parent))
 
 
 def _first_line(text: str) -> str:
@@ -428,6 +433,11 @@ def _mine_transcripts(root: Path, extract: Extract, since: datetime) -> None:
     extract.agenthub_commands = {g: {"count": e["count"], "sessions": len(e["sessions"])} for g, e in merged.items()}
 
 
+def _session_label(session: str) -> str:
+    """A session UUID is not a secret, but the token rule would redact it; its first 8 hex digits still group."""
+    return session[:8] if _UUID.fullmatch(session) else session
+
+
 def _transcript_line(line: str, extract: Extract, since: datetime, sequences: dict[str, list[str]]) -> None:
     try:
         record = json.loads(line)
@@ -440,7 +450,7 @@ def _transcript_line(line: str, extract: Extract, since: datetime, sequences: di
     if when is None or when < since or not isinstance(message, dict):
         return
     content = message.get("content")
-    session = str(record.get("sessionId") or "unknown")
+    session = _session_label(str(record.get("sessionId") or "unknown"))
     if record.get("type") == "user":
         if (
             isinstance(content, str)
