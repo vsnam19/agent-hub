@@ -804,6 +804,15 @@ def test_url_credentials_redacted():
     assert skillmine.redact("redis://:pw12345@db:6379") == "redis://:<redacted>@db:6379"
 
 
+def test_url_password_with_at_and_slash():
+    out = skillmine.redact("postgres://admin:p@ss@db/app")
+    assert out == "postgres://admin:<redacted>@db/app"
+    assert "ss" not in out
+    out = skillmine.redact("postgres://u:a/b@h/x")
+    assert out == "postgres://u:<redacted>@h/x"
+    assert "a/b" not in out
+
+
 def test_mine_write_error_exit_2(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path / "state"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
