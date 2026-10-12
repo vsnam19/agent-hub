@@ -4,6 +4,8 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from agenthub import skillweekly
 from agenthub.cli import main
 from agenthub.skillweekly import Config, Proc
@@ -30,9 +32,20 @@ def make_skills_repo(path: Path) -> Path:
             file = path / "plugins" / plugin / manifest
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_text(json.dumps({"name": plugin, "version": "0.1.0"}, indent=2) + "\n")
+    write_marketplace(path, "agent-plugins")
     git(path, "add", "-A")
     git(path, "commit", "-m", "plugins")
     return path
+
+
+def write_marketplace(path: Path, name: str | None) -> None:
+    """Write the skills repo's .claude-plugin/marketplace.json with this name; None removes the file."""
+    file = path / ".claude-plugin" / "marketplace.json"
+    if name is None:
+        file.unlink(missing_ok=True)
+    else:
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(json.dumps({"name": name, "plugins": []}, indent=2) + "\n")
 
 
 def make_state(state: Path, findings: int = 3) -> None:
@@ -331,6 +344,47 @@ def test_release_skips_claude_update_when_only_worker_changed(tmp_path):
     assert env.fake.words("marketplace") == []
     assert env.fake.words("learned-director@agent-plugins") == []
     assert "claude plugin update" not in (env.out / "report.md").read_text()
+
+
+def test_marketplace_name_read_from_repo(tmp_path):
+    env = Env(tmp_path, director=True)
+    write_marketplace(env.repo, "my-market")
+    git(env.repo, "add", "-A")
+    git(env.repo, "commit", "-m", "marketplace")
+    report = env.run()
+    assert report.exit_code == 0, report.stop_reason
+    assert ["claude", "plugin", "marketplace", "update", "my-market"] in env.fake.calls
+    assert ["claude", "plugin", "update", "learned-director@my-market"] in env.fake.calls
+    assert env.fake.words("agent-plugins") == []
+    assert "claude plugin update learned-director@my-market" in (env.out / "report.md").read_text()
+
+    (tmp_path / "missing").mkdir()
+    missing = Env(tmp_path / "missing", director=True)
+    write_marketplace(missing.repo, None)
+    git(missing.repo, "add", "-A")
+    git(missing.repo, "commit", "-m", "no marketplace")
+    before = git(missing.repo, "rev-parse", "master")
+    report = missing.run()
+    assert report.exit_code == 1
+    assert report.stop_reason == "learned-director released but .claude-plugin/marketplace.json has no name"
+    assert git(missing.repo, "rev-parse", "master") == before
+    assert missing.fake.words("marketplace") == []
+    assert missing.fake.words("hub", "install") == []
+
+
+def test_failed_eval_cost_counted(tmp_path):
+    arms = {"with": [{"score": None}], "without": [{"score": 0.5}]}
+    cases = [{"name": "case", "arms": arms}]
+    scenarios = (("with-cost", {"costUsd": 0.75, "cases": cases}, 0.75), ("no-cost", {"cases": cases}, 3.0))
+    for name, data, expected in scenarios:
+        (tmp_path / name).mkdir()
+        env = Env(tmp_path / name, evals=[data])
+        env.out.mkdir(parents=True)
+        run = skillweekly._Run(env.cfg, NOW, env.fake, skillweekly.Report(date=DATE))
+        with pytest.raises(skillweekly.Stop, match="malformed score"):
+            run.evaluate([("learned-worker", "foo")])
+        assert run.spent == expected
+        assert (env.out / "eval-foo.json").is_file()
 
 
 def test_claude_update_failure_stops_after_merge(tmp_path):

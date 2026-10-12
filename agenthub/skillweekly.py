@@ -427,8 +427,13 @@ class _Run:
             try:
                 data = json.loads(target.read_text(encoding="utf-8"))
             except (OSError, ValueError):
+                self.spent += remaining  # no cost is readable, so the whole remaining budget counts as spent
                 raise Stop(f"eval of {skill} wrote no readable result") from None
-            with_mean, without_mean = _arm_means(skill, data, target)
+            try:
+                with_mean, without_mean = _arm_means(skill, data, target)
+            except Stop:
+                self.spent += _cost_or(data, remaining)
+                raise
             self.spent += float(data.get("costUsd") or 0)
             self.report.evals[skill] = f"with {with_mean:.2f} vs without {without_mean:.2f}"
             if with_mean < PASS_SCORE or with_mean <= without_mean:
@@ -497,13 +502,15 @@ class _Run:
             raise Stop(f"main checkout is on {head}, not master")
         if self.git("status", "--porcelain").stdout.strip():
             raise Stop("main checkout is not clean")
+        director = any(item.startswith("learned-director ") for item in self.report.released)
+        marketplace = _marketplace_name(self.repo) if director else ""
         merged = self.git("merge", "--no-ff", "-m", f"Merge {self.branch}", self.branch, check=False)
         if merged.rc != 0:
             self.git("merge", "--abort", check=False)
             raise Stop(f"merge failed: {(merged.stderr or merged.stdout).strip()[:300]}")
         self.step("merge", f"{self.branch} into master")
         # The merge is already on master, so an install failure must not stop the run before cleanup and last-run.
-        failure = self.install()
+        failure = self.install(marketplace)
         self.cleanup()
         if failure:
             self.report.outcome = f"released, install failed: {failure}"
@@ -519,7 +526,7 @@ class _Run:
                 reason = (proc.stderr or proc.stdout).strip()[:200]
                 self.report.steps.append(Step("cleanup", "warning", f"git {args[0]} {args[1]}: {reason}"))
 
-    def install(self) -> str:
+    def install(self, marketplace: str) -> str:
         """Run the post-merge installs; return the failure reason, or "" when all of them succeed."""
         installed = self.hub("hub", "install", "--apply", timeout=INSTALL_TIMEOUT)
         if installed.rc != 0:
@@ -527,14 +534,14 @@ class _Run:
             self.report.steps.append(Step("install", "failed", "hub install --apply"))
             return f"hub install --apply: {reason}"
         self.step("install", "hub install --apply")
-        if any(item.startswith("learned-director ") for item in self.report.released):
-            return self.update_director_plugin()
+        if marketplace:
+            return self.update_director_plugin(marketplace)
         return ""
 
-    def update_director_plugin(self) -> str:
+    def update_director_plugin(self, marketplace: str) -> str:
         commands = (
-            ("plugin", "marketplace", "update", "agent-plugins"),
-            ("plugin", "update", "learned-director@agent-plugins"),
+            ("plugin", "marketplace", "update", marketplace),
+            ("plugin", "update", f"learned-director@{marketplace}"),
         )
         for args in commands:
             proc = self.runner(["claude", *args], None, CLAUDE_TIMEOUT)
@@ -542,8 +549,27 @@ class _Run:
                 reason = (proc.stderr or proc.stdout).strip()[:300]
                 self.report.steps.append(Step("claude", "failed", " ".join(args)))
                 return f"claude plugin update: {reason}"
-        self.step("claude", "claude plugin update learned-director@agent-plugins")
+        self.step("claude", f"claude plugin update learned-director@{marketplace}")
         return ""
+
+
+def _marketplace_name(repo: Path) -> str:
+    """The Claude marketplace name from the skills repo's .claude-plugin/marketplace.json; a missing name stops."""
+    try:
+        name = json.loads((repo / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8")).get("name")
+    except (OSError, ValueError, AttributeError):
+        name = None
+    if not isinstance(name, str) or not name:
+        raise Stop("learned-director released but .claude-plugin/marketplace.json has no name")
+    return name
+
+
+def _cost_or(data: object, fallback: float) -> float:
+    """The top-level costUsd of an eval result, or the fallback when it has none."""
+    cost = data.get("costUsd") if isinstance(data, dict) else None
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)) or not math.isfinite(cost):
+        return fallback
+    return float(cost)
 
 
 def _plugin_of(path: str) -> str:
