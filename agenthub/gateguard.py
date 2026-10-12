@@ -200,16 +200,33 @@ def _kept_tokens(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[tuple]:
     (`("direct", dump)`); any other keeps it only in the same place (`("placed", place, dump)`). Direct: a top-level
     `assert` or assertion call and a `with` header call. A `raises/warns` body is a place of its own, keyed by its
     with-items, so an assertion there keeps only in a block with the same exception. An assert's forms are its test
-    and, for an `and`, each direct operand."""
+    and, for an `and`, each direct operand. An assertion nested in another expression keeps nothing."""
     direct = _direct_ids(fn.body)
+    statements = _statement_ids(fn)
     tokens = []
     for place, node in _assertion_places(fn):
+        if id(node) not in statements:
+            continue
         forms = [_assertion_key(node)]
         if isinstance(node, ast.Assert) and isinstance(node.test, ast.BoolOp) and isinstance(node.test.op, ast.And):
             forms.extend(ast.dump(v) for v in node.test.values)
         for form in forms:
             tokens.append(("direct", form) if id(node) in direct else ("placed", place, form))
     return tokens
+
+
+def _statement_ids(fn: ast.AST) -> set[int]:
+    """Ids of the assertions that are statements: an `assert`, an assertion call that is an expression statement,
+    or an assertion heading a `with`. Any other expression that contains an assertion does not make it a statement."""
+    ids = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Assert):
+            ids.add(id(node))
+        elif isinstance(node, ast.Expr):
+            ids.add(id(node.value))
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            ids.update(id(item.context_expr) for item in node.items)
+    return ids
 
 
 def _direct_ids(body: list[ast.stmt]) -> set[int]:

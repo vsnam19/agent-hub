@@ -526,11 +526,16 @@ def _touched_section(findings: list[dict]) -> str:
 
 
 def touched_findings(jobs: list[dict], workdir: Path, head: str) -> list[dict]:
-    """The gate_touched findings of the newest passing gate on `head` for `workdir`; empty when none.
-    `jobs` are result records, newest first."""
+    """The gate_touched findings of every passing gate on `head` for `workdir`, deduplicated by (file, kind, lines);
+    empty when none. A later clean gate does not hide an earlier finding. `jobs` are result records, newest first."""
     mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == workdir.resolve()]
-    newest = next((j for j in mine if _passed_gate(j, head)), None)
-    return list(newest.get("gate_touched") or []) if newest else []
+    found: dict[tuple[str, str, tuple[int, ...]], dict] = {}
+    for j in mine:
+        if not _passed_gate(j, head):
+            continue
+        for f in j.get("gate_touched") or []:
+            found.setdefault((f["file"], f["kind"], tuple(sorted(f["lines"]))), f)
+    return list(found.values())
 
 
 def _passed_gate(j: dict, head: str) -> bool:

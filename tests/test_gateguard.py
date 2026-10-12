@@ -413,6 +413,33 @@ def test_assert_wrapped_in_try_except_is_flagged(repo):
     assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
 
 
+def test_assert_call_inside_false_and_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a(self):\n    self.assertEqual(x, 1)\n",
+        "def test_a(self):\n    False and self.assertEqual(x, 1)\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_assert_call_inside_lambda_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a(self):\n    self.assertEqual(x, 1)\n",
+        "def test_a(self):\n    f = lambda: self.assertEqual(x, 1)\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
+def test_assert_call_inside_comprehension_flagged(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a(self):\n    self.assertEqual(x, 1)\n",
+        "def test_a(self):\n    [self.assertEqual(v, 1) for v in x]\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+
 def test_and_conjunction_with_original_not_flagged(repo):
     res = _weaken_test(repo, "def test_a():\n    assert x == 1\n", "def test_a():\n    assert x == 1 and y\n")
     assert res == []

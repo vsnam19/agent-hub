@@ -55,6 +55,16 @@ def test_gate_cmd_records_head_and_sha(env_sandbox, repo, capsys):
     assert recorded["id"] == out["id"]
 
 
+def test_gate_has_no_base_option(env_sandbox, repo, capsys):
+    set_repo_gates(repo, ["true"])
+
+    rc = main(["gate", "-d", str(repo), "--base", "HEAD"])
+
+    assert rc == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
+    assert list_jobs(paths(), 10) == []
+
+
 def test_gate_cmd_failure_exit_9(env_sandbox, repo, capsys):
     set_repo_gates(repo, ["echo nope; exit 4"])
 

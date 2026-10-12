@@ -56,7 +56,7 @@ agent-hub plan status <plan.json> [--json] [--trail]
 agent-hub plan wait <plan.json> [--timeout 9m]
 agent-hub plan cancel <plan.json> [-d WORKDIR]       # only from the plan's repository
 agent-hub orders [-d WORKDIR] [--json]              # standing orders and what enforces each (D-071)
-agent-hub gate [-d WORKDIR] [--gate CMD]... [--base REF] [--json]   # gate the committed HEAD; repo gates from the merge base (D-080)
+agent-hub gate [-d WORKDIR] [--gate CMD]... [--json]   # gate the committed HEAD; repo gates from the merge base (D-080)
 agent-hub ready -d WORKDIR [--json]               # merge check: HEAD gated + approved by a non-implementer (D-075)
 ```
 

@@ -118,9 +118,6 @@ def _build_parser() -> argparse.ArgumentParser:
     gate = sub.add_parser("gate", help="run the gates on the committed HEAD and record them (exit 9 if one fails)")
     gate.add_argument("-d", "--dir", default=".", dest="workdir", help="clean work tree to gate")
     gate.add_argument("--gate", action="append", dest="gates", help="gate command to run after the repo gates")
-    gate.add_argument(
-        "--base", help="ref whose merge base with HEAD bounds the test check (default: the default branch)"
-    )
     gate.add_argument("--json", action="store_true")
 
     return parser
@@ -343,7 +340,7 @@ def _cmd_gate(args) -> int:
         raise UsageError(str(e)) from None
     if guards._run_git(repo.root, "status", "--porcelain"):
         raise UsageError("commit first; gate runs on HEAD")
-    base = args.base or repo.default_branch
+    base = repo.default_branch
     try:
         since = guards._run_git(repo.root, "merge-base", "HEAD", base)
     except subprocess.CalledProcessError:
