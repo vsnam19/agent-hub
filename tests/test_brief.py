@@ -64,6 +64,12 @@ def test_review_preamble_limits_reads_to_worktree_and_diff():
     assert "unverified" in text
 
 
+def test_review_preamble_says_no_urls():
+    text = review_text("main", None, Path("/j/diff.patch"))
+    assert "URLs and the web are not available" in text
+    assert "do not fetch them" in text
+
+
 def test_review_text_points_at_diff_file_and_has_no_git_command():
     text = review_text("master", None, Path("/jobs/j1/diff.patch"))
     assert "/jobs/j1/diff.patch" in text

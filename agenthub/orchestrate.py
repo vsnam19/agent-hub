@@ -346,6 +346,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     before = guards.fingerprint(repo)
     cooldowns = Cooldowns(p.cooldowns_file)
     status: str | None = None
+    denied_last = False
 
     with _Cancel() as cancel:
         for n, link in enumerate(links, start=1):
@@ -405,6 +406,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
                 entry["outcome"] = "cancelled"
                 status = "cancelled"
                 break
+            denied_last = False
             if cl.outcome == Outcome.QUOTA:
                 cooldowns.set(link, cl.reset_at or (now() + pool.quota_cooldown))
 
@@ -418,6 +420,10 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
                 if guards.fingerprint(repo) != before:
                     status = "interrupted"
                     break
+                continue
+            if kind == "review" and cl.outcome == Outcome.FAILED and cl.detail.startswith("permission auto-denied"):
+                entry["fallthrough"] = "permission auto-denied"
+                denied_last = True
                 continue
             status = TERMINAL[cl.outcome]
             break
@@ -468,7 +474,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
             record["scope_violation"] = outside
             if status == "ok":
                 status = "scope-violation"
-    return _finish(job, record, status or "exhausted", now, started)
+    return _finish(job, record, status or ("failed" if denied_last else "exhausted"), now, started)
 
 
 def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
