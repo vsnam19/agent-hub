@@ -20,7 +20,7 @@ State what must not change, the style rules, and anything forbidden (for example
 
 ## Rationalizations to refuse
 
-Optional. Name the excuses this task invites and the answer to each.
+Optional. The rows below are examples only: replace them with the excuses this task invites and the answer to each, or delete this section when none apply (for example, a docs-only task has no failing test to write).
 
 | Excuse | Answer |
 | --- | --- |
