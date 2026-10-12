@@ -54,6 +54,8 @@ class Fake:
         self.verdicts = list(opts.get("verdicts", ["approve"]))
         self.evals = list(opts.get("evals", [eval_json(1.0, 0.0)]))
         self.draft = opts.get("draft", True)
+        self.director = opts.get("director", False)
+        self.plugin_rc = opts.get("plugin_rc", 0)
         self.ready_rc = opts.get("ready_rc", 0)
         self.gate_rc = opts.get("gate_rc", 0)
         self.drafts = 0
@@ -67,6 +69,8 @@ class Fake:
             return Proc(done.returncode, done.stdout, done.stderr)
         if argv[0] == "notify-send":
             return Proc(0, "", "")
+        if argv[0] == "claude" and argv[2] in ("marketplace", "update"):
+            return Proc(self.plugin_rc, "", "update refused\n" if self.plugin_rc else "")
         if argv[0] == "claude":
             return self.eval(argv)
         words = argv[3:]
@@ -95,6 +99,10 @@ class Fake:
             case = workdir / "plugins/learned-worker/evals/foo-pos/prompt.md"
             case.parent.mkdir(parents=True, exist_ok=True)
             case.write_text("prompt\n")
+        if self.director:
+            skill = workdir / "plugins/learned-director/skills/bar/SKILL.md"
+            skill.parent.mkdir(parents=True, exist_ok=True)
+            skill.write_text("---\nname: bar\n---\ndirector draft\n")
         return self.job("draft", status="ok")
 
     def review(self) -> Proc:
@@ -260,6 +268,43 @@ def test_full_run_merges_installs_and_reports(tmp_path):
     assert "foo: with 1.00 vs without 0.00" in text
     assert "MCP proposal: foo-query" in text
     assert (env.out / "extract.json").is_file()
+
+
+def test_release_updates_director_plugin_when_changed(tmp_path):
+    env = Env(tmp_path, director=True)
+    report = env.run()
+    assert report.exit_code == 0, report.stop_reason
+    install = env.fake.words("hub", "install", "--apply")[0]
+    marketplace = ["claude", "plugin", "marketplace", "update", "agent-plugins"]
+    update = ["claude", "plugin", "update", "learned-director@agent-plugins"]
+    assert marketplace in env.fake.calls
+    assert update in env.fake.calls
+    assert env.fake.calls.index(marketplace) > env.fake.calls.index(install)
+    assert env.fake.calls.index(update) > env.fake.calls.index(marketplace)
+    assert "claude plugin update learned-director" in (env.out / "report.md").read_text()
+    assert env.branches() == ["master"]
+
+
+def test_release_skips_claude_update_when_only_worker_changed(tmp_path):
+    env = Env(tmp_path)
+    report = env.run()
+    assert report.exit_code == 0, report.stop_reason
+    assert env.fake.words("hub", "install", "--apply")
+    assert env.fake.words("marketplace") == []
+    assert env.fake.words("learned-director@agent-plugins") == []
+    assert "claude plugin update" not in (env.out / "report.md").read_text()
+
+
+def test_claude_update_failure_stops_after_merge(tmp_path):
+    env = Env(tmp_path, director=True, plugin_rc=1)
+    before = git(env.repo, "rev-parse", "master")
+    report = env.run()
+    assert report.exit_code == 1
+    assert "merged, but claude plugin update failed: update refused" in report.stop_reason
+    assert git(env.repo, "rev-parse", "master") != before
+    assert len(git(env.repo, "log", "-1", "--format=%P", "master").split()) == 2
+    assert ["claude", "plugin", "update", "learned-director@agent-plugins"] not in env.fake.calls
+    assert not env.last_run.exists()
 
 
 def test_never_pushes(tmp_path):

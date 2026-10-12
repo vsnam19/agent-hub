@@ -27,6 +27,7 @@ JOB_TIMEOUT = 2 * 60 * 60  # outer safety net; agent-hub enforces its own per-ro
 GATE_TIMEOUT = 30 * 60
 READY_TIMEOUT = 120
 INSTALL_TIMEOUT = 10 * 60
+CLAUDE_TIMEOUT = 120
 DRAFT_ROLE = "implement"  # drafts and fix rounds run on haiku (D-093)
 EXIT_STOPPED = 1
 EXIT_LOCKED = 3
@@ -483,9 +484,23 @@ class _Run:
         if installed.rc != 0:
             raise Stop(f"merged, but hub install failed: {(installed.stdout or installed.stderr).strip()[-300:]}")
         self.step("install", "hub install --apply")
+        if any(item.startswith("learned-director ") for item in self.report.released):
+            self.update_director_plugin()
         self.git("worktree", "remove", "--force", str(self.wt))
         self.git("branch", "-d", self.branch)
         self.report.outcome = "released " + ", ".join(self.report.released)
+
+    def update_director_plugin(self) -> None:
+        commands = (
+            ("plugin", "marketplace", "update", "agent-plugins"),
+            ("plugin", "update", "learned-director@agent-plugins"),
+        )
+        for args in commands:
+            proc = self.runner(["claude", *args], None, CLAUDE_TIMEOUT)
+            if proc.rc != 0:
+                reason = (proc.stderr or proc.stdout).strip()[:300]
+                raise Stop(f"merged, but claude plugin update failed: {reason}")
+        self.step("claude", "claude plugin update learned-director@agent-plugins")
 
 
 def _plugin_of(path: str) -> str:
