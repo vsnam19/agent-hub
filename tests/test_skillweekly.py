@@ -321,6 +321,18 @@ def test_full_run_merges_installs_and_reports(tmp_path):
     assert (env.out / "extract.json").is_file()
 
 
+def test_extract_ignored_without_repo_gitignore(tmp_path):
+    env = Env(tmp_path)
+    # The skills repo does not ignore .agent-hub/, so the extract copy must be excluded some other way.
+    (env.repo / ".gitignore").write_text(".worktrees/\n")
+    git(env.repo, "add", "-A")
+    git(env.repo, "commit", "-m", "drop agent-hub ignore")
+    report = env.run()
+    assert report.exit_code == 0, report.stop_reason
+    assert ".agent-hub/learned/" in (env.repo / ".git" / "info" / "exclude").read_text().splitlines()
+    assert env.branches() == ["master"]
+
+
 def test_release_updates_director_plugin_when_changed(tmp_path):
     env = Env(tmp_path, director=True)
     report = env.run()

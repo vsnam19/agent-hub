@@ -296,11 +296,23 @@ class _Run:
         if self.wt.exists():
             raise Stop(f"worktree {self.wt} already exists")
         self.git("worktree", "add", "-b", self.branch, str(self.wt), "master")
+        self.exclude_extract()
         learned = self.wt / ".agent-hub" / "learned"
         learned.mkdir(parents=True, exist_ok=True)
         for name in ("extract.json", "extract.md"):
             shutil.copy(self.out / name, learned / name)
         self.step("worktree", f"{self.wt} on {self.branch}")
+
+    def exclude_extract(self) -> None:
+        """Keep the extract copy out of commits whatever the skills repo's .gitignore says."""
+        found = Path(self.git("rev-parse", "--git-path", "info/exclude", cwd=self.wt).stdout.strip())
+        path = found if found.is_absolute() else self.wt / found
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        if ".agent-hub/learned/" not in text.splitlines():
+            if text and not text.endswith("\n"):
+                text += "\n"
+            path.write_text(text + ".agent-hub/learned/\n", encoding="utf-8")
 
     def existing_skills(self, plugin: str) -> str:
         found = sorted(p.name for p in (self.wt / "plugins" / plugin / "skills").glob("*") if p.is_dir())
