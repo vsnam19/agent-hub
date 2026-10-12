@@ -303,6 +303,8 @@ def test_claude_build_adds_plugin_dirs(tmp_path):
     argv = adapter.build(req).argv
     assert argv[-4:] == ["--plugin-dir", str(telaf), "--plugin-dir", str(aspice)]
     assert argv[argv.index("--allowedTools") + 1] == "Read,Grep,Glob,Skill"
+    assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob,Skill"
+    assert "--strict-mcp-config" in argv
 
 
 def _classify_stdout(tmp_path, adapter, payload, rc=1):
