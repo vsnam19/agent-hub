@@ -91,6 +91,10 @@ class ClaudeAdapter(Adapter):
             argv.append("--add-dir")
             argv.append(str(req.brief_path.parent))
 
+        if req.effort:
+            argv.append("--effort")
+            argv.append(req.effort)
+
         for plugin_dir in req.plugin_dirs:
             argv.append("--plugin-dir")
             argv.append(str(plugin_dir))

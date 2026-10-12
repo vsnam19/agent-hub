@@ -369,6 +369,9 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
             entry: dict = {"n": n, "agent": link.agent, "model": link.model}
             record["attempts"].append(entry)
 
+            if link.effort and link.agent != "claude":
+                entry.update(outcome="config", reason="effort is only supported for claude links")
+                continue
             if not adapter.installed():
                 entry.update(outcome="skipped", reason="not-installed")
                 continue
@@ -386,6 +389,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
                 attempt_dir=attempt_dir,
                 git_common_dir=repo.common_dir,
                 plugin_dirs=plugin_dirs,
+                effort=link.effort,
             )
             cl = adapter.preflight(req)
             if cl is not None:

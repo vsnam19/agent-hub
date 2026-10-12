@@ -747,3 +747,13 @@ def test_named_skill_plugin_is_added_for_per_run_hosts(env_sandbox, repo, tmp_pa
     assert result["status"] == "ok"
     argv = fake_calls(env_sandbox.fakelog, "claude")[1]["argv"]
     assert [argv[i + 1] for i, a in enumerate(argv) if a == "--plugin-dir"] == [str(worker), str(telaf)]
+
+
+def test_non_claude_link_with_effort_is_refused(env_sandbox, repo):
+    result = go(repo, ["agy:m1@low", "claude:sonnet"])
+    assert result["status"] == "ok"
+    first, second = result["attempts"]
+    assert first["outcome"] == "config" and first["n"] == 1
+    assert first["reason"] == "effort is only supported for claude links"
+    assert second["outcome"] == "ok" and second["n"] == 2
+    assert fake_calls(env_sandbox.fakelog, "agy") == []
