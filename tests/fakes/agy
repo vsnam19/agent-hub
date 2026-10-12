@@ -43,6 +43,10 @@ def main():
     elif scenario == "model":
         print(json.dumps({"status": "ERROR", "error": "model foo is not a known model"}))
         sys.exit(1)
+    elif scenario == "denied":
+        print(json.dumps({"conversation_id": "c1", "status": "SUCCESS", "response": "", "duration_seconds": 1.0, "num_turns": 1, "denied_actions": [{"action": "command", "display_name": "RunCommand"}]}))
+        print('jetski: no output produced — a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied.', file=sys.stderr)
+        sys.exit(0)
     elif scenario == "empty":
         print(json.dumps({"status": "SUCCESS", "response": ""}))
         sys.exit(0)

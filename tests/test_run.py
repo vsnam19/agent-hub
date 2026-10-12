@@ -164,6 +164,37 @@ def test_fallback_on_model(env_sandbox, repo, monkeypatch):
     assert Cooldowns(paths().cooldowns_file).all(now()) == {}
 
 
+def test_review_falls_through_on_permission_denied(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "agy", "denied,ok")
+    result = go(repo, ["agy:m1", "agy:m2"], role="review", brief="")
+    assert result["status"] == "ok"
+    assert result["model"] == "m2"
+    first, second = result["attempts"]
+    assert first["outcome"] == "failed" and first["fallthrough"] == "permission auto-denied"
+    assert "fallthrough" not in second and second["outcome"] == "ok"
+    assert len(fake_calls(env_sandbox.fakelog, "agy")) == 2
+
+
+def test_implement_does_not_fall_through_on_permission_denied(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "agy", "denied,ok")
+    result = go(repo, ["agy:m1", "agy:m2"])
+    assert result["status"] == "failed"
+    assert result["exit_code"] == 1
+    assert len(result["attempts"]) == 1
+    assert result["attempts"][0]["outcome"] == "failed"
+    assert "fallthrough" not in result["attempts"][0]
+    assert len(fake_calls(env_sandbox.fakelog, "agy")) == 1
+
+
+def test_review_permission_denied_on_last_link_is_failed(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "agy", "denied")
+    result = go(repo, ["agy:m1", "agy:m2"], role="review", brief="")
+    assert result["status"] == "failed"
+    assert [a["outcome"] for a in result["attempts"]] == ["failed", "failed"]
+    assert result["attempts"][0]["fallthrough"] == "permission auto-denied"
+    assert "fallthrough" in result["attempts"][1]
+
+
 def test_skip_not_installed(env_sandbox, repo, monkeypatch, tmp_path):
     bindir = tmp_path / "onlyclaude"
     bindir.mkdir()

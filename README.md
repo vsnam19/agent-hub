@@ -5,7 +5,7 @@ System overview — how the pieces fit, this machine's setup, testing, lessons: 
 `agent-hub` lets one coding agent (the orchestrator, normally Claude Code) hand well-specified work to other coding
 agents on this machine and get back a record it can verify. Jobs are picked by role (`implement`, `review`); each
 role is an ordered chain of `agent:model` links, and the CLI walks the chain, skipping links that are on cooldown
-and falling back to the next one on quota, auth, model-unavailable or not-installed. It has no runtime
+and falling back to the next one on quota, auth, model-unavailable or not-installed (a review whose tool was auto-denied also falls through to the next link). It has no runtime
 dependencies (Python 3.12+ standard library only).
 
 ## Install
