@@ -13,8 +13,9 @@ techlead để split task, ông này sẽ làm role như techlead ngoài đời"
 
 ## The role
 
-- A new job kind **`plan`** and role **`techlead`** (chain `claude:sonnet`, `agy:claude-opus-4-6-thinking`,
-  `agy:gemini-3.1-pro-high`). A plan job is **read-only** like a review (same per-agent read-only invocation: claude
+- A new job kind **`plan`** and role **`techlead`**. Its chain is **decided by a bench (E7)**, not guessed (owner,
+  2026-10-12: "với techlead chúng ta cần benchmark để quyết định cho model nào, có thể opus low"); until then the
+  provisional chain is `claude:sonnet`. A plan job is **read-only** like a review (same per-agent read-only invocation: claude
   `--tools Read,Grep,Glob,Skill --strict-mcp-config`, agy plan mode, codex read-only sandbox), with no diff: it reads
   the spec and the repository.
 - Its brief (template `agenthub/templates/techlead-brief.md`) asks for: tasks in dependency order, each with a role
@@ -43,9 +44,11 @@ starts `plan run` — a tech lead proposes, the manager approves.
 
 | # | Task | Files | Done means |
 |---|---|---|---|
+| E0 | effort per link: `claude:opus@low` → `--effort low` (claude adapter; other adapters reject `@`) | `agenthub/pool.py` or link parser, claude adapter, test | argv test; unknown level → config error |
 | E1 | `tasksize.check(brief_text) -> list[str]` | `agenthub/tasksize.py`, test | tests on a small brief (no problems) and on each limit |
 | E2 | parse a techlead reply into plan + briefs | `agenthub/plandraft.py`, test | tests: valid block, no block, two blocks, bad role, cycle in `depends_on`, unknown dependency |
 | E3 | job kind `plan` + role `techlead` read-only, no diff | `agenthub/orchestrate.py`, `default_pool.toml`, test | a plan job's argv is read-only per agent; no `diff.patch`; reply kept |
 | E4 | techlead brief template | `agenthub/templates/techlead-brief.md`, test | rendered with the spec path and the size limits from `tasksize` |
 | E5 | `agent-hub plan draft` (E1–E4 wired, one re-split) | `agenthub/cli.py`, test | fake techlead: pass, re-split once, give up with problems; real run on this spec |
 | E6 | size warning in `run`/`plan run`; orchestrate skill + README | `agenthub/cli.py`, `skills/orchestrate/SKILL.md`, `README.md` | warning test; docs |
+| E7 | techlead bench (director-run, after E5): candidates `claude:opus@low`, `claude:sonnet`, `claude:sonnet@low`, `agy:gemini-3.1-pro-high`, `agy:claude-opus-4-6-thinking` × 3 real specs of this repo (Phase C, Phase D §1 mine, Phase E); metrics: valid draft, size-check pass rate before re-split, task count, dependency sanity, wall time, cost/quota; plus a blind judge (claude:opus, high effort, rubric: covers the spec, tasks independent and testable, file paths exist, roles sensible) and a downstream check (haiku runs the first task of each plan; gate pass). Results in `docs/techlead-bench-<date>.md`; the chain is set from them (decision) | bench script under `bench/techlead/` | report written, chain decided |
