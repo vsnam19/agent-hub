@@ -3,8 +3,9 @@ import re
 from dataclasses import dataclass, field
 
 ROLES = ("implement-small", "implement", "implement-hard")
-NAME_RE = re.compile(r"[a-z0-9-]+")
+NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 BLOCK_RE = re.compile(r"^[ \t]*```json[ \t]*\r?\n(.*?)```[ \t]*\r?$", re.DOTALL | re.MULTILINE | re.IGNORECASE)
+OPEN_RE = re.compile(r"^[ \t]*```json[ \t]*\r?$", re.MULTILINE | re.IGNORECASE)
 DEFAULT_ROLE = "implement"
 
 
@@ -29,6 +30,8 @@ class Draft:
 
 def parse(reply: str) -> Draft:
     blocks = BLOCK_RE.findall(reply)
+    if len(blocks) < len(OPEN_RE.findall(reply)):
+        raise DraftError("the ```json block is not closed")
     if not blocks:
         raise DraftError("techlead reply has no ```json block")
     if len(blocks) > 1:
@@ -44,8 +47,8 @@ def parse(reply: str) -> Draft:
     for key in ("goal", "tasks"):
         if key not in data:
             raise DraftError(f"techlead json missing field: {key}")
-    if not isinstance(data["goal"], str):
-        raise DraftError("techlead goal must be a string")
+    if not isinstance(data["goal"], str) or not data["goal"].strip():
+        raise DraftError("techlead goal must be a non-empty string")
     if not isinstance(data["tasks"], list) or not data["tasks"]:
         raise DraftError("techlead tasks must be a non-empty list")
 
@@ -72,7 +75,7 @@ def _parse_task(index: int, raw: object) -> DraftTask:
             raise DraftError(f"task {index} missing field: {key}")
     name = raw["name"]
     if not isinstance(name, str) or not NAME_RE.fullmatch(name):
-        raise DraftError(f"task {index} name must match [a-z0-9-]+: {name!r}")
+        raise DraftError(f"task {index} name must match [a-z0-9][a-z0-9-]*: {name!r}")
     role = raw.get("role", DEFAULT_ROLE)
     if role not in ROLES:
         raise DraftError(f"task {name} has bad role {role!r}, expected one of {', '.join(ROLES)}")
@@ -90,18 +93,27 @@ def _parse_task(index: int, raw: object) -> DraftTask:
 
 
 def _check_cycles(tasks: list[DraftTask]) -> None:
+    # Iterative DFS with an explicit stack, so a long dependency chain cannot hit the recursion limit.
     deps = {t.name: t.depends_on for t in tasks}
     done: set[str] = set()
 
-    def visit(name: str, path: list[str]) -> None:
-        if name in path:
-            cycle = path[path.index(name) :] + [name]
-            raise DraftError(f"dependency cycle: {' -> '.join(cycle)}")
-        if name in done:
-            return
-        for dep in deps[name]:
-            visit(dep, path + [name])
-        done.add(name)
-
-    for name in deps:
-        visit(name, [])
+    for root in deps:
+        if root in done:
+            continue
+        path = [root]
+        on_path = {root}
+        stack = [iter(deps[root])]
+        while stack:
+            dep = next(stack[-1], None)
+            if dep is None:
+                stack.pop()
+                name = path.pop()
+                on_path.discard(name)
+                done.add(name)
+            elif dep in on_path:
+                cycle = path[path.index(dep) :] + [dep]
+                raise DraftError(f"dependency cycle: {' -> '.join(cycle)}")
+            elif dep not in done:
+                path.append(dep)
+                on_path.add(dep)
+                stack.append(iter(deps[dep]))

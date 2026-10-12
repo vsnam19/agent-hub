@@ -156,3 +156,41 @@ def test_cycle():
 
     with pytest.raises(DraftError, match="dependency cycle: a -> b -> c -> a"):
         parse(_reply({"goal": "g", "tasks": tasks}))
+
+
+def test_long_chain_no_recursion_error():
+    count = 5000
+    tasks = [_task(f"t{i}", depends_on=[f"t{i - 1}"] if i else []) for i in range(count)]
+
+    draft = parse(_reply({"goal": "g", "tasks": tasks}))
+
+    assert len(draft.tasks) == count
+    assert draft.tasks[-1].name == f"t{count - 1}"
+    assert draft.tasks[-1].depends_on == [f"t{count - 2}"]
+
+    tasks[0]["depends_on"] = [f"t{count - 1}"]
+    with pytest.raises(DraftError, match="dependency cycle: t0 -> "):
+        parse(_reply({"goal": "g", "tasks": tasks}))
+
+
+@pytest.mark.parametrize("name", ["a", "0", "a-b", "a1-2", "9-"])
+def test_name_and_goal_rules(name):
+    draft = parse(_reply({"goal": "g", "tasks": [_task(name)]}))
+
+    assert draft.tasks[0].name == name
+
+    for bad in ["-a", "--", "-", "A", "a_b", "a b", "a.b", ""]:
+        with pytest.raises(DraftError, match="must match"):
+            parse(_reply({"goal": "g", "tasks": [_task(bad)]}))
+
+    for goal in ["", "   ", 5, None]:
+        with pytest.raises(DraftError, match="goal must be a non-empty string"):
+            parse(_reply({"goal": goal, "tasks": [_task("a")]}))
+
+
+def test_unclosed_fence():
+    body = json.dumps({"goal": "g", "tasks": [_task("a")]})
+
+    for reply in (f"Plan:\n```json\n{body}\n", f"```JSON\n{body}"):
+        with pytest.raises(DraftError, match="the ```json block is not closed"):
+            parse(reply)
