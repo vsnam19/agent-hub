@@ -32,52 +32,21 @@ _HOME = re.compile(r"(?:^|(?<=[\s\"'`(=:/\[]))(?:/home/[^/\s]+|/Users/[^/\s]+|/r
 #   - >= 16 chars: shorter strings are mostly words or short ids, and name rules cover short passwords;
 #   - >= 2 of {lower, upper, digit}: a single-class string is a word or a number (`_-+` do not count);
 #   - Shannon entropy >= 3.0 bits/char: random keys sit at 4+, repeated or patterned text well below;
-#   - not an identifier (words of letters joined by `_`/`-`, each word upper-case or camel/lower with >= 3 letter
-#     pieces, plus a digit-only first/last word of <= 4 digits) and not a job id (`YYYYMMDD-HHMMSS-kind-xxxx`):
-#     names the extract needs to keep.
+#   - not an identifier: a piece split on `_`, `-` or `+` whose parts are all words (letters only, each upper-case or
+#     camel/lower with >= 3 letter pieces, or a single letter) or digit groups of <= 8 digits (`FastAPI+SQLite+React`,
+#     `2026-10-11-model-routing`, `phase-b`), and not a job id (`YYYYMMDD-HHMMSS-role-xxxx`, role = one or more
+#     lower-case words joined by `-`): names the extract needs to keep.
 _TOKEN = re.compile(r"[^\s\"'`=:,;()<>\[\]{}?&]+")
 _PIECE_SPLIT = re.compile(r"([./@#*]+)")
 _REDACTED_RUN = re.compile(r"<redacted>(?:[./@#*]+<redacted>)+")
 _TOKEN_MIN_LEN = 16
 _CONTINUATION_MIN_LEN = 8
 _TOKEN_MIN_ENTROPY = 3.0
-_SHORT_DIGITS = 4
+_DIGIT_GROUP_MAX = 8
+_PART_SPLIT = re.compile(r"[_+-]+")
 _WORD = re.compile(r"(?:[A-Z]+(?![a-z])|[A-Z]?[a-z]{3,})+")
 _IDENT_WORD = re.compile(r"(?:[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]{3,})+")
-_JOB_ID = re.compile(r"\d{8}-\d{6}-[a-z]+-[0-9a-f]{4}")
-
-_CORRECTIONS = 500
-MAX_CORRECTION_CHARS = 600
-CATEGORY_WORDS = 12
-
-_PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.S)
-_JWT = re.compile(r"\beyJ[\w-]+\.[\w-]+\.[\w-]+")
-_BEARER = re.compile(r"(?i)\bBearer\s+[\w.~+/=-]+")
-_BASIC = re.compile(r"\bBasic\s+([A-Za-z0-9+/_-]{8,}={0,2})(?![\w+/])")
-_PREFIXED = re.compile(r"\b(?:sk-[\w-]{16,}|ghp_\w{20,}|xox[a-z]-[\w-]{10,}|AKIA[0-9A-Z]{16})")
-_NAME = r"[\w-]*(?:pass|pwd|secret|token|key|auth|authorization|credential|cookie|session|salt|sig|signature)[\w-]*"
-_VALUE = r"(?:\"[^\"]*\"|'[^']*'|[^\s\"',;]+)"
-_KV = re.compile(rf"(?i)(?<![\w-])({_NAME})(\s*[=:]\s*){_VALUE}")
-_KV_SPACE = re.compile(rf"(?i)(?<![\w-])({_NAME})(\s+)(?!-|<redacted>){_VALUE}")
-_KV_JSON = re.compile(rf"(?i)(\"{_NAME}\"\s*:\s*)\"[^\"]*\"")
-_BARE_SECRET_WORDS = {"password", "passwd", "pwd", "passphrase"}
-_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
-_HOME = re.compile(r"(?:^|(?<=[\s\"'`(=:/\[]))(?:/home/[^/\s]+|/Users/[^/\s]+|/root(?![\w.-]))")
-
-# Token rule. Text is split on whitespace, quotes, backticks and `=:,;()<>[]{}?&`; a token is redacted when ALL hold:
-#   - >= 16 chars: shorter strings are mostly words or short ids, and name rules cover short passwords;
-#   - >= 2 of {lower, upper, digit, symbol `+/_-`}: a single-class string is a word or a number;
-#   - Shannon entropy >= 3.0 bits/char: random keys sit at 4+, repeated or patterned text well below;
-#   - not path-like (>= 2 `/` segments, each with a letter and <= 40 chars, none digit+mixed-case): file paths,
-#     branch names and URLs have short readable segments, base64 blobs do not;
-#   - not an identifier (words of letters joined by `_`/`-`, each word upper-case or camel/lower with >= 3 letter
-#     pieces) and not a job id (`YYYYMMDD-HHMMSS-kind-xxxx`): names the extract needs to keep.
-_TOKEN = re.compile(r"[^\s\"'`=:,;()<>\[\]{}?&]+")
-_TOKEN_MIN_LEN = 16
-_TOKEN_MIN_ENTROPY = 3.0
-_SEGMENT_MAX = 40
-_WORD = re.compile(r"(?:[A-Z]+(?![a-z])|[A-Z]?[a-z]{3,})+")
-_JOB_ID = re.compile(r"\d{8}-\d{6}-[a-z]+-[0-9a-f]{4}(?:\.\w+)?")
+_JOB_ID = re.compile(r"\d{8}-\d{6}-[a-z]+(?:-[a-z]+)*-[0-9a-f]{4}(?:\.\w+)?")
 
 _CORRECTION = re.compile(
     r"không được|\bphải\b|\bđừng\b|\bsai\b|\bdon[’']?t\b|\bnever\b|\bwrong\b|\bmust\b",
@@ -152,15 +121,14 @@ def _looks_secret(piece: str, min_len: int = _TOKEN_MIN_LEN) -> bool:
     classes = (any(c.islower() for c in piece), any(c.isupper() for c in piece), any(c.isdigit() for c in piece))
     if sum(classes) < 2 or _entropy(piece) < _TOKEN_MIN_ENTROPY or _JOB_ID.fullmatch(piece):
         return False
-    words = [word for word in re.split(r"[_-]+", piece) if word]
-    last = len(words) - 1
-    return not all(_identifier_word(word, i in (0, last)) for i, word in enumerate(words))
+    parts = [part for part in _PART_SPLIT.split(piece) if part]
+    return not all(_identifier_part(part) for part in parts)
 
 
-def _identifier_word(word: str, edge: bool) -> bool:
-    if word.isdigit():
-        return edge and len(word) <= _SHORT_DIGITS
-    return word.isalpha() and _IDENT_WORD.fullmatch(word) is not None
+def _identifier_part(part: str) -> bool:
+    if part.isdigit():
+        return len(part) <= _DIGIT_GROUP_MAX
+    return part.isalpha() and (len(part) == 1 or _IDENT_WORD.fullmatch(part) is not None)
 
 
 def clean(text: str) -> str:

@@ -711,11 +711,23 @@ def test_real_false_positives_stay():
         "accepted-touched.jsonl",
         "agent-hub@agent-plugins",
         "agenthub.agents.claude._now",
+        "20261011-140234-haiku-impl-7a9a",
+        "20261011-190458-implement-hard-f179",
+        "docs/superpowers/plans/2026-10-11-model-routing.md",
+        "docs/superpowers/specs/2026-10-12-phase-b-skill-hub-design.md",
+        "docs/superpowers/specs/2026-10-12-phase-b-skill-hub-design.md.",
+        "FastAPI+SQLite+React",
     ]
     for text in keep:
         assert skillmine.redact(f"see {text} now") == f"see {text} now", text
     assert "<redacted>" in skillmine.redact("AKIAIOSFODNN7EXAMPLE")
     assert skillmine.redact("k aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE3fG5hI7kLm") == "k <redacted>"
+
+
+def test_real_secrets_still_redacted_after_false_positive_rules():
+    assert skillmine.redact("see AKIAIOSFODNN7EXAMPLE now") == "see <redacted> now"
+    assert skillmine.redact("see cfg.aB3dE5gH7jK9mN1pQ3sT5vW7y now") == "see cfg.<redacted> now"
+    assert skillmine.redact("auth Basic dXNlcjpodW50ZXIy") == "auth Basic <redacted>"
 
 
 def test_random_piece_inside_dotted_token_redacted():
