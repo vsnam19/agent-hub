@@ -149,35 +149,56 @@ def test_reviewer_matching_any_implementer_is_rejected(env_sandbox, repo, capsys
 TOUCHED = [{"file": "test_a.py", "kind": "assert-removed", "lines": [2]}]
 
 
-def test_ready_accept_touched_passes_only_that_problem(env_sandbox, repo, capsys):
-    head = git_head(repo)
-    add_job(repo, "implement", head, model="m1", n=1, touched=TOUCHED)
-    add_job(repo, "review", head, model="m2", verdict="request-changes", n=2)
-    rc, out = ready(repo, capsys)
-    assert rc == 1
-    assert out["problems"] == ["gate touched: 1 findings — inspect before merging", "review verdict request-changes"]
-    rc, out = ready(repo, capsys, "--accept-touched")
-    assert rc == 1
-    assert out["problems"] == ["review verdict request-changes"]
-    assert out["accepted_touched"] == TOUCHED
+def add_judged_review(repo, head, judgements, *, model="m2", n=2):
+    add_job(repo, "review", head, model=model, verdict="approve", n=n)
+    job = sorted(paths().jobs_dir.iterdir())[-1]
+    record = json.loads((job / "result.json").read_text())
+    record["touched_review"] = [
+        {"file": "test_a.py", "kind": "assert-removed", "judgement": j, "reason": "r"} for j in judgements
+    ]
+    (job / "result.json").write_text(json.dumps(record))
 
 
-def test_ready_accept_touched_is_recorded(env_sandbox, repo, capsys):
+def test_ready_requires_reviewer_to_judge_every_finding(env_sandbox, repo, capsys):
     head = git_head(repo)
     add_job(repo, "implement", head, model="m1", n=1, touched=TOUCHED)
     add_job(repo, "review", head, model="m2", verdict="approve", n=2)
-    rc = main(["ready", "-d", str(repo), "--accept-touched"])
-    text = capsys.readouterr().out
+    rc, out = ready(repo, capsys)
+    assert rc == 1
+    assert out["problems"] == ["gate touched: 1 findings not judged by the reviewer"]
+
+
+def test_ready_blocked_on_weakening_judgement(env_sandbox, repo, capsys):
+    head = git_head(repo)
+    add_job(repo, "implement", head, model="m1", n=1, touched=TOUCHED)
+    add_judged_review(repo, head, ["weakening"])
+    rc, out = ready(repo, capsys)
+    assert rc == 1
+    assert out["problems"] == ["reviewer judged test_a.py assert-removed as weakening"]
+
+
+def test_ready_passes_when_all_legitimate(env_sandbox, repo, capsys):
+    head = git_head(repo)
+    add_job(repo, "implement", head, model="m1", n=1, touched=TOUCHED)
+    add_judged_review(repo, head, ["legitimate"])
+    rc, out = ready(repo, capsys)
     assert rc == 0
-    assert f"accepted gate touched: 1 findings on {head}" in text
-    assert "  test_a.py assert-removed lines [2]" in text
-    assert f"ready: {head}" in text
-    lines = (paths().state_dir / "accepted-touched.jsonl").read_text().splitlines()
-    assert len(lines) == 1
-    entry = json.loads(lines[0])
-    assert entry["sha"] == head
-    assert entry["accepted"] == TOUCHED
-    assert datetime.fromisoformat(entry["time"]).tzinfo is not None
+    assert out == {"ready": True, "head": head, "problems": []}
+
+
+def test_ready_ignores_judgement_by_the_implementer(env_sandbox, repo, capsys):
+    head = git_head(repo)
+    add_job(repo, "implement", head, model="m1", n=1, touched=TOUCHED)
+    add_judged_review(repo, head, ["legitimate"], model="m1")
+    rc, out = ready(repo, capsys)
+    assert rc == 1
+    assert "gate touched: 1 findings not judged by the reviewer" in out["problems"]
+
+
+def test_accept_touched_flag_removed(env_sandbox, repo, capsys):
+    rc = main(["ready", "-d", str(repo), "--accept-touched"])
+    assert rc == 2
+    assert "--accept-touched" in capsys.readouterr().err
 
 
 def test_ready_no_implementer_recorded(env_sandbox, repo, capsys):

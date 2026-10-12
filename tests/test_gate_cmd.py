@@ -111,7 +111,7 @@ def test_gate_job_records_gate_touched_and_ready_reports_it(env_sandbox, repo, c
 
     ready_out = json.loads(capsys.readouterr().out)
     assert rc == 1
-    assert "gate touched: 1 findings — inspect before merging" in ready_out["problems"]
+    assert "gate touched: 1 findings not judged by the reviewer" in ready_out["problems"]
 
 
 def test_gate_cmd_repo_gates_run_before_cli_gates(env_sandbox, repo, capsys):
@@ -163,7 +163,7 @@ def test_weakened_config_in_head_is_ignored_and_flagged(env_sandbox, repo, capsy
 
     ready_out = json.loads(capsys.readouterr().out)
     assert rc == 1
-    assert "gate touched: 1 findings — inspect before merging" in ready_out["problems"]
+    assert "gate touched: 1 findings not judged by the reviewer" in ready_out["problems"]
 
 
 def test_gate_job_falls_back_to_worktree_config_when_base_has_none(env_sandbox, repo, capsys):

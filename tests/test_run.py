@@ -252,6 +252,39 @@ def test_review_brief_includes_preamble(env_sandbox, repo):
     assert (job_dir(result) / "brief.md").read_text() == sent
 
 
+def test_review_brief_lists_touched_findings(env_sandbox, repo):
+    import subprocess
+
+    from agenthub.jobs import new_job
+
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    new_job(paths(), "gate", now()).write_json(
+        "result.json",
+        {
+            "kind": "gate",
+            "status": "ok",
+            "workdir": str(repo),
+            "head": head,
+            "gate": [{"cmd": "true", "rc": 0, "sha": head}],
+            "repo_gates": ["true"],
+            "gate_touched": [{"file": "test_a.py", "kind": "assert-removed", "lines": [2]}],
+        },
+    )
+    result = go(repo, ["codex:m1"], role="review", brief="", base="master")
+    sent = (job_dir(result) / "brief.md").read_text()
+    assert "## Gate-touched findings to judge" in sent
+    assert "- test_a.py assert-removed lines [2]" in sent
+    assert "`## Gate-touched` section" in sent
+    assert sent.index("## Gate-touched findings to judge") < sent.index("## Findings")
+
+
+def test_review_brief_without_touched_findings_has_no_section(env_sandbox, repo):
+    result = go(repo, ["codex:m1"], role="review", brief="", base="master")
+    assert "Gate-touched" not in (job_dir(result) / "brief.md").read_text()
+
+
 def test_review_writes_diff_patch(env_sandbox, repo):
     import subprocess
 

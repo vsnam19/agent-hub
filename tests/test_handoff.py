@@ -1,4 +1,4 @@
-from agenthub.handoff import FOOTER, REVIEW_FOOTER, parse, parse_verdict
+from agenthub.handoff import FOOTER, REVIEW_FOOTER, parse, parse_touched_review, parse_verdict
 
 
 def test_parse_full_handoff():
@@ -141,3 +141,19 @@ def test_review_footer_asks_for_findings_and_verdict_in_final_message():
     assert "## Verdict" in REVIEW_FOOTER
     assert "only part of your answer that is kept" in REVIEW_FOOTER
     assert REVIEW_FOOTER.index("## Findings") < REVIEW_FOOTER.index("## Verdict")
+
+
+def test_parse_touched_review():
+    reply = (
+        "## Findings\n(none)\n\n## Gate-touched\n"
+        "- a/test_x.py assert-removed — legitimate — assertion moved into a helper\n"
+        "b.toml gate-config-changed — weakening — drops the lint gate\n"
+        "garbage line\n"
+        "c.py test-deleted — maybe — unsure\n\n"
+        "## Verdict\napprove\n"
+    )
+    assert parse_touched_review(reply) == {
+        ("a/test_x.py", "assert-removed"): "legitimate",
+        ("b.toml", "gate-config-changed"): "weakening",
+    }
+    assert parse_touched_review("## Verdict\napprove\n") == {}

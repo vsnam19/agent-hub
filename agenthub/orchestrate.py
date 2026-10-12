@@ -17,7 +17,7 @@ from agenthub import brief as briefmod
 from agenthub import env, gateguard, guards, handoff, process
 from agenthub.agents import Classified, Outcome, Request, registry
 from agenthub.config import ConfigError, Paths, Pool
-from agenthub.jobs import Job, new_job
+from agenthub.jobs import Job, list_jobs, new_job
 from agenthub.pool import Cooldowns, Link
 from agenthub.procinfo import start_time
 
@@ -272,7 +272,8 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     if kind == "implement":
         text += "\n" + handoff.FOOTER
     else:
-        text += "\n\n" + handoff.REVIEW_FOOTER
+        judge = _touched_section(touched_findings(list_jobs(p, 100000), workdir, guards.head(repo))) if repo else ""
+        text += "\n\n" + judge + handoff.REVIEW_FOOTER
     (job.dir / "brief.md").write_text(text)
     pid = os.getpid()
     (job.dir / "pid").write_text(json.dumps({"pid": pid, "start_time": start_time(pid)}))
@@ -402,7 +403,9 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         record["handoff_missing"] = False
         reply_path = record.get("reply_path")
         if status == "ok" and reply_path and Path(reply_path).is_file():
-            record["verdict"] = handoff.parse_verdict(Path(reply_path).read_text())
+            reply_text = Path(reply_path).read_text()
+            record["verdict"] = handoff.parse_verdict(reply_text)
+            record["touched_review"] = handoff.parse_touched_entries(reply_text)
 
     record["gate"] = []
     if status == "ok" and kind == "implement" and gates:
@@ -431,9 +434,9 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     return _finish(job, record, status or "exhausted", now, started)
 
 
-def readiness(jobs: list[dict], workdir: Path, head: str, accept_touched: bool = False) -> list[str]:
+def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
     """What still blocks a merge of `workdir` at `head`; empty when ready. `jobs` are result records, newest first.
-    `accept_touched` lifts the block on gate_touched findings once the director has read them."""
+    Gate-touched findings are never waved through: an approving non-implementer review of `head` must judge each."""
     mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == workdir.resolve()]
 
     def who(j: dict) -> str:
@@ -445,25 +448,60 @@ def readiness(jobs: list[dict], workdir: Path, head: str, accept_touched: bool =
     problems = []
     if not gated:
         problems.append(f"no passing gate on {head}")
-    elif not accept_touched:
-        touched = touched_findings(jobs, workdir, head)
-        if touched:
-            problems.append(f"gate touched: {len(touched)} findings — inspect before merging")
     if not implementers:
         problems.append("no implementer recorded: cannot check reviewer independence")
+    judges: list[dict] = []
     if not reviews:
         problems.append("no review")
-        return problems
-    on_head = [r for r in reviews if r.get("head") == head]
-    if not on_head:
-        problems.append(f"review is stale (reviewed {reviews[0].get('head')})")
-        return problems
-    approved = [r for r in on_head if r["verdict"] == "approve"]
-    if not approved:
-        problems.append(f"review verdict {on_head[0]['verdict']}")
-    elif all(who(r) in implementers for r in approved):
-        problems.append("reviewer is the implementer")
+    else:
+        on_head = [r for r in reviews if r.get("head") == head]
+        if not on_head:
+            problems.append(f"review is stale (reviewed {reviews[0].get('head')})")
+        else:
+            approved = [r for r in on_head if r["verdict"] == "approve"]
+            if not approved:
+                problems.append(f"review verdict {on_head[0]['verdict']}")
+            elif all(who(r) in implementers for r in approved):
+                problems.append("reviewer is the implementer")
+            judges = [r for r in approved if who(r) not in implementers]
+    if gated:
+        problems.extend(_touched_problems(touched_findings(jobs, workdir, head), judges))
     return problems
+
+
+def _touched_problems(findings: list[dict], judges: list[dict]) -> list[str]:
+    """Problems with `findings` given the approving independent reviews `judges`: weakening or unjudged ones."""
+    judged: dict[tuple[str, str], str] = {}
+    for r in judges:
+        for e in r.get("touched_review") or []:
+            key = (e.get("file"), e.get("kind"))
+            if e.get("judgement") == "weakening" or key not in judged:
+                judged[key] = e.get("judgement")
+    problems = []
+    unjudged = 0
+    for f in findings:
+        verdict = judged.get((f["file"], f["kind"]))
+        if verdict == "weakening":
+            problems.append(f"reviewer judged {f['file']} {f['kind']} as weakening")
+        elif verdict != "legitimate":
+            unjudged += 1
+    if unjudged:
+        problems.insert(0, f"gate touched: {unjudged} findings not judged by the reviewer")
+    return problems
+
+
+def _touched_section(findings: list[dict]) -> str:
+    """The review-brief section asking the reviewer to judge each gate-touched finding; empty when there are none."""
+    if not findings:
+        return ""
+    lines = "\n".join(f"- {f['file']} {f['kind']} lines {f['lines']}" for f in findings)
+    return (
+        "## Gate-touched findings to judge\n\n"
+        "The gate guard flagged these changes to the checks themselves. Read each hunk and judge it independently.\n\n"
+        f"{lines}\n\n"
+        "In your final message add a `## Gate-touched` section with one line per finding:\n"
+        "`<file> <kind> — legitimate|weakening — <reason>`\n\n"
+    )
 
 
 def touched_findings(jobs: list[dict], workdir: Path, head: str) -> list[dict]:
