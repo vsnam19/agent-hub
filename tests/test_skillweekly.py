@@ -55,6 +55,7 @@ class Fake:
         self.evals = list(opts.get("evals", [eval_json(1.0, 0.0)]))
         self.draft = opts.get("draft", True)
         self.director = opts.get("director", False)
+        self.director_fix = opts.get("director_fix", False)
         self.plugin_rc = opts.get("plugin_rc", 0)
         self.ready_rc = opts.get("ready_rc", 0)
         self.gate_rc = opts.get("gate_rc", 0)
@@ -99,7 +100,7 @@ class Fake:
             case = workdir / "plugins/learned-worker/evals/foo-pos/prompt.md"
             case.parent.mkdir(parents=True, exist_ok=True)
             case.write_text("prompt\n")
-        if self.director:
+        if self.director or (self.director_fix and self.drafts > 1):
             skill = workdir / "plugins/learned-director/skills/bar/SKILL.md"
             skill.parent.mkdir(parents=True, exist_ok=True)
             skill.write_text("---\nname: bar\n---\ndirector draft\n")
@@ -191,6 +192,20 @@ def test_version_bumped_in_all_three_manifests(tmp_path):
         untouched = git(env.repo, "show", f"{BRANCH}:plugins/learned-director/{manifest}")
         assert json.loads(untouched)["version"] == "0.1.0"
     assert git(env.repo, "log", "-1", "--format=%s", BRANCH) == f"learned: {DATE} — foo"
+
+
+def test_fix_round_bumps_newly_touched_plugin(tmp_path):
+    env = Env(tmp_path, verdicts=["request-changes", "approve"], director_fix=True)
+    report = env.run()
+    assert report.exit_code == 0, report.stop_reason
+    assert report.released == ["learned-worker 0.1.1", "learned-director 0.1.1"]
+    for plugin in PLUGINS:
+        for manifest in MANIFESTS:
+            text = git(env.repo, "show", f"master:plugins/{plugin}/{manifest}")
+            assert json.loads(text)["version"] == "0.1.1"
+    update = ["claude", "plugin", "update", "learned-director@agent-plugins"]
+    assert update in env.fake.calls
+    assert "claude plugin update learned-director" in (env.out / "report.md").read_text()
 
 
 def test_eval_below_baseline_stops_and_keeps_branch(tmp_path):

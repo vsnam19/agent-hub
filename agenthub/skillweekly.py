@@ -179,6 +179,7 @@ class _Run:
         self.branch = f"learned/{self.date}"
         self.wt = self.repo / ".worktrees" / f"learned-{self.date}"
         self.spent = 0.0
+        self.bumped: set[str] = set()
 
     # -- helpers -----------------------------------------------------------------------------------------------
 
@@ -361,14 +362,22 @@ class _Run:
         skills = self.skills_of(changed)
         if not skills:
             raise Stop("the draft changed no skill (only eval cases or other files)")
-        for plugin in sorted({p for p in map(_plugin_of, changed) if p in PLUGINS}):
-            version = self.bump(plugin)
-            self.report.released.append(f"{plugin} {version}")
+        self.bump_touched(changed)
         names = ", ".join(s for _, s in skills)
         self.commit(f"learned: {self.date} — {names}")
         self.report.drafted = [f"{plugin}/{skill}" for plugin, skill in skills]
         self.step("version", "; ".join(self.report.released))
         return skills
+
+    def bump_touched(self, changed: list[str]) -> list[str]:
+        """Bump each changed plugin not yet bumped in this run; return the new release entries."""
+        new = []
+        for plugin in sorted({p for p in map(_plugin_of, changed) if p in PLUGINS} - self.bumped):
+            version = self.bump(plugin)
+            self.bumped.add(plugin)
+            self.report.released.append(f"{plugin} {version}")
+            new.append(f"{plugin} {version}")
+        return new
 
     def bump(self, plugin: str) -> str:
         texts = {}
@@ -464,6 +473,9 @@ class _Run:
         changed = self.changed("HEAD")
         if not changed:
             raise Stop(f"fix round {round_no} changed nothing")
+        released = self.bump_touched(self.changed("master"))
+        if released:
+            self.step("version", "; ".join(released))
         self.commit(f"learned: {self.date} — review round {round_no} fixes")
         skills = self.skills_of(changed)
         self.evaluate(skills)
