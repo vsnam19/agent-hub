@@ -20,6 +20,7 @@ from agenthub.config import ConfigError, Paths, Pool
 from agenthub.jobs import Job, list_jobs, new_job
 from agenthub.pool import Cooldowns, Link
 from agenthub.procinfo import start_time
+from agenthub.workers import worker_plugins
 
 EXIT = {
     "ok": 0,
@@ -79,6 +80,15 @@ def base_repo_gates(repo: guards.Repo, since: str) -> tuple[list[str], str]:
         if gates:
             return gates, since
     return repo_gates(repo.root), "worktree"
+
+
+def base_repo_config(repo: guards.Repo, base: str) -> str:
+    """Repo config text as committed at `base`, so a review's branch cannot choose its own worker plugins.
+    Empty (no override) when the base has no config file."""
+    try:
+        return guards._run_git(repo.root, "show", f"{base}:{REPO_CONFIG.as_posix()}")
+    except subprocess.CalledProcessError:
+        return ""
 
 
 def _parse_gates(text: str, where: object) -> list[str]:
@@ -258,6 +268,12 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     gates = args.gates
     if kind == "implement" and repo is not None:
         gates = merge_gates(repo_gates(repo.root), args.gates)
+    repo_config = None
+    if kind == "review":
+        repo_config = base_repo_config(repo, base) if repo is not None and base is not None else ""
+    plugin_dirs = ()
+    if refusal is None:
+        plugin_dirs = worker_plugins(p.config_dir, repo.root if repo else workdir, repo_config)
 
     if kind == "review" and base is None:
         base = args.base or (repo.default_branch if repo else "HEAD")
@@ -356,6 +372,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
                 brief_path=job.dir / "brief.md",
                 attempt_dir=attempt_dir,
                 git_common_dir=repo.common_dir,
+                plugin_dirs=plugin_dirs,
             )
             cl = adapter.preflight(req)
             if cl is not None:

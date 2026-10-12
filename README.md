@@ -119,6 +119,23 @@ Each line is `N. <rule> — enforced by: <mechanism>` (`gate`, `gate-guard`, `sc
 The suffix is stripped from the text sent. `agent-hub orders [-d WORKDIR] [--json]` lists every numbered rule with
 its mechanism and source file (the user file, then the repo file) and exits 1 if a rule has no `— enforced by:`.
 
+### Worker skills
+
+Per-run worker hosts load the owner's worker skills on every run. `$AGENT_HUB_CONFIG/workers.toml` (default
+`~/.config/agent-hub/workers.toml`) names the plugins and the list used when a repo says nothing:
+
+```toml
+default = ["telaf", "aspice"]          # enabled when the repo says nothing
+[plugins]                              # name -> plugin directory (holds skills/<skill>/SKILL.md)
+telaf = "~/Workspaces/tools/agent-plugins/plugins/telaf"
+aspice = "~/Workspaces/tools/agent-plugins/plugins/aspice"
+```
+
+A repo's `.agent-hub/config.toml` may set `worker_plugins = ["telaf"]`, which replaces `default` for that repo. It can
+only name plugins from `[plugins]`. Without `workers.toml` no worker gets extra plugins. Claude workers get
+`--plugin-dir` per plugin; gwen workers get `skills.paths` and run with `OPENCODE_DISABLE_EXTERNAL_SKILLS=1`, so they
+index only these skills. codex and agy read their globally installed plugins and are not affected.
+
 ## Exit codes
 
 | Exit | Status | Meaning |

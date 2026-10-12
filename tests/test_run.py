@@ -107,6 +107,20 @@ def test_implement_refused_on_default_branch(env_sandbox, repo):
     assert (job_dir(result) / "brief.md").read_text().startswith(BRIEF)
 
 
+def test_refused_run_is_refused_despite_broken_workers_toml(env_sandbox, repo, tmp_path):
+    import subprocess
+
+    missing = tmp_path / "no-such-plugin"
+    (env_sandbox.config / "workers.toml").write_text(f'default = ["ghost"]\n[plugins]\nghost = "{missing}"\n')
+    subprocess.run(["git", "checkout", "master"], cwd=repo, check=True, capture_output=True)
+    result = go(repo, ["agy:m1"])
+    assert result["status"] == "refused"
+    assert result["exit_code"] == EXIT["refused"] == 3
+    assert result["error"]
+    assert result["attempts"] == []
+    assert fake_calls(env_sandbox.fakelog, "agy") == []
+
+
 def test_fallback_on_quota_sets_cooldown(env_sandbox, repo, monkeypatch):
     scenario(monkeypatch, "agy", "quota,ok")
     result = go(repo, ["agy:m1", "agy:m2"])
@@ -591,3 +605,32 @@ def test_no_repo_config_no_extra_gates(env_sandbox, repo, monkeypatch):
     result = go(repo, ["agy:m1"], gates=["test -f agent_wrote.txt"])
     assert result["status"] == "ok"
     assert [g["cmd"] for g in result["gate"]] == ["test -f agent_wrote.txt"]
+
+
+def test_run_passes_worker_plugins_to_adapter(env_sandbox, repo, tmp_path):
+    telaf = tmp_path / "telaf"
+    (telaf / "skills").mkdir(parents=True)
+    (env_sandbox.config / "workers.toml").write_text(f'default = ["telaf"]\n[plugins]\ntelaf = "{telaf}"\n')
+    result = go(repo, ["claude:sonnet"])
+    assert result["status"] == "ok"
+    argv = fake_calls(env_sandbox.fakelog, "claude")[0]["argv"]
+    assert argv[argv.index("--plugin-dir") + 1] == str(telaf.resolve())
+
+
+def test_review_ignores_branch_worker_plugins(env_sandbox, repo, tmp_path):
+    import subprocess
+
+    telaf = tmp_path / "telaf"
+    (telaf / "skills").mkdir(parents=True)
+    (env_sandbox.config / "workers.toml").write_text(f'default = ["telaf"]\n[plugins]\ntelaf = "{telaf}"\n')
+    subprocess.run(["git", "checkout", "master"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "checkout", "-b", "feature"], cwd=repo, check=True, capture_output=True)
+    (repo / ".agent-hub").mkdir()
+    (repo / ".agent-hub" / "config.toml").write_text("worker_plugins = []\n")
+    subprocess.run(["git", "add", ".agent-hub"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "opt out of plugins"], cwd=repo, check=True, capture_output=True)
+
+    result = go(repo, ["claude:sonnet"], role="review", brief="", base="master")
+    assert result["status"] == "ok"
+    argv = fake_calls(env_sandbox.fakelog, "claude")[0]["argv"]
+    assert argv[argv.index("--plugin-dir") + 1] == str(telaf.resolve())
