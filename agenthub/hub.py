@@ -60,13 +60,26 @@ def status(config_dir: Path, repo_root: Path | None = None) -> list[Row]:
     for name, directory in cfg.plugins.items():
         rows.append(_codex_row(cfg, name, directory, listed, codex_installed))
         rows.append(_agy_row(name, directory, agy_installed))
-    resolved = worker_plugins(config_dir, repo_root or Path.cwd())
+    try:
+        resolved = worker_plugins(config_dir, repo_root or _repo_root())
+    except ConfigError as exc:
+        rows.append(Row("claude+gwen", "-", "error", detail=str(exc)))
+        resolved = []
     by_dir = {d: n for n, d in cfg.plugins.items()}
     for host in ("claude", "gwen"):
         for directory in resolved:
             rows.append(Row(host, by_dir.get(directory, directory.name), "per-run", detail=str(directory)))
     rows.extend(_strays(cfg))
     return rows
+
+
+def _repo_root() -> Path:
+    try:
+        proc = _run("git", "rev-parse", "--show-toplevel")
+    except OSError:
+        return Path.cwd()
+    top = proc.stdout.strip()
+    return Path(top) if proc.returncode == 0 and top else Path.cwd()
 
 
 def plan_install(rows: list[Row], config: HubConfig, hosts: tuple[str, ...] = HOSTS) -> list[list[str]]:
@@ -77,7 +90,8 @@ def plan_install(rows: list[Row], config: HubConfig, hosts: tuple[str, ...] = HO
         if not config.marketplace_registered:
             cmds.append(["codex", "plugin", "marketplace", "add", str(config.marketplace_dir)])
         for r in codex_rows:
-            cmds.append(["codex", "plugin", "add", f"{r.plugin}@{config.marketplace_name}"])
+            manifest = config.plugins[r.plugin] / ".codex-plugin" / "plugin.json"
+            cmds.append(["codex", "plugin", "add", f"{_manifest_name(manifest) or r.plugin}@{config.marketplace_name}"])
     if "agy" in hosts:
         for r in (r for r in todo if r.host == "agy"):
             directory = str(config.plugins[r.plugin])
@@ -140,6 +154,18 @@ def _version(manifest: Path) -> str | None:
     return v if isinstance(v, str) else None
 
 
+def _manifest_name(manifest: Path) -> str | None:
+    try:
+        n = json.loads(manifest.read_text()).get("name")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return n if isinstance(n, str) and n else None
+
+
+def _name_detail(key: str, name: str) -> str:
+    return "" if key == name else f"manifest name {name}"
+
+
 def _run(*argv: str) -> subprocess.CompletedProcess:
     return subprocess.run(argv, capture_output=True, text=True)
 
@@ -161,8 +187,8 @@ def _marketplace_names(directory: Path | None) -> tuple[str | None, set[str]]:
 def _registered(directory: Path) -> bool:
     proc = _run("codex", "plugin", "marketplace", "list")
     for line in proc.stdout.splitlines()[1:]:
-        parts = line.split()
-        if len(parts) >= 2 and Path(parts[-1]).expanduser().resolve() == directory:
+        parts = line.split(None, 1)
+        if len(parts) == 2 and Path(parts[1].strip()).expanduser().resolve() == directory:
             return True
     return False
 
@@ -192,15 +218,17 @@ def _codex_row(cfg: HubConfig, name: str, directory: Path, listed: set[str], ins
         return Row("codex", name, "not-a-worker-plugin", detail=f"no {manifest.relative_to(directory)}")
     if cfg.marketplace_dir is None or cfg.marketplace_name is None:
         return Row("codex", name, "not-a-worker-plugin", detail="no usable [hub] codex_marketplace")
-    if name not in listed:
+    host_name = _manifest_name(manifest) or name
+    detail = _name_detail(name, host_name)
+    if host_name not in listed:
         return Row("codex", name, "not-a-worker-plugin", detail="not listed in the codex marketplace file")
     source = _version(manifest)
-    if name not in installed:
-        return Row("codex", name, "missing", source_version=source)
-    version = installed[name]
-    snapshot = _codex_home() / "plugins" / "cache" / cfg.marketplace_name / name / version / "skills"
+    if host_name not in installed:
+        return Row("codex", name, "missing", source_version=source, detail=detail)
+    version = installed[host_name]
+    snapshot = _codex_home() / "plugins" / "cache" / cfg.marketplace_name / host_name / version / "skills"
     same = version == source and skills_hash(snapshot) == skills_hash(directory / "skills")
-    return Row("codex", name, "current" if same else "stale", version, source)
+    return Row("codex", name, "current" if same else "stale", version, source, detail)
 
 
 def _agy_row(name: str, directory: Path, installed: set[str]) -> Row:
@@ -209,21 +237,33 @@ def _agy_row(name: str, directory: Path, installed: set[str]) -> Row:
     manifest = directory / "plugin.json"
     if not manifest.is_file():
         return Row("agy", name, "not-a-worker-plugin", detail="no plugin.json")
+    host_name = _manifest_name(manifest) or name
+    detail = _name_detail(name, host_name)
     source = _version(manifest)
-    if name not in installed:
-        return Row("agy", name, "missing", source_version=source)
-    snapshot = Path(os.environ.get("HOME", "~")).expanduser() / ".gemini" / "config" / "plugins" / name
+    if host_name not in installed:
+        return Row("agy", name, "missing", source_version=source, detail=detail)
+    snapshot = Path(os.environ.get("HOME", "~")).expanduser() / ".gemini" / "config" / "plugins" / host_name
     version = _version(snapshot / "plugin.json")
     same = version == source and skills_hash(snapshot / "skills") == skills_hash(directory / "skills")
-    return Row("agy", name, "current" if same else "stale", version, source)
+    return Row("agy", name, "current" if same else "stale", version, source, detail)
 
 
 def _strays(cfg: HubConfig) -> list[Row]:
     skills = _codex_home() / "skills"
     if not skills.is_dir():
         return []
+    exact: set[str] = set()
+    prefixes: list[str] = []
+    for key, directory in cfg.plugins.items():
+        name = _manifest_name(directory / ".codex-plugin" / "plugin.json") or _manifest_name(directory / "plugin.json")
+        name = name or key
+        exact.add(name)
+        prefixes.append(f"{name}-")
+        plugin_skills = directory / "skills"
+        if plugin_skills.is_dir():
+            exact.update(s.name for s in plugin_skills.iterdir() if s.is_dir())
     return [
         Row("codex", d.name, "stray", detail=str(d))
         for d in sorted(skills.iterdir())
-        if d.is_dir() and d.name != ".system" and any(d.name.startswith(n) for n in cfg.plugins)
+        if d.is_dir() and d.name != ".system" and (d.name in exact or d.name.startswith(tuple(prefixes)))
     ]

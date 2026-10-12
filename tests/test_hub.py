@@ -237,3 +237,51 @@ def test_cli_hub_status_json(env, capsys):
         ("agy", "telaf", "missing"),
     }
     assert env.mutating_calls() == []
+
+
+def test_status_survives_broken_repo_worker_plugins(env, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".agent-hub").mkdir()
+    (repo / ".agent-hub" / "config.toml").write_text('worker_plugins = ["nope"]')
+    (env.codex_home / "skills" / "telaf-api").mkdir(parents=True)
+    rows = hub.status(env.config, repo)
+    assert _state(rows, "codex") == "missing"
+    assert _state(rows, "agy") == "missing"
+    assert _state(rows, "codex", "telaf-api") == "stray"
+    err = next(r for r in rows if r.host == "claude+gwen")
+    assert (err.plugin, err.state) == ("-", "error")
+    assert err.detail
+
+
+def test_status_matches_by_manifest_name(env):
+    (env.config / "workers.toml").write_text((env.config / "workers.toml").read_text().replace("telaf =", "key ="))
+    (env.src / ".codex-plugin" / "plugin.json").write_text(json.dumps({"name": "telaf", "version": "1.0.0"}))
+    env.install_codex_snapshot()
+    env.install_agy_snapshot()
+    rows = hub.status(env.config)
+    codex = next(r for r in rows if r.host == "codex" and r.plugin == "key")
+    agy = next(r for r in rows if r.host == "agy" and r.plugin == "key")
+    assert (codex.state, agy.state) == ("current", "current")
+    assert codex.detail == agy.detail == "manifest name telaf"
+    cmds = hub.plan_install(rows, hub.load_config(env.config))
+    assert cmds == []
+    missing = [r for r in rows if r.state == "current"]
+    stale = [hub.Row(r.host, r.plugin, "stale") for r in missing]
+    planned = hub.plan_install(stale, hub.load_config(env.config))
+    assert ["codex", "plugin", "add", "telaf@agent-plugins"] in planned
+
+
+def test_strays_match_name_dash_prefix_and_skill_names_only(env):
+    for name in ("telaf", "telaf-api", "a", "telafx", "other", ".system"):
+        (env.codex_home / "skills" / name).mkdir(parents=True)
+    rows = [r for r in hub.status(env.config) if r.state == "stray"]
+    assert sorted(r.plugin for r in rows) == ["a", "telaf", "telaf-api"]
+
+
+def test_registered_root_with_spaces(env, tmp_path):
+    spaced = tmp_path / "my market"
+    spaced.mkdir()
+    (env.state / "codex_marketplaces.txt").write_text(f"agent-plugins  {spaced}\n")
+    assert hub._registered(spaced.resolve()) is True
+    assert hub._registered(tmp_path / "market") is False
