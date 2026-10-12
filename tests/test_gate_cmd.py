@@ -1,6 +1,11 @@
 import json
+import os
+import signal
 import subprocess
 
+import pytest
+
+from agenthub import process
 from agenthub.cli import main
 from agenthub.config import paths
 from agenthub.jobs import list_jobs
@@ -218,3 +223,36 @@ def test_gate_refuses_only_when_no_gates_anywhere(env_sandbox, repo, capsys):
     assert rc == 0
     assert out["repo_gates_source"] == "worktree"
     assert [g["cmd"] for g in out["gate"]] == ["test -f feature.txt"]
+
+
+def test_gate_job_sigterm_marks_cancelled(env_sandbox, repo, capsys, monkeypatch):
+    set_repo_gates(repo, ["true"])
+
+    def sigterm_during_gate(inv, cwd, env, attempt_dir, timeout, on_start):
+        (attempt_dir / "stdout").write_text("")
+        (attempt_dir / "stderr").write_text("")
+        os.kill(os.getpid(), signal.SIGTERM)
+        return process.Ran(rc=-15, timed_out=False, duration_s=0.0, pgid=0)
+
+    monkeypatch.setattr(process, "run", sigterm_during_gate)
+
+    rc = main(["gate", "-d", str(repo), "--json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 130
+    assert out["status"] == "cancelled"
+    assert [j["status"] for j in list_jobs(paths(), 100) if j["kind"] == "gate"] == ["cancelled"]
+
+
+def test_gate_job_exception_marks_failed(env_sandbox, repo, monkeypatch):
+    set_repo_gates(repo, ["true"])
+
+    def crash(*args, **kwargs):
+        raise OSError("boom")
+
+    monkeypatch.setattr(process, "run", crash)
+
+    with pytest.raises(OSError, match="boom"):
+        main(["gate", "-d", str(repo)])
+
+    assert [j["status"] for j in list_jobs(paths(), 100) if j["kind"] == "gate"] == ["failed"]

@@ -18,6 +18,14 @@ class Change:
     content: str
 
 
+@dataclass
+class TestDef:
+    start: int
+    end: int
+    asserts: list[str]  # ast.dump of each assertion's expression (the whole node for a call such as pytest.raises)
+    seen: set[str]  # ast.dump of every node inside the test's assertions
+
+
 def _parse_diff(diff_text: str) -> list[Change]:
     changes = []
     current_file = None
@@ -97,6 +105,58 @@ def _is_assertion(node: ast.AST) -> bool:
     return False
 
 
+def _test_index(source: str) -> dict[str, TestDef] | None:
+    """Each test in `source` by identity: `test_name` at module level, `Class.test_name` in a class body.
+    None when the source does not parse."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    index = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+            index[node.name] = node
+        elif isinstance(node, ast.ClassDef):
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name.startswith("test_"):
+                    index[f"{node.name}.{item.name}"] = item
+    tests = {}
+    for ident, fn in index.items():
+        found = [n for n in ast.walk(fn) if _is_assertion(n)]
+        keys = [ast.dump(n.test if isinstance(n, ast.Assert) else n) for n in found]
+        seen = {ast.dump(sub) for n in found for sub in ast.walk(n)}
+        tests[ident] = TestDef(fn.lineno, fn.end_lineno, keys, seen)
+    return tests
+
+
+def _weakened(base: TestDef, new: TestDef) -> bool:
+    """Fewer assertions, or a base assertion that the new test neither keeps nor strengthens (one that contains it)."""
+    return len(new.asserts) < len(base.asserts) or any(k not in new.seen for k in base.asserts)
+
+
+def _compare_tests(path: str, base: dict[str, TestDef], new: dict[str, TestDef], removed: list[Change]) -> list[dict]:
+    """assert-removed and test-deleted for a Python test file, judged per test identity: a test that is weakened, or
+    whose identity disappears, is flagged. A removed assert outside every base test is flagged as before."""
+
+    def owner(line: int) -> str | None:
+        return next((ident for ident, t in base.items() if t.start <= line <= t.end), None)
+
+    weakened = {ident for ident, t in base.items() if ident in new and _weakened(t, new[ident])}
+    findings = []
+    owned = set()
+    for c in removed:
+        ident = owner(c.line_num)
+        owned.add(ident)
+        if (ident is None and "assert" in c.content) or ident in weakened:
+            findings.append({"file": path, "kind": "assert-removed", "line": c.line_num})
+    for ident in weakened - owned:
+        findings.append({"file": path, "kind": "assert-removed", "line": base[ident].start})
+    for ident, t in base.items():
+        if ident not in new:
+            findings.append({"file": path, "kind": "test-deleted", "line": t.start})
+    return findings
+
+
 def _assertion_free_test_lines(source: str, added_lines: set[int]) -> list[int]:
     try:
         tree = ast.parse(source)
@@ -130,6 +190,27 @@ def _get_sections(content: str) -> dict[int, str]:
     return mapping
 
 
+def _git_show(repo: guards.Repo, since: str, path: str) -> str | None:
+    res = subprocess.run(
+        guards._git_argv("show", f"{since}:{path}"),
+        cwd=repo.root,
+        capture_output=True,
+        text=True,
+        env=guards._git_env(),
+    )
+    return res.stdout if res.returncode == 0 else None
+
+
+def _read_or_empty(path: Path) -> str | None:
+    """The file's text; empty when it is gone (a deleted test file), None when it cannot be read as text."""
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text()
+    except UnicodeDecodeError:
+        return None
+
+
 def inspect_diff(repo: guards.Repo, since: str) -> list[dict]:
     # 1. Tracked changes
     diff_res = subprocess.run(
@@ -161,6 +242,13 @@ def inspect_diff(repo: guards.Repo, since: str) -> list[dict]:
 
     findings = []
 
+    # Python test files that parse on both sides are judged by test identity below; the others keep the line rules.
+    compared: dict[str, tuple[dict[str, TestDef], dict[str, TestDef]]] = {}
+    for path in {c.path for c in changes if c.path.endswith(".py") and _is_test_file(c.path)}:
+        base = _test_index(_git_show(repo, since, path) or "")
+        new = _test_index(_read_or_empty(repo.root / path))
+        if base is not None and new is not None:
+            compared[path] = (base, new)
     # Test names added per file: a removed test whose name is re-added (e.g. a signature change) was not deleted.
     # Known limit: this is per file, so a test moved to another file is still reported as deleted.
     added_test_names: dict[str, set[str]] = {}
@@ -173,12 +261,12 @@ def inspect_diff(repo: guards.Repo, since: str) -> list[dict]:
     # Process changes
     for c in changes:
         if _is_test_file(c.path):
-            if c.kind == "removed" and "assert" in c.content:
+            if c.path not in compared and c.kind == "removed" and "assert" in c.content:
                 findings.append({"file": c.path, "kind": "assert-removed", "line": c.line_num})
             if c.kind == "added" and re.search(r"\b(?:skip|xfail)\b|--ignore|--deselect", c.content):
                 findings.append({"file": c.path, "kind": "skip-added", "line": c.line_num})
             name = _test_def(c.content) if c.kind == "removed" else None
-            if name and name not in added_test_names.get(c.path, set()):
+            if c.path not in compared and name and name not in added_test_names.get(c.path, set()):
                 findings.append({"file": c.path, "kind": "test-deleted", "line": c.line_num})
 
         if _is_gate_config(c.path):
@@ -186,6 +274,10 @@ def inspect_diff(repo: guards.Repo, since: str) -> list[dict]:
                 pass  # Handled separately below
             else:
                 findings.append({"file": c.path, "kind": "gate-config-changed", "line": c.line_num})
+
+    for path, (base, new) in compared.items():
+        removed = [c for c in changes if c.path == path and c.kind == "removed"]
+        findings.extend(_compare_tests(path, base, new, removed))
 
     # New test functions (def line added in this diff) whose body asserts nothing
     added_by_file: dict[str, set[int]] = {}

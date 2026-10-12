@@ -220,3 +220,14 @@ def test_ready_gate_job_without_repo_gates_is_not_a_gate(env_sandbox, repo, caps
         f"no passing gate on {head}",
         "no implementer recorded: cannot check reviewer independence",
     ]
+
+
+def test_touched_uses_newest_gate(env_sandbox, repo, capsys):
+    head = git_head(repo)
+    add_job(repo, "gate", head, n=1, touched=[{"file": "test_a.py", "kind": "assert-removed", "lines": [2]}])
+    add_job(repo, "gate", head, n=2)
+    add_job(repo, "implement", head, model="m1", n=3)
+    add_job(repo, "review", head, model="m2", verdict="approve", n=4)
+    rc, out = ready(repo, capsys)
+    assert rc == 0
+    assert out["problems"] == []

@@ -539,11 +539,21 @@ def _print_trail(trail_file: Path) -> int:
     return 0
 
 
-def _claim_runner(state) -> None:
-    """Record this process as the plan's runner with its start time, so `plan cancel` can verify it."""
+def _claim_runner(state, plan_dir: Path) -> None:
+    """Record this process as the plan's runner with its start time, so `plan cancel` can verify it.
+    The pid also goes to `runner.pid`, which still names the runner when state.json cannot be read."""
     pid = os.getpid()
     state.runner = {"pid": pid, "start_time": start_time(pid)}
     state.save()
+    (plan_dir / "runner.pid").write_text(json.dumps(state.runner))
+
+
+def _stop_runner(pid: int | None, recorded: int | None) -> None:
+    """SIGTERM the plan's runner when its start time verifies; say so either way."""
+    if _terminate_verified(pid, recorded):
+        print(_safe(f"sent SIGTERM to runner {pid}"))
+    else:
+        print(_safe("runner not verified; nothing signalled"))
 
 
 def _cmd_plan_cancel(args, plan_file: Path) -> int:
@@ -571,13 +581,18 @@ def _cmd_plan_cancel(args, plan_file: Path) -> int:
 
     if not state_file.is_file():
         raise UsageError("state.json not found")
-    state_data = json.loads(state_file.read_text())
+    try:
+        state_data = json.loads(state_file.read_text())
+        if not isinstance(state_data, dict):
+            raise ValueError("state is not an object")
+    except (OSError, ValueError):
+        # Running jobs cannot be found without the state, so only the runner is stopped.
+        _stop_runner(*_read_pid_file(plan_file.parent / "runner.pid"))
+        print(_safe(f"plan state unreadable: {state_file}", sys.stderr), file=sys.stderr)
+        return 2
 
     runner = state_data.get("runner") or {}
-    if _terminate_verified(runner.get("pid"), runner.get("start_time")):
-        print(_safe(f"sent SIGTERM to runner {runner['pid']}"))
-    else:
-        print(_safe("runner not verified; nothing signalled"))
+    _stop_runner(runner.get("pid"), runner.get("start_time"))
 
     # The runner cancels its own children on SIGTERM; cancel the jobs still running in the plan's work trees.
     tasks = state_data.get("tasks", {})
@@ -604,7 +619,7 @@ def _cmd_plan(args) -> int:
         from agenthub.planstate import load_or_init
 
         state = load_or_init(plan)
-        _claim_runner(state)
+        _claim_runner(state, plan_dir)
 
         def spawn(argv: list[str], log: Path) -> subprocess.Popen:
             f = open(log, "wb")

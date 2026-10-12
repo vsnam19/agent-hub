@@ -101,19 +101,30 @@ def merge_gates(repo: list[str], cli: list[str]) -> list[str]:
     return merged
 
 
-def run_gates(gates: list[str], workdir: Path, gate_dir: Path, sha: str) -> tuple[list[dict], bool]:
-    """Run gate commands in order in `workdir`, logs under `gate_dir`, stopping at the first failure.
-    Returns the gate records, each stamped with `sha`, and whether every gate passed."""
+def run_gates(
+    gates: list[str], workdir: Path, gate_dir: Path, sha: str, cancel: "_Cancel | None" = None
+) -> tuple[list[dict], bool]:
+    """Run gate commands in order in `workdir`, logs under `gate_dir`, stopping at the first failure or once `cancel`
+    has been signalled. Returns the gate records, each stamped with `sha`, and whether every gate passed."""
     gate_env, _ = env.child_env(os.environ, ())
     gate_dir.mkdir(exist_ok=True)
 
     records: list[dict] = []
     for n, cmd in enumerate(gates, start=1):
+        if cancel is not None and cancel.cancelled:
+            return records, False
         attempt_dir = gate_dir / str(n)
         attempt_dir.mkdir(exist_ok=True)
 
         inv = process.Invocation(argv=["bash", "-c", cmd], stdin_path=None)
-        ran = process.run(inv, workdir, gate_env, attempt_dir, timedelta(seconds=GATE_TIMEOUT_S))
+
+        def on_start(pgid: int) -> None:
+            if cancel is not None:
+                cancel.pgid = pgid
+
+        ran = process.run(inv, workdir, gate_env, attempt_dir, timedelta(seconds=GATE_TIMEOUT_S), on_start=on_start)
+        if cancel is not None:
+            cancel.pgid = None
 
         stdout_text = (attempt_dir / "stdout").read_text(errors="replace")
         stderr_text = (attempt_dir / "stderr").read_text(errors="replace")
@@ -180,8 +191,17 @@ def run_gate_job(
         "diffstat": "",
         "reply_path": None,
     }
-    record["gate"], passed = run_gates(merge_gates(defaults, cli_gates), repo.root, job.dir / "gate", head)
-    record["gate_touched"] = gateguard.inspect_diff(repo, since)
+    with _Cancel() as cancel:
+        try:
+            record["gate"], passed = run_gates(
+                merge_gates(defaults, cli_gates), repo.root, job.dir / "gate", head, cancel
+            )
+            record["gate_touched"] = gateguard.inspect_diff(repo, since)
+        except BaseException:
+            _finish(job, record, "failed", now, started)
+            raise
+    if cancel.cancelled:
+        return _finish(job, record, "cancelled", now, started)
     return _finish(job, record, "ok" if passed else "gate-failed", now, started)
 
 
@@ -505,9 +525,11 @@ def _touched_section(findings: list[dict]) -> str:
 
 
 def touched_findings(jobs: list[dict], workdir: Path, head: str) -> list[dict]:
-    """The gate_touched findings of the first passing gate on `head` for `workdir`; empty when none."""
+    """The gate_touched findings of the newest passing gate on `head` for `workdir`; empty when none.
+    `jobs` are result records, newest first."""
     mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == workdir.resolve()]
-    return next((j["gate_touched"] for j in mine if _passed_gate(j, head) and j.get("gate_touched")), [])
+    newest = next((j for j in mine if _passed_gate(j, head)), None)
+    return list(newest.get("gate_touched") or []) if newest else []
 
 
 def _passed_gate(j: dict, head: str) -> bool:

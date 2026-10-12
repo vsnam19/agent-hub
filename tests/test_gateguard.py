@@ -285,3 +285,53 @@ def test_agent_hub_config_is_gate_config(repo):
     res = gateguard.inspect_diff(guards.inspect(repo), since)
     assert {"file": ".agent-hub/config.toml", "kind": "gate-config-changed", "lines": [1]} in res
     assert {"file": ".agent-hub/standing-orders.md", "kind": "gate-config-changed", "lines": [1]} in res
+
+
+def test_assert_replaced_by_stronger_not_flagged(repo):
+    test_file = repo / "test_g.py"
+    test_file.write_text("def test_a():\n    assert x == 1\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("def test_a():\n    assert x == 1 and y == 2\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == []
+
+
+def test_assert_count_drop_flagged(repo):
+    test_file = repo / "test_h.py"
+    test_file.write_text("def test_a():\n    assert 1\n    assert 2\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("def test_a():\n    assert 1\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == [{"file": "test_h.py", "kind": "assert-removed", "lines": [3]}]
+
+
+def test_same_name_other_class_deleted_flagged(repo):
+    test_file = repo / "test_i.py"
+    test_file.write_text(
+        "class TestA:\n    def test_x(self):\n        assert 1\nclass TestB:\n    def test_x(self):\n        assert 1\n"
+    )
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add tests")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("class TestB:\n    def test_x(self):\n        assert 1\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert res == [{"file": "test_i.py", "kind": "test-deleted", "lines": [2]}]
+
+
+def test_unparsable_test_file_falls_back_to_line_rules(repo):
+    test_file = repo / "test_j.py"
+    test_file.write_text("def test_a():\n    assert 1\n")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "add test")
+    since = guards.head(guards.inspect(repo))
+
+    test_file.write_text("def test_a(:\n    pass\n")
+    res = gateguard.inspect_diff(guards.inspect(repo), since)
+    assert {"file": "test_j.py", "kind": "assert-removed", "lines": [2]} in res
