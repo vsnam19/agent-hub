@@ -198,8 +198,8 @@ def test_status_host_not_installed(env, tmp_path):
     assert _state(rows, "agy") == "host-not-installed"
 
 
-def test_install_dry_run_runs_nothing(env, capsys):
-    assert hub.install(env.config, apply=False) == 0
+def test_install_dry_run_runs_nothing(env, capsys, tmp_path):
+    assert hub.install(env.config, apply=False, repo_root=tmp_path / "repo") == 0
     out = capsys.readouterr().out
     assert "codex plugin add telaf@agent-plugins" in out
     assert "agy plugin install" in out
@@ -207,32 +207,33 @@ def test_install_dry_run_runs_nothing(env, capsys):
 
 
 def test_install_apply_registers_marketplace_once(env, tmp_path):
-    assert hub.install(env.config, apply=True) == 0
+    assert hub.install(env.config, apply=True, repo_root=tmp_path / "repo") == 0
     adds = [c for c in env.calls() if c.startswith("codex plugin marketplace add")]
     assert adds == [f"codex plugin marketplace add {env.market}"]
     assert "codex plugin add telaf@agent-plugins" in env.calls()
-    assert hub.install(env.config, apply=True) == 0
+    assert hub.install(env.config, apply=True, repo_root=tmp_path / "repo") == 0
     assert len([c for c in env.calls() if c.startswith("codex plugin marketplace add")]) == 1
     # fake snapshot is not copied; refresh stays planned
     assert _state(hub.status(env.config, tmp_path / "repo"), "codex") == "stale"
 
 
-def test_install_apply_stops_at_first_failure(env, monkeypatch, capsys):
+def test_install_apply_stops_at_first_failure(env, monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("FAKE_CODEX_FAIL", "1")
-    assert hub.install(env.config, apply=True) == 1
+    assert hub.install(env.config, apply=True, repo_root=tmp_path / "repo") == 1
     out = capsys.readouterr().out
     assert "exit 3" in out and "last line" in out
     assert not any(c.startswith("agy plugin") and " list" not in c for c in env.calls())
 
 
-def test_install_validates_before_agy_install(env):
-    assert hub.install(env.config, apply=True, hosts=("agy",)) == 0
+def test_install_validates_before_agy_install(env, tmp_path):
+    assert hub.install(env.config, apply=True, hosts=("agy",), repo_root=tmp_path / "repo") == 0
     agy = [c for c in env.calls() if c.startswith("agy plugin") and "list" not in c]
     assert [c.split()[2] for c in agy] == ["validate", "install"]
     assert not any(c.startswith("codex plugin add") for c in env.calls())
 
 
-def test_cli_hub_status_json(env, capsys):
+def test_cli_hub_status_json(env, capsys, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
     assert main(["hub", "status", "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert {(r["host"], r["plugin"], r["state"]) for r in data} >= {
@@ -311,13 +312,15 @@ def test_dry_run_quotes_paths_with_spaces(env, tmp_path, capsys):
     (env.config / "workers.toml").write_text(
         f'default = []\n[plugins]\ntelaf = "{spaced / "plugins" / "telaf"}"\n[hub]\ncodex_marketplace = "{spaced}"\n'
     )
-    assert hub.install(env.config, apply=False) == 0
+    assert hub.install(env.config, apply=False, repo_root=tmp_path / "repo") == 0
     out = capsys.readouterr().out
     assert f"$ codex plugin marketplace add '{spaced.resolve()}'" in out
     assert f"$ agy plugin install '{(spaced / 'plugins' / 'telaf').resolve()}'" in out
 
 
-def test_install_output_is_sanitised(env, monkeypatch, capsys):
+def test_install_output_is_sanitised(env, monkeypatch, capsys, tmp_path):
+    monkeypatch.chdir(tmp_path)
+
     class Tty:
         def __init__(self, inner):
             self.inner = inner
@@ -340,7 +343,7 @@ def test_install_output_is_sanitised(env, monkeypatch, capsys):
     assert "\x1b" not in out and "\x07" not in out
 
 
-def test_install_apply_missing_tool_returns_1(env, monkeypatch, capsys):
+def test_install_apply_missing_tool_returns_1(env, monkeypatch, capsys, tmp_path):
     real_run = hub.subprocess.run
 
     def boom(cmd, **kwargs):
@@ -349,7 +352,7 @@ def test_install_apply_missing_tool_returns_1(env, monkeypatch, capsys):
         raise FileNotFoundError(2, "No such file or directory", cmd[0])
 
     monkeypatch.setattr(hub.subprocess, "run", boom)
-    assert hub.install(env.config, apply=True) == 1
+    assert hub.install(env.config, apply=True, repo_root=tmp_path / "repo") == 1
     out = capsys.readouterr().out
     assert out.count("failed: codex plugin marketplace add") == 1
     assert "No such file or directory" in out
@@ -363,7 +366,7 @@ def test_marketplace_registered_from_other_root_is_not_readded(env, tmp_path, ca
     rows = hub.status(env.config, tmp_path / "repo")
     codex = next(r for r in rows if r.host == "codex" and r.plugin == "telaf")
     assert "marketplace agent-plugins is registered from another root" in codex.detail
-    assert hub.install(env.config, apply=False) == 0
+    assert hub.install(env.config, apply=False, repo_root=tmp_path / "repo") == 0
     out = capsys.readouterr().out
     assert "marketplace add" not in out
     assert "codex plugin add telaf@agent-plugins" in out
@@ -408,7 +411,64 @@ def test_install_failure_shows_stdout_when_stderr_empty(env, tmp_path, monkeypat
         ).replace('print(os.environ.get("FAKE_CODEX_STDERR", "boom\\nlast line"), file=sys.stderr)', "pass"),
     )
     monkeypatch.setenv("FAKE_CODEX_FAIL", "1")
-    assert hub.install(env.config, apply=True) == 1
+    assert hub.install(env.config, apply=True, repo_root=tmp_path / "repo") == 1
     out = capsys.readouterr().out
     assert "exit 3" in out
     assert "stdout reason" in out
+
+
+def test_status_unparseable_list_is_error(env, tmp_path):
+    env.install_fake("codex", FAKE_CODEX.replace('{"installed": ', '{"unexpected": '))
+    env.install_fake("agy", FAKE_AGY.replace('{"imports": ', '{"other": '))
+    rows = hub.status(env.config, tmp_path / "repo")
+    errors = {r.host: r for r in rows if r.state == "error"}
+    assert errors["codex"].detail == "codex list output not understood"
+    assert errors["agy"].detail == "agy list output not understood"
+
+
+def test_marketplace_list_failure_plans_nothing_for_codex(env, tmp_path, capsys):
+    env.install_fake(
+        "codex",
+        FAKE_CODEX.replace(
+            'if args[:3] == ["plugin", "marketplace", "list"]:',
+            'if args[:3] == ["plugin", "marketplace", "list"]:\n    sys.exit(5)\nelif False:',
+        ),
+    )
+    rows = hub.status(env.config, tmp_path / "repo")
+    details = [r.detail for r in rows if r.state == "error" and r.host == "codex"]
+    assert any(d.startswith("marketplace list failed: ") for d in details)
+    cfg = hub.load_config(env.config)
+    cmds = hub.plan_install(rows, cfg)
+    assert not any(c[0] == "codex" for c in cmds)
+    assert hub.install(env.config, apply=False, repo_root=tmp_path / "repo") == 0
+    assert "marketplace add" not in capsys.readouterr().out
+
+
+def test_install_apply_timeout_returns_1(env, tmp_path, monkeypatch, capsys):
+    real_run = hub.subprocess.run
+    seen = []
+
+    def run(cmd, **kwargs):
+        if "list" in cmd:
+            return real_run(cmd, **kwargs)
+        seen.append(kwargs.get("timeout"))
+        raise hub.subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+    monkeypatch.setattr(hub.subprocess, "run", run)
+    assert hub.install(env.config, apply=True, repo_root=tmp_path / "repo") == 1
+    assert seen == [600]
+    assert "failed (timeout): codex plugin marketplace add" in capsys.readouterr().out
+
+
+def test_status_without_version_uses_hash(env, tmp_path):
+    env.install_codex_snapshot()
+    env.install_agy_snapshot()
+    for manifest in (env.src / ".codex-plugin" / "plugin.json", env.src / "plugin.json"):
+        manifest.write_text(json.dumps({"name": "telaf"}))
+    rows = hub.status(env.config, tmp_path / "repo")
+    assert _state(rows, "codex") == "current"
+    assert _state(rows, "agy") == "current"
+    codex = next(r for r in rows if r.host == "codex" and r.plugin == "telaf")
+    assert codex.detail == "no version in manifest"
+    (env.src / "skills" / "a" / "SKILL.md").write_text("changed")
+    assert _state(hub.status(env.config, tmp_path / "repo"), "codex") == "stale"

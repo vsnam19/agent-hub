@@ -30,7 +30,8 @@ class HubConfig:
     plugins: dict[str, Path]
     marketplace_dir: Path | None
     marketplace_name: str | None
-    marketplace_registered: str | None  # "root" | "name" | None
+    marketplace_registered: str | None  # "root" | "name" | "failed" | None
+    marketplace_failure: str | None = None
 
 
 def load_config(config_dir: Path) -> HubConfig:
@@ -46,11 +47,12 @@ def load_config(config_dir: Path) -> HubConfig:
     directory = Path(hub["codex_marketplace"]).expanduser().resolve() if "codex_marketplace" in hub else None
     name = None
     registered = None
+    failure = None
     if directory is not None:
         name = _marketplace_names(directory)[0]
         if name is not None and shutil.which("codex"):
-            registered = _registered(directory, name)
-    return HubConfig(plugins, directory, name, registered)
+            registered, failure = _registered_checked(directory, name)
+    return HubConfig(plugins, directory, name, registered, failure)
 
 
 def status(config_dir: Path, repo_root: Path | None = None) -> list[Row]:
@@ -62,12 +64,14 @@ def status(config_dir: Path, repo_root: Path | None = None) -> list[Row]:
     if shutil.which("codex") and cfg.marketplace_name:
         codex_installed, failure = _codex_installed(cfg)
         if failure:
-            errors.append(Row("codex", "-", "error", detail=f"codex list failed: {failure}"))
+            errors.append(Row("codex", "-", "error", detail=failure))
+    if cfg.marketplace_failure:
+        errors.append(Row("codex", "-", "error", detail=f"marketplace list failed: {cfg.marketplace_failure}"))
     agy_installed: set[str] = set()
     if shutil.which("agy"):
         agy_installed, failure = _agy_installed()
         if failure:
-            errors.append(Row("agy", "-", "error", detail=f"agy list failed: {failure}"))
+            errors.append(Row("agy", "-", "error", detail=failure))
     for name, directory in cfg.plugins.items():
         row = _codex_row(cfg, name, directory, listed, codex_installed)
         if cfg.marketplace_registered == "name" and row.state in ("current", "stale", "missing"):
@@ -99,7 +103,7 @@ def plan_install(rows: list[Row], config: HubConfig, hosts: tuple[str, ...] = HO
     cmds: list[list[str]] = []
     todo = [r for r in rows if r.state in INSTALLABLE]
     codex_rows = [r for r in todo if r.host == "codex" and "codex" in hosts]
-    if codex_rows and config.marketplace_dir is not None:
+    if codex_rows and config.marketplace_dir is not None and config.marketplace_registered != "failed":
         if config.marketplace_registered is None:
             cmds.append(["codex", "plugin", "marketplace", "add", str(config.marketplace_dir)])
         for r in codex_rows:
@@ -113,9 +117,15 @@ def plan_install(rows: list[Row], config: HubConfig, hosts: tuple[str, ...] = HO
     return cmds
 
 
-def install(config_dir: Path, apply: bool, hosts: tuple[str, ...] = HOSTS, emit: Callable[[str], None] = print) -> int:
+def install(
+    config_dir: Path,
+    apply: bool,
+    hosts: tuple[str, ...] = HOSTS,
+    emit: Callable[[str], None] = print,
+    repo_root: Path | None = None,
+) -> int:
     cfg = load_config(config_dir)
-    cmds = plan_install(status(config_dir), cfg, hosts)
+    cmds = plan_install(status(config_dir, repo_root), cfg, hosts)
     if not cmds:
         emit("nothing to install")
     for cmd in cmds:
@@ -124,7 +134,10 @@ def install(config_dir: Path, apply: bool, hosts: tuple[str, ...] = HOSTS, emit:
         return 0
     for cmd in cmds:
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True)
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        except subprocess.TimeoutExpired:
+            emit(f"failed (timeout): {shlex.join(cmd)}")
+            return 1
         except OSError as exc:
             emit(f"failed: {shlex.join(cmd)}: {exc}")
             return 1
@@ -133,7 +146,7 @@ def install(config_dir: Path, apply: bool, hosts: tuple[str, ...] = HOSTS, emit:
             emit(f"failed (exit {proc.returncode}): {shlex.join(cmd)}\n{tail}")
             return 1
     emit("")
-    emit(format_rows(status(config_dir)))
+    emit(format_rows(status(config_dir, repo_root)))
     return 0
 
 
@@ -183,6 +196,12 @@ def _name_detail(key: str, name: str) -> str:
     return "" if key == name else f"manifest name {name}"
 
 
+def _no_version(detail: str, source: str | None) -> str:
+    if source is not None:
+        return detail
+    return f"{detail}; no version in manifest" if detail else "no version in manifest"
+
+
 def _run(*argv: str) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(argv, capture_output=True, text=True, timeout=30)
@@ -213,37 +232,44 @@ def _marketplace_names(directory: Path | None) -> tuple[str | None, set[str]]:
 
 
 def _registered(directory: Path, name: str | None = None) -> str | None:
+    """ "root" | "name" | None, or "failed" when the list command fails."""
+    return _registered_checked(directory, name)[0]
+
+
+def _registered_checked(directory: Path, name: str | None = None) -> tuple[str | None, str | None]:
     proc = _run("codex", "plugin", "marketplace", "list")
+    if failure := _failure(proc):
+        return "failed", failure
     by_name = False
     for line in proc.stdout.splitlines()[1:]:
         parts = line.split(None, 1)
         if len(parts) != 2:
             continue
         if Path(parts[1].strip()).expanduser().resolve() == directory:
-            return "root"
+            return "root", None
         by_name = by_name or (name is not None and parts[0] == name)
-    return "name" if by_name else None
+    return ("name" if by_name else None), None
 
 
 def _codex_installed(cfg: HubConfig) -> tuple[dict[str, str], str | None]:
     proc = _run("codex", "plugin", "list", "-m", str(cfg.marketplace_name), "--json")
     if failure := _failure(proc):
-        return {}, failure
+        return {}, f"codex list failed: {failure}"
     try:
         data = json.loads(proc.stdout)
-        return {p["name"]: str(p.get("version", "")) for p in data.get("installed", [])}, None
+        return {p["name"]: str(p.get("version", "")) for p in data["installed"]}, None
     except (ValueError, KeyError, TypeError, AttributeError):
-        return {}, None
+        return {}, "codex list output not understood"
 
 
 def _agy_installed() -> tuple[set[str], str | None]:
     proc = _run("agy", "plugin", "list")
     if failure := _failure(proc):
-        return set(), failure
+        return set(), f"agy list failed: {failure}"
     try:
-        return {p["name"] for p in json.loads(proc.stdout).get("imports", [])}, None
+        return {p["name"] for p in json.loads(proc.stdout)["imports"]}, None
     except (ValueError, KeyError, TypeError, AttributeError):
-        return set(), None
+        return set(), "agy list output not understood"
 
 
 def _codex_row(cfg: HubConfig, name: str, directory: Path, listed: set[str], installed: dict[str, str]) -> Row:
@@ -263,8 +289,8 @@ def _codex_row(cfg: HubConfig, name: str, directory: Path, listed: set[str], ins
         return Row("codex", name, "missing", source_version=source, detail=detail)
     version = installed[host_name]
     snapshot = _codex_home() / "plugins" / "cache" / cfg.marketplace_name / host_name / version / "skills"
-    same = version == source and skills_hash(snapshot) == skills_hash(directory / "skills")
-    return Row("codex", name, "current" if same else "stale", version, source, detail)
+    same = (source is None or version == source) and skills_hash(snapshot) == skills_hash(directory / "skills")
+    return Row("codex", name, "current" if same else "stale", version, source, _no_version(detail, source))
 
 
 def _agy_row(name: str, directory: Path, installed: set[str]) -> Row:
@@ -280,8 +306,9 @@ def _agy_row(name: str, directory: Path, installed: set[str]) -> Row:
         return Row("agy", name, "missing", source_version=source, detail=detail)
     snapshot = Path(os.environ.get("HOME", "~")).expanduser() / ".gemini" / "config" / "plugins" / host_name
     version = _version(snapshot / "plugin.json")
-    same = version == source and skills_hash(snapshot / "skills") == skills_hash(directory / "skills")
-    return Row("agy", name, "current" if same else "stale", version, source, detail)
+    same_skills = skills_hash(snapshot / "skills") == skills_hash(directory / "skills")
+    same = (source is None or version == source) and same_skills
+    return Row("agy", name, "current" if same else "stale", version, source, _no_version(detail, source))
 
 
 def _strays(cfg: HubConfig) -> list[Row]:
