@@ -113,7 +113,8 @@ def review_text(base: str, brief: str | None, diff_path: Path) -> str:
     preamble = (
         f"You are reviewing the changes on the current branch against `{base}` in this repository. The changes\n"
         f"between `{base}` and HEAD are in the file `{diff_path}`: read it, and read the files it touches in the\n"
-        f"current directory. Do not modify any file. Report findings as a list, most severe\n"
+        f"current directory. Do not modify any file. You have no shell: do not run commands (git, tests, linters…);\n"
+        f"use your file-reading tools only. Report findings as a list, most severe\n"
         f"first; for each give: severity (critical/important/minor), file:line, the problem, and a concrete failure\n"
         f'scenario. Say "no findings" if there are none.'
     )
