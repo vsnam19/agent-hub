@@ -757,3 +757,26 @@ def test_non_claude_link_with_effort_is_refused(env_sandbox, repo):
     assert first["reason"] == "effort is only supported for claude links"
     assert second["outcome"] == "ok" and second["n"] == 2
     assert fake_calls(env_sandbox.fakelog, "agy") == []
+
+
+def test_reviewer_with_effort_excluded_as_implementer(env_sandbox, repo):
+    # the implementer ran claude:opus at its default effort; the same model at another effort is not independent
+    args = args_for(repo, ["claude:opus@low", "claude:sonnet"], role="review")
+    args.exclude = ["claude:opus"]
+    result = run_job(args, paths(), make_pool(), now)
+    assert result["status"] == "ok"
+    assert [(a["agent"], a["model"]) for a in result["attempts"]] == [("claude", "sonnet")]
+    request = json.loads((job_dir(result) / "request.json").read_text())
+    assert request["links"] == ["claude:sonnet"]
+    calls = fake_calls(env_sandbox.fakelog, "claude")
+    assert len(calls) == 1 and "sonnet" in " ".join(calls[0]["argv"])
+
+
+def test_effort_recorded_in_result(env_sandbox, repo):
+    result = go(repo, ["claude:sonnet@low"])
+    assert result["status"] == "ok"
+    assert result["effort"] == "low"
+    assert result["attempts"][0]["effort"] == "low"
+    attempt_meta = json.loads((Path(result["reply_path"]).parent / "attempt.json").read_text())
+    assert attempt_meta["effort"] == "low"
+    assert json.loads((job_dir(result) / "result.json").read_text())["effort"] == "low"

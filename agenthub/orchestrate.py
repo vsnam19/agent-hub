@@ -243,8 +243,9 @@ class _Cancel:
 def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) -> dict:
     kind = args.kind or args.role
     adapters = registry()
-    excluded = set(args.exclude)
-    links = [link for link in args.links if str(link) not in excluded]
+    # effort is ignored here: the same model at another effort is not an independent reviewer
+    excluded = {text.partition("@")[0] for text in args.exclude}
+    links = [link for link in args.links if link.quota_key not in excluded]
     for link in links:
         if link.agent not in adapters:
             raise ConfigError(f"unknown agent in chain: {link.agent}")
@@ -367,6 +368,8 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
                 break
             adapter = adapters[link.agent]
             entry: dict = {"n": n, "agent": link.agent, "model": link.model}
+            if link.effort:
+                entry["effort"] = link.effort
             record["attempts"].append(entry)
 
             if link.effort and link.agent != "claude":
@@ -400,10 +403,16 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
 
                 def on_start(pgid: int, n=n, link=link, attempt_dir=attempt_dir) -> None:
                     cancel.pgid = pgid
-                    job.write_json(
-                        _rel(job, attempt_dir, "attempt.json"),
-                        {"n": n, "agent": link.agent, "model": link.model, "pgid": pgid, "started": now().isoformat()},
-                    )
+                    meta = {
+                        "n": n,
+                        "agent": link.agent,
+                        "model": link.model,
+                        "pgid": pgid,
+                        "started": now().isoformat(),
+                    }
+                    if link.effort:
+                        meta["effort"] = link.effort
+                    job.write_json(_rel(job, attempt_dir, "attempt.json"), meta)
 
                 ran = process.run(inv, workdir, child_env, attempt_dir, args.timeout, on_start=on_start)
                 cancel.pgid = None
@@ -417,6 +426,8 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
             else:
                 entry.update(outcome=str(cl.outcome), rc=ran.rc, duration_s=round(ran.duration_s, 3))
             record.update(agent=link.agent, model=link.model, reply_path=str(attempt_dir / "reply.md"))
+            if link.effort:
+                record["effort"] = link.effort
 
             if cancel.cancelled:
                 entry["outcome"] = "cancelled"
