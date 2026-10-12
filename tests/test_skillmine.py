@@ -642,6 +642,33 @@ def test_redact_base64url():
     assert out == "value <redacted> end"
 
 
+REAL_FALSE_POSITIVES = [
+    "**Documentation**",
+    "..._foreign_repo_refused_exit_3",
+    "./plugins/token-audit",
+    ".git/worktrees/.../index.lock",
+    "///path/to/cli.py#L42",
+    "/accepted-touched.jsonl",
+    "/plans/*/plan.json",
+    "/tmp/.../wt-slugify",
+    "0005_drop_search_text_index.py",
+    "ASSUMED_generic_*.txt",
+    "Adapter.preflight",
+    "AgyAdapter.classify",
+    "Evidence.balance_after_minor",
+    "Extract.review_failures",
+    "FileNotFoundError",
+    "GenericSmsAdapter",
+    "HubConfig.marketplace_registered",
+    "LEARNED_PLUGINS.",
+    "LoadsTheDataFile",
+    "PrivacyInfo.xcprivacy",
+    "accepted-touched.jsonl",
+    "agent-hub@agent-plugins",
+    "agenthub.agents.claude._now",
+]
+
+
 def test_entropy_rule_spares_paths_identifiers_and_job_ids():
     keep = [
         "agenthub/skillmine.py",
@@ -651,11 +678,48 @@ def test_entropy_rule_spares_paths_identifiers_and_job_ids():
         "CMAKE_COMPILE_WARNING_AS_ERROR",
         "docs/superpowers/specs/design.md",
         "RedactionChokePointHandler",
+        *REAL_FALSE_POSITIVES,
     ]
     for text in keep:
         assert skillmine.redact(f"see {text} now") == f"see {text} now", text
     assert skillmine.redact("k Xk9fQ2mP7vLz4TnR8wYb") == "k <redacted>"
     assert skillmine.redact("aaaaaaaaaaaaaaaaaaaaaaaa1") == "aaaaaaaaaaaaaaaaaaaaaaaa1"
+
+
+def test_real_false_positives_stay():
+    keep = [
+        "**Documentation**",
+        "..._foreign_repo_refused_exit_3",
+        "./plugins/token-audit",
+        ".git/worktrees/.../index.lock",
+        "///path/to/cli.py#L42",
+        "/accepted-touched.jsonl",
+        "/plans/*/plan.json",
+        "/tmp/.../wt-slugify",
+        "0005_drop_search_text_index.py",
+        "ASSUMED_generic_*.txt",
+        "Adapter.preflight",
+        "AgyAdapter.classify",
+        "Evidence.balance_after_minor",
+        "Extract.review_failures",
+        "FileNotFoundError",
+        "GenericSmsAdapter",
+        "HubConfig.marketplace_registered",
+        "LEARNED_PLUGINS.",
+        "LoadsTheDataFile",
+        "PrivacyInfo.xcprivacy",
+        "accepted-touched.jsonl",
+        "agent-hub@agent-plugins",
+        "agenthub.agents.claude._now",
+    ]
+    for text in keep:
+        assert skillmine.redact(f"see {text} now") == f"see {text} now", text
+    assert "<redacted>" in skillmine.redact("AKIAIOSFODNN7EXAMPLE")
+    assert skillmine.redact("k aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE3fG5hI7kLm") == "k <redacted>"
+
+
+def test_random_piece_inside_dotted_token_redacted():
+    assert skillmine.redact("see cfg.aB3dE5gH7jK9mN1pQ3sT5vW7y now") == "see cfg.<redacted> now"
 
 
 def test_read_reply_uses_reply_path_and_numeric_order(tmp_path):

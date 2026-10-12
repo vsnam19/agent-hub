@@ -27,6 +27,43 @@ _BARE_SECRET_WORDS = {"password", "passwd", "pwd", "passphrase"}
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _HOME = re.compile(r"(?:^|(?<=[\s\"'`(=:/\[]))(?:/home/[^/\s]+|/Users/[^/\s]+|/root(?![\w.-]))")
 
+# Token rule. Text is split on whitespace, quotes, backticks and `=:,;()<>[]{}?&`; each token is then split on
+# `. / @ # *` (Markdown, paths, extensions, `...`) and only a piece is redacted, when ALL hold:
+#   - >= 16 chars: shorter strings are mostly words or short ids, and name rules cover short passwords;
+#   - >= 2 of {lower, upper, digit}: a single-class string is a word or a number (`_-+` do not count);
+#   - Shannon entropy >= 3.0 bits/char: random keys sit at 4+, repeated or patterned text well below;
+#   - not an identifier (words of letters joined by `_`/`-`, each word upper-case or camel/lower with >= 3 letter
+#     pieces, plus a digit-only first/last word of <= 4 digits) and not a job id (`YYYYMMDD-HHMMSS-kind-xxxx`):
+#     names the extract needs to keep.
+_TOKEN = re.compile(r"[^\s\"'`=:,;()<>\[\]{}?&]+")
+_PIECE_SPLIT = re.compile(r"([./@#*]+)")
+_REDACTED_RUN = re.compile(r"<redacted>(?:[./@#*]+<redacted>)+")
+_TOKEN_MIN_LEN = 16
+_CONTINUATION_MIN_LEN = 8
+_TOKEN_MIN_ENTROPY = 3.0
+_SHORT_DIGITS = 4
+_WORD = re.compile(r"(?:[A-Z]+(?![a-z])|[A-Z]?[a-z]{3,})+")
+_IDENT_WORD = re.compile(r"(?:[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]{3,})+")
+_JOB_ID = re.compile(r"\d{8}-\d{6}-[a-z]+-[0-9a-f]{4}")
+
+_CORRECTIONS = 500
+MAX_CORRECTION_CHARS = 600
+CATEGORY_WORDS = 12
+
+_PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.S)
+_JWT = re.compile(r"\beyJ[\w-]+\.[\w-]+\.[\w-]+")
+_BEARER = re.compile(r"(?i)\bBearer\s+[\w.~+/=-]+")
+_BASIC = re.compile(r"\bBasic\s+([A-Za-z0-9+/_-]{8,}={0,2})(?![\w+/])")
+_PREFIXED = re.compile(r"\b(?:sk-[\w-]{16,}|ghp_\w{20,}|xox[a-z]-[\w-]{10,}|AKIA[0-9A-Z]{16})")
+_NAME = r"[\w-]*(?:pass|pwd|secret|token|key|auth|authorization|credential|cookie|session|salt|sig|signature)[\w-]*"
+_VALUE = r"(?:\"[^\"]*\"|'[^']*'|[^\s\"',;]+)"
+_KV = re.compile(rf"(?i)(?<![\w-])({_NAME})(\s*[=:]\s*){_VALUE}")
+_KV_SPACE = re.compile(rf"(?i)(?<![\w-])({_NAME})(\s+)(?!-|<redacted>){_VALUE}")
+_KV_JSON = re.compile(rf"(?i)(\"{_NAME}\"\s*:\s*)\"[^\"]*\"")
+_BARE_SECRET_WORDS = {"password", "passwd", "pwd", "passphrase"}
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_HOME = re.compile(r"(?:^|(?<=[\s\"'`(=:/\[]))(?:/home/[^/\s]+|/Users/[^/\s]+|/root(?![\w.-]))")
+
 # Token rule. Text is split on whitespace, quotes, backticks and `=:,;()<>[]{}?&`; a token is redacted when ALL hold:
 #   - >= 16 chars: shorter strings are mostly words or short ids, and name rules cover short passwords;
 #   - >= 2 of {lower, upper, digit, symbol `+/_-`}: a single-class string is a word or a number;
@@ -75,7 +112,7 @@ def redact(text: str) -> str:
     text = _KV_SPACE.sub(_redact_space_value, text)
     text = _KV_JSON.sub(r'\1"<redacted>"', text)
     text = _EMAIL.sub("<email>", text)
-    text = _TOKEN.sub(lambda m: "<redacted>" if _looks_secret(m.group(0)) else m.group(0), text)
+    text = _TOKEN.sub(lambda m: _redact_token(m.group(0)), text)
     return _HOME.sub("~", text)
 
 
@@ -95,29 +132,35 @@ def _entropy(token: str) -> float:
     return -sum(n / len(token) * math.log2(n / len(token)) for n in counts.values())
 
 
-def _looks_secret(token: str) -> bool:
-    if len(token) < _TOKEN_MIN_LEN:
-        return False
-    classes = (
-        any(c.islower() for c in token),
-        any(c.isupper() for c in token),
-        any(c.isdigit() for c in token),
-        any(c in "+/_-" for c in token),
-    )
-    if sum(classes) < 2 or _entropy(token) < _TOKEN_MIN_ENTROPY:
-        return False
-    segments = [seg for seg in token.split("/") if seg]
-    if len(segments) >= 2 and all(_pathlike(seg) for seg in segments):
-        return False
-    if _JOB_ID.fullmatch(token):
-        return False
-    words = [word for word in re.split(r"[_-]+", token) if word]
-    return not (all(word.isalpha() for word in words) and all(_WORD.fullmatch(word) for word in words))
+def _redact_token(token: str) -> str:
+    parts = _PIECE_SPLIT.split(token)
+    secret = [i % 2 == 0 and _looks_secret(part) for i, part in enumerate(parts)]
+    # a base64 blob split by `/`: a mixed, non-word piece right next to a secret piece is part of it
+    for i in range(0, len(parts), 2):
+        near = (i >= 2 and secret[i - 2] and parts[i - 1] == "/") or (
+            i + 2 < len(parts) and secret[i + 2] and parts[i + 1] == "/"
+        )
+        if near and not secret[i] and _looks_secret(parts[i], _CONTINUATION_MIN_LEN):
+            secret[i] = True
+    joined = "".join("<redacted>" if secret[i] else part for i, part in enumerate(parts))
+    return _REDACTED_RUN.sub("<redacted>", joined)
 
 
-def _pathlike(segment: str) -> bool:
-    mixed = any(c.isdigit() for c in segment) and segment != segment.lower() and segment != segment.upper()
-    return len(segment) <= _SEGMENT_MAX and any(c.isalpha() for c in segment) and not mixed
+def _looks_secret(piece: str, min_len: int = _TOKEN_MIN_LEN) -> bool:
+    if len(piece) < min_len:
+        return False
+    classes = (any(c.islower() for c in piece), any(c.isupper() for c in piece), any(c.isdigit() for c in piece))
+    if sum(classes) < 2 or _entropy(piece) < _TOKEN_MIN_ENTROPY or _JOB_ID.fullmatch(piece):
+        return False
+    words = [word for word in re.split(r"[_-]+", piece) if word]
+    last = len(words) - 1
+    return not all(_identifier_word(word, i in (0, last)) for i, word in enumerate(words))
+
+
+def _identifier_word(word: str, edge: bool) -> bool:
+    if word.isdigit():
+        return edge and len(word) <= _SHORT_DIGITS
+    return word.isalpha() and _IDENT_WORD.fullmatch(word) is not None
 
 
 def clean(text: str) -> str:
