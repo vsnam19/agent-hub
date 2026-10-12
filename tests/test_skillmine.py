@@ -818,6 +818,20 @@ def test_mine_write_error_exit_2(tmp_path, monkeypatch, capsys):
     assert "Traceback" not in err
 
 
+def test_mine_days_out_of_range_exit_2(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path / "state"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    for days in ("0", "1000000"):
+        argv = ["skills", "mine", "--out", str(tmp_path / "out"), "--transcripts", str(tmp_path / "claude")]
+        rc = main([*argv, "--days", days])
+
+        assert rc == 2, days
+        err = capsys.readouterr().err
+        assert err == "agent-hub: --days must be between 1 and 3650\n", err
+        assert "Traceback" not in err
+
+
 def test_command_key_collisions_summed(tmp_path):
     first = "aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE3fG5hI7k"
     second = "aX9kL2mN4pQ6rS8tV0wY1zA3bC5dE7fG9hJ1kL3"

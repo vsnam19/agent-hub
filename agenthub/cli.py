@@ -293,8 +293,8 @@ def _cmd_skills(args) -> int:
 
 def _mine_window(args, state_dir: Path, now: datetime) -> datetime:
     if args.days is not None:
-        if args.days < 1:
-            raise UsageError("--days must be at least 1")
+        if not 1 <= args.days <= 3650:
+            raise UsageError("--days must be between 1 and 3650")
         return now - timedelta(days=args.days)
     if args.since:
         try:
