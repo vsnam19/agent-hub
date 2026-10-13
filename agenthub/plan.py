@@ -106,7 +106,9 @@ def load(path: Path) -> Plan:
         brief_path = None
         verifies = None
 
-        if kind == "implement":
+        if kind == "plan":
+            errors.append(f"task {name}: role {role} is a plan role; plan tasks must be implement or review")
+        elif kind == "implement":
             brief = tdata.get("brief")
             if not brief:
                 errors.append(f"task {name}: implement needs brief")

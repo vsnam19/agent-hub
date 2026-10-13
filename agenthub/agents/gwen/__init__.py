@@ -38,8 +38,8 @@ def _unavailable(detail: str) -> Classified:
 
 class GwenAdapter(Adapter):
     def preflight(self, req: Request) -> Classified | None:
-        if req.role == "review":
-            return _unavailable("gwen does not review")
+        if req.role != "implement":
+            return _unavailable("gwen only implements (no read-only mode)")
         base, key_file = _settings()
         key = _read_key(key_file)
         if key is None:

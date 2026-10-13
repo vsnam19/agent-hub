@@ -242,6 +242,8 @@ class _Cancel:
 
 def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) -> dict:
     kind = args.kind or args.role
+    # read-only jobs must leave the tree as they found it; a review also gets a diff, a plan has no base
+    read_only = kind in ("review", "plan")
     adapters = registry()
     # effort is ignored here: the same model at another effort is not an independent reviewer
     excluded = {text.partition("@")[0] for text in args.exclude}
@@ -266,7 +268,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         repo = guards.inspect(workdir)
         if kind == "implement":
             guards.check_implement(repo)
-        else:
+        elif kind == "review":
             base = args.base or repo.default_branch
             diff = guards.review_diff(repo, base)
     except guards.GuardError as e:
@@ -278,6 +280,9 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
     repo_config = None
     if kind == "review":
         repo_config = base_repo_config(repo, base) if repo is not None and base is not None else ""
+    elif kind == "plan" and repo is not None:
+        # a plan has no base to pin to: its worker plugins come from HEAD, not from uncommitted edits
+        repo_config = base_repo_config(repo, "HEAD")
     plugin_dirs = ()
     if refusal is None:
         plugin_dirs = worker_plugins(p.config_dir, repo.root if repo else workdir, repo_config)
@@ -313,6 +318,8 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         diff_path = job.dir / "diff.patch"
         diff_path.write_text(diff)
         text = briefmod.review_text(base, args.brief, diff_path)
+    elif kind == "plan":
+        text = briefmod.plan_text(args.brief)
     standing = briefmod.standing_orders(p.config_dir, repo.root if repo else None)
     if standing:
         text += "\n\n" + standing
@@ -320,7 +327,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         text += "\n\n" + _skills_section(skills, known_skills) + "\n"
     if kind == "implement":
         text += "\n" + handoff.FOOTER
-    else:
+    elif kind == "review":
         judge = _touched_section(touched_findings(list_jobs(p, 100000), workdir, guards.head(repo))) if repo else ""
         text += "\n\n" + judge + handoff.REVIEW_FOOTER
     (job.dir / "brief.md").write_text(text)
@@ -439,7 +446,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
             if cl.outcome == Outcome.QUOTA:
                 cooldowns.set(link, cl.reset_at or (now() + pool.quota_cooldown))
 
-            if kind == "review" and guards.fingerprint(repo) != before:
+            if read_only and guards.fingerprint(repo) != before:
                 status = "modified-tree"
                 break
             if cl.outcome == Outcome.OK:
@@ -450,7 +457,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
                     status = "interrupted"
                     break
                 continue
-            if kind == "review" and cl.outcome == Outcome.FAILED and cl.detail.startswith("permission auto-denied"):
+            if read_only and cl.outcome == Outcome.FAILED and cl.detail.startswith("permission auto-denied"):
                 entry["fallthrough"] = "permission auto-denied"
                 denied_last = True
                 continue
@@ -474,7 +481,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         record["handoff"] = None
         record["handoff_missing"] = False
         reply_path = record.get("reply_path")
-        if status == "ok" and reply_path and Path(reply_path).is_file():
+        if kind == "review" and status == "ok" and reply_path and Path(reply_path).is_file():
             reply_text = Path(reply_path).read_text()
             record["verdict"] = handoff.parse_verdict(reply_text)
             record["touched_review"] = handoff.parse_touched_entries(reply_text)

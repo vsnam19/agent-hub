@@ -134,8 +134,8 @@ def load_pool(p: Paths | None = None) -> Pool:
         if not isinstance(role_data, dict):
             raise ConfigError(f"role {role_name!r} must be a table")
         kind = role_data.get("kind", role_name if role_name in ("implement", "review") else None)
-        if kind not in ("implement", "review"):
-            raise ConfigError(f'role {role_name!r} must declare kind = "implement" or "review"')
+        if kind not in ("implement", "review", "plan"):
+            raise ConfigError(f'role {role_name!r} must declare kind = "implement", "review" or "plan"')
         chain = role_data.get("chain", [])
         if not isinstance(chain, list) or not all(isinstance(link, str) for link in chain):
             raise ConfigError(f"role {role_name!r} chain must be a list of agent:model strings")
@@ -148,7 +148,7 @@ def load_pool(p: Paths | None = None) -> Pool:
         if role.escalate is None:
             continue
         if role.kind != "implement":
-            raise ConfigError(f"review role {role.name!r} cannot escalate")
+            raise ConfigError(f"{role.kind} role {role.name!r} cannot escalate")
         target = roles.get(role.escalate)
         if target is None:
             raise ConfigError(f"role {role.name!r} escalates to unknown role {role.escalate!r}")

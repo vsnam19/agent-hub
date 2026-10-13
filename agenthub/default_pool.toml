@@ -1,6 +1,6 @@
 [defaults]
 quota_cooldown = "60m"        # used when the agent does not say when quota resets
-timeout = { implement = "60m", review = "20m" }
+timeout = { implement = "60m", review = "20m", plan = "20m" }
 
 [roles.implement-small]
 kind = "implement"
@@ -19,3 +19,7 @@ chain = ["agy:claude-opus-4-6-thinking", "agy:claude-sonnet-4-6", "codex:gpt-5.6
 [roles.review]
 kind = "review"
 chain = ["agy:claude-opus-4-6-thinking", "codex:gpt-5.6-terra", "agy:gemini-3.1-pro-high", "claude:sonnet"]
+
+[roles.techlead]
+kind = "plan"
+chain = ["claude:sonnet"]  # provisional until the bench (E7)

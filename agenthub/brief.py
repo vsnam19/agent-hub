@@ -81,32 +81,34 @@ def order_table(config_dir: Path, repo_root: Path | None) -> list[Order]:
 def validate(kind: str, text: str) -> None:
     if kind == "review":
         return
-    if kind != "implement":
+    if kind == "implement":
+        required = ["Input", "Expected output"]
+    elif kind == "plan":
+        required = ["Goal", "Input"]
+    else:
         raise BriefError(f"Unknown role: {kind}")
 
     # Headings: level >= 2 ('#' * n + space), text case-insensitive, trailing spaces/colon ignored.
-    has_input = False
-    has_expected_output = False
+    found = set()
 
     for line in text.splitlines():
         line = line.strip("\r\n")
         match = re.match(r"^(#{2,})\s+(.*)$", line)
         if match:
-            heading_text = match.group(2).strip(" \t:")
-            heading_lower = heading_text.lower()
-            if heading_lower == "input":
-                has_input = True
-            elif heading_lower == "expected output":
-                has_expected_output = True
+            found.add(match.group(2).strip(" \t:").lower())
 
-    missing = []
-    if not has_input:
-        missing.append("Input")
-    if not has_expected_output:
-        missing.append("Expected output")
-
+    missing = [h for h in required if h.lower() not in found]
     if missing:
         raise BriefError(f"Brief missing headings: {', '.join(missing)}")
+
+
+def plan_text(brief: str) -> str:
+    preamble = (
+        "You are planning work in the current directory. Read the files you need. This is a read-only job:\n"
+        "do not modify, create or delete files, do not run commands, and do not fetch URLs.\n"
+        "Write the plan in your final message; that message is the whole answer."
+    )
+    return f"{preamble}\n\n{brief}"
 
 
 def review_text(base: str, brief: str | None, diff_path: Path) -> str:
