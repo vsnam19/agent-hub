@@ -538,21 +538,6 @@ def escalate(tstate: TaskState, task: Task, job_result: dict, job_status: str) -
     tstate.reason = f"## Previous attempt failed\n{failure}"
 
 
-def _approved_job(workdir: Path, head: str) -> dict | None:
-    """The newest approving review of `head` in `workdir`, if there is one."""
-    for j in list_jobs(paths(), 100000):
-        if (
-            j.get("kind") == "review"
-            and j.get("status") == "ok"
-            and j.get("verdict") == "approve"
-            and j.get("head") == head
-            and j.get("workdir")
-            and Path(j["workdir"]).resolve() == workdir.resolve()
-        ):
-            return j
-    return None
-
-
 def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], datetime]) -> dict:
     """Gate the committed HEAD of a done task, then run the plan's review role on it, unless HEAD already has an
     approving review. A failed gate skips the review. Returns {"gate", "review", "job", "reason"}, where gate is
@@ -565,13 +550,25 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
     except guards.GuardError as e:
         return {**failed, "reason": str(e)}
 
-    head = guards.head(repo)
-    approved = _approved_job(repo.root, head)
-    if approved:
-        return {"gate": "ok", "review": "approve", "job": approved["id"], "reason": "", "up_to_date": True}
-
     if guards._run_git(repo.root, "status", "--porcelain"):
         return {**failed, "reason": "work tree is not clean; commit before review"}
+
+    head = guards.head(repo)
+    jobs = list_jobs(paths(), 100000)
+    mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == repo.root.resolve()]
+    on_head = [j for j in mine if j.get("kind") == "review" and j.get("status") == "ok" and j.get("head") == head]
+
+    def who(j: dict) -> str:
+        return f"{j.get('agent')}:{j.get('model')}"
+
+    implementers = {who(j) for j in mine if j.get("kind") == "implement" and j.get("status") in ("ok", "gate-failed")}
+    if (
+        not readiness(jobs, repo.root, head)
+        and on_head
+        and on_head[0]["verdict"] == "approve"
+        and who(on_head[0]) not in implementers
+    ):
+        return {"gate": "ok", "review": "approve", "job": on_head[0]["id"], "reason": "", "up_to_date": True}
 
     # The branch the task was created from: the plan base, or its dependency's branch.
     base = tstate.start_ref or plan.base

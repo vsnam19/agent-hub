@@ -3,7 +3,7 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import agenthub.planrun
@@ -484,6 +484,139 @@ def test_plan_review_skips_approved_head(env_sandbox, tmp_path, monkeypatch, cap
     assert [line.split(" (")[0] for line in lines] == ["t1 up to date", "t2 up to date"]
     assert len(calls) == 2
     assert len([j for j in list_jobs(paths(), 100) if j["kind"] == "gate"]) == gate_jobs
+
+
+def test_plan_review_dirty_tree_never_up_to_date(env_sandbox, tmp_path, monkeypatch, capsys):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    fake_review(monkeypatch, "approve")
+    assert main(["plan", "review", str(plan_file)]) == 0
+    capsys.readouterr()
+
+    t1_worktree = Path(state["tasks"]["t1"]["worktree"])
+    (t1_worktree / "dirty.txt").write_text("uncommitted\n")
+
+    rc = main(["plan", "review", str(plan_file), "--task", "t1"])
+
+    out = capsys.readouterr()
+    assert rc == 1
+    assert "t1 gate=failed review=failed job=-" in out.out
+    assert "work tree is not clean; commit before review" in out.err
+
+
+def test_plan_review_self_review_not_up_to_date(env_sandbox, tmp_path, monkeypatch, capsys):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    t1_worktree = Path(state["tasks"]["t1"]["worktree"])
+    t1_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=t1_worktree, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    implement_job = state["tasks"]["t1"]["attempts"][-1]["job"]
+    implementer = json.loads((paths().jobs_dir / implement_job / "result.json").read_text())
+
+    job = new_job(paths(), "review", datetime.now(timezone.utc))
+    job.write_json(
+        "result.json",
+        {
+            "id": job.id,
+            "role": "review",
+            "kind": "review",
+            "status": "ok",
+            "verdict": "approve",
+            "head": t1_head,
+            "workdir": str(t1_worktree),
+            "agent": implementer["agent"],
+            "model": implementer["model"],
+            "error": "",
+        },
+    )
+
+    calls = fake_review(monkeypatch, "approve")
+    rc = main(["plan", "review", str(plan_file), "--task", "t1"])
+
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "t1 up to date" not in out.out
+    assert len(calls) == 1
+    assert calls[0].exclude == [f"{implementer['agent']}:{implementer['model']}"]
+
+
+def test_plan_review_ungated_approval_not_up_to_date(env_sandbox, tmp_path, monkeypatch, capsys):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    t1_worktree = Path(state["tasks"]["t1"]["worktree"])
+    (t1_worktree / "ungated.txt").write_text("ungated\n")
+    subprocess.run(["git", "add", "ungated.txt"], cwd=t1_worktree, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "ungated work"], cwd=t1_worktree, check=True)
+    new_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=t1_worktree, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    job = new_job(paths(), "review", datetime.now(timezone.utc))
+    job.write_json(
+        "result.json",
+        {
+            "id": job.id,
+            "role": "review",
+            "kind": "review",
+            "status": "ok",
+            "verdict": "approve",
+            "head": new_head,
+            "workdir": str(t1_worktree),
+            "agent": "reviewer-agent",
+            "model": "reviewer-model",
+            "error": "",
+        },
+    )
+
+    calls = fake_review(monkeypatch, "approve")
+    gate_jobs_before = len([j for j in list_jobs(paths(), 100) if j["kind"] == "gate"])
+
+    rc = main(["plan", "review", str(plan_file), "--task", "t1"])
+
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "t1 up to date" not in out.out
+    gate_jobs_after = [j for j in list_jobs(paths(), 100) if j["kind"] == "gate"]
+    assert len(gate_jobs_after) == gate_jobs_before + 1
+    assert gate_jobs_after[0]["head"] == new_head
+    assert len(calls) == 1
+
+
+def test_plan_review_newer_request_changes_wins(env_sandbox, tmp_path, monkeypatch, capsys):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    t1_worktree = Path(state["tasks"]["t1"]["worktree"])
+    t1_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=t1_worktree, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    fake_review(monkeypatch, "approve")
+    assert main(["plan", "review", str(plan_file), "--task", "t1"]) == 0
+    capsys.readouterr()
+
+    when = datetime.now(timezone.utc) + timedelta(seconds=10)
+    job = new_job(paths(), "review", when)
+    job.write_json(
+        "result.json",
+        {
+            "id": job.id,
+            "role": "review",
+            "kind": "review",
+            "status": "ok",
+            "verdict": "request-changes",
+            "head": t1_head,
+            "workdir": str(t1_worktree),
+            "agent": "reviewer-agent",
+            "model": "reviewer-model",
+            "error": "fix needed",
+        },
+    )
+
+    calls = fake_review(monkeypatch, "request-changes")
+    rc = main(["plan", "review", str(plan_file), "--task", "t1"])
+
+    out = capsys.readouterr()
+    assert rc == 1
+    assert "t1 up to date" not in out.out
+    assert len(calls) == 1
+    assert "t1 gate=ok review=request-changes" in out.out
 
 
 def _merge_subjects(repo):
