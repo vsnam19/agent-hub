@@ -261,7 +261,7 @@ class _Run:
         if len(extract.findings) < MIN_FINDINGS and not extract.corrections_total:
             add(Step("stop", "would", "nothing to learn; advance last-run"))
             return
-        add(Step("worktree", "would", f"{self.wt} on new branch {self.branch} from {self.default_branch}"))
+        add(Step("worktree", "would", f"{self.wt} on new branch {self.branch} from <default branch>"))
         add(Step("draft", "would", f"write the drafting brief; agent-hub run --role {DRAFT_ROLE}"))
         add(Step("version", "would", "bump the patch version of each changed plugin in 3 manifests; commit"))
         add(Step("eval", "would", f"claude plugin eval per skill, ablation with-without, max ${self.cfg.max_cost_usd}"))
@@ -270,7 +270,7 @@ class _Run:
             Step(
                 "merge",
                 "would",
-                f"git merge --no-ff into {self.default_branch} (clean main checkout), hub install --apply",
+                "git merge --no-ff into <default branch> (clean main checkout), hub install --apply",
             )
         )
         add(Step("report", "would", f"write {self.out / 'report.md'}; advance last-run; notify-send"))
