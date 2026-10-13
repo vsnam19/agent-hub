@@ -1,11 +1,20 @@
+import json
+import os
+import subprocess
+import sys
+import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from agenthub import brief as briefmod
 from agenthub.agents import registry
-from agenthub.cli import ALL_JOBS, _job_repo, _repo_of
-from agenthub.config import Paths, paths
-from agenthub.jobs import get_job, list_jobs
+from agenthub.cli import ALL_JOBS, WAIT_APPEAR_S, UsageError, _job_repo, _repo_of
+from agenthub.config import ConfigError, Paths, parse_duration, paths, role_kind
+from agenthub.jobs import JOB_ID_RE, get_job, list_jobs
+from agenthub.orchestrate import skills_hint
 from agenthub.pool import Cooldowns, load_pool, parse_link
+from agenthub.workers import available_skills
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import MCPServer
@@ -57,6 +66,259 @@ def show_job_data(job_id: str, p: Paths | None = None) -> dict[str, Any]:
     return job.read_json("result.json")
 
 
+def clamp_timeout(timeout_s: Any) -> int:
+    if isinstance(timeout_s, (int, float)):
+        val = int(timeout_s)
+    elif isinstance(timeout_s, str):
+        try:
+            val = int(timeout_s)
+        except ValueError:
+            val = int(parse_duration(timeout_s).total_seconds())
+    else:
+        val = 60
+    return max(1, min(300, val))
+
+
+def validate_run_args(
+    workdir: str,
+    role: str | None = None,
+    agent: str | None = None,
+    brief_path: str | None = None,
+    skills: list[str] | None = None,
+    p: Paths | None = None,
+) -> tuple[Path, str, str]:
+    if not workdir or not str(workdir).strip():
+        raise UsageError("the following arguments are required: -d/--dir")
+    workdir_path = Path(workdir).expanduser().resolve()
+
+    if role is None:
+        raise UsageError("the following arguments are required: --role")
+
+    p = p or paths()
+    pool = load_pool(p)
+    kind = role_kind(pool, role)
+
+    if agent is not None:
+        link = parse_link(agent)
+        if link.effort and link.agent != "claude":
+            raise ConfigError(f"effort is only supported for claude links: {agent}")
+        links = [link]
+    else:
+        links = [parse_link(x) for x in pool.roles[role].chain]
+
+    adapters = registry()
+    for link in links:
+        if link.agent not in adapters:
+            raise ConfigError(f"unknown agent in chain: {link.agent}")
+
+    if brief_path is None:
+        if kind == "implement":
+            raise UsageError("--brief is required for implement")
+        brief_text = ""
+    else:
+        try:
+            brief_text = Path(brief_path).read_text()
+        except OSError as e:
+            raise UsageError(f"cannot read brief: {e}") from None
+
+    briefmod.validate(kind, brief_text)
+
+    if skills:
+        known_skills = available_skills(p.config_dir)
+        for s in skills:
+            if s not in known_skills:
+                raise ConfigError(f"unknown skill {s!r}: {skills_hint(known_skills)}")
+
+    return workdir_path, kind, brief_text
+
+
+def run_job(
+    workdir: str,
+    role: str | None = None,
+    agent: str | None = None,
+    brief_path: str | None = None,
+    gates: list[str] | None = None,
+    skills: list[str] | None = None,
+    base: str | None = None,
+    p: Paths | None = None,
+) -> dict[str, Any]:
+    p = p or paths()
+    gates = gates or []
+    skills = skills or []
+
+    workdir_path, _kind, _ = validate_run_args(
+        workdir=workdir,
+        role=role,
+        agent=agent,
+        brief_path=brief_path,
+        skills=skills,
+        p=p,
+    )
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "agenthub",
+        "run",
+        "-d",
+        str(workdir_path),
+        "--role",
+        role,
+    ]
+    if agent is not None:
+        cmd.extend(["--agent", agent])
+    if brief_path is not None:
+        cmd.extend(["--brief", str(brief_path)])
+    if base is not None:
+        cmd.extend(["--base", base])
+    for g in gates:
+        cmd.extend(["--gate", g])
+    for s in skills:
+        cmd.extend(["--skill", s])
+    cmd.append("--json")
+
+    env = os.environ.copy()
+    env["AGENT_HUB_STATE"] = str(p.state_dir)
+    env["AGENT_HUB_CONFIG"] = str(p.config_dir)
+
+    p.state_dir.mkdir(parents=True, exist_ok=True)
+    log_file = p.state_dir / f"mcp-run-{time.time_ns()}.log"
+
+    existing_job_ids: set[str] = set()
+    if p.jobs_dir.is_dir():
+        existing_job_ids = {entry.name for entry in os.scandir(p.jobs_dir) if entry.is_dir()}
+
+    spawn_monotonic = time.monotonic()
+
+    try:
+        with open(log_file, "w") as log_fd:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_fd,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                env=env,
+            )
+    except OSError as e:
+        return {"error": f"spawn failed: {e}"}
+
+    poll_deadline = spawn_monotonic + 10.0
+    target_job_id = None
+
+    while time.monotonic() < poll_deadline:
+        if p.jobs_dir.is_dir():
+            for entry in os.scandir(p.jobs_dir):
+                if not entry.is_dir() or not JOB_ID_RE.match(entry.name):
+                    continue
+                if entry.name in existing_job_ids:
+                    continue
+                req_file = Path(entry.path) / "request.json"
+                if req_file.is_file():
+                    try:
+                        req_data = json.loads(req_file.read_text())
+                    except (OSError, ValueError):
+                        continue
+                    req_workdir = req_data.get("workdir")
+                    if req_workdir and Path(req_workdir).resolve() == workdir_path:
+                        target_job_id = entry.name
+                        break
+            if target_job_id is not None:
+                break
+
+        if proc.poll() is not None and proc.returncode != 0:
+            err_msg = ""
+            if log_file.is_file():
+                err_msg = log_file.read_text().strip()
+            return {"error": err_msg or f"process exited with returncode {proc.returncode}"}
+
+        time.sleep(0.05)
+
+    if target_job_id is None:
+        err_msg = ""
+        if log_file.is_file():
+            err_msg = log_file.read_text().strip()
+        return {"error": err_msg or "job record did not appear within 10s"}
+
+    return {"job_id": target_job_id, "workdir": str(workdir_path)}
+
+
+def _gate_summary(gates: list[dict] | None) -> str | None:
+    if not gates:
+        return None
+    failed = next((g for g in gates if g.get("rc") != 0), None)
+    if failed:
+        return f"FAILED: {failed.get('cmd')} (rc {failed.get('rc')})"
+    return f"passed ({len(gates)})"
+
+
+def _format_wait_result(result: dict[str, Any]) -> dict[str, Any]:
+    res = dict(result)
+    res["gate_summary"] = _gate_summary(result.get("gate"))
+    handoff = result.get("handoff")
+    if isinstance(handoff, dict):
+        res["handoff_status"] = handoff.get("status")
+        res["handoff_verification"] = handoff.get("verification")
+        res["handoff_summary"] = f"{handoff.get('status')} · {handoff.get('verification')}"
+    else:
+        res["handoff_status"] = None
+        res["handoff_verification"] = None
+        res["handoff_summary"] = None
+    res.setdefault("state", result.get("status"))
+    res.setdefault("job_id", result.get("id"))
+    return res
+
+
+def wait_job(
+    job_id: str | None = None,
+    workdir: str | None = None,
+    timeout_s: int = 60,
+    p: Paths | None = None,
+) -> dict[str, Any]:
+    if job_id is None and workdir is None:
+        raise UsageError("job_id or workdir is required")
+
+    timeout = clamp_timeout(timeout_s)
+    p = p or paths()
+    start_mono = time.monotonic()
+
+    target_job = None
+    while time.monotonic() - start_mono <= min(float(timeout), WAIT_APPEAR_S):
+        if job_id is not None:
+            try:
+                target_job = get_job(p, job_id)
+                break
+            except KeyError:
+                pass
+        elif workdir is not None:
+            resolved_workdir = Path(workdir).expanduser().resolve()
+            for r in list_jobs(p, 100):
+                job_workdir = r.get("workdir")
+                if job_workdir and Path(job_workdir).expanduser().resolve() == resolved_workdir:
+                    target_job = get_job(p, r["id"])
+                    break
+            if target_job is not None:
+                break
+        time.sleep(0.05)
+
+    if target_job is None:
+        if job_id is not None:
+            raise KeyError(f"unknown job: {job_id}")
+        raise UsageError(f"agent-hub: no job for {workdir}")
+
+    while time.monotonic() - start_mono <= timeout:
+        try:
+            result = target_job.read_json("result.json")
+        except (OSError, ValueError):
+            result = {"status": "running"}
+
+        if result.get("status") != "running":
+            return _format_wait_result(result)
+
+        time.sleep(0.1)
+
+    return {"state": "running"}
+
+
 def build_server() -> "MCPServer":
     try:
         from mcp.server.mcpserver import MCPServer
@@ -89,6 +351,45 @@ def build_server() -> "MCPServer":
     )
     def show_job(job_id: str) -> dict[str, Any]:
         return show_job_data(job_id=job_id)
+
+    @server.tool(
+        name="run_job",
+        description="Run a job detached, returning its job id immediately",
+    )
+    def run_job_tool(
+        workdir: str,
+        role: str | None = None,
+        agent: str | None = None,
+        brief_path: str | None = None,
+        gates: list[str] | None = None,
+        skills: list[str] | None = None,
+        base: str | None = None,
+    ) -> dict[str, Any]:
+        return run_job(
+            workdir=workdir,
+            role=role,
+            agent=agent,
+            brief_path=brief_path,
+            gates=gates or [],
+            skills=skills or [],
+            base=base,
+        )
+
+    @server.tool(
+        name="wait_job",
+        description="Wait for a job to finish, bounded by timeout_s (at most 300s)",
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
+    def wait_job_tool(
+        job_id: str | None = None,
+        workdir: str | None = None,
+        timeout_s: int = 60,
+    ) -> dict[str, Any]:
+        return wait_job(
+            job_id=job_id,
+            workdir=workdir,
+            timeout_s=timeout_s,
+        )
 
     return server
 
