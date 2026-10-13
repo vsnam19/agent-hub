@@ -653,12 +653,334 @@ def plan_status(
     return res
 
 
-def plan_wait(
-    plan_path: str,
+def _is_review_handle(val: Any, p: Paths) -> bool:
+    if isinstance(val, dict) and "handle" in val:
+        return True
+    if isinstance(val, str):
+        if val.startswith("review-") or val.startswith("plan-review-"):
+            return True
+        if (p.state_dir / f"{val}.json").is_file():
+            return True
+    return False
+
+
+def plan_review_wait(
+    handle: str | dict,
     timeout_s: Any = 60,
     p: Paths | None = None,
 ) -> dict[str, Any]:
     p = p or paths()
+    handle_str = handle["handle"] if isinstance(handle, dict) else str(handle)
+    info_file = p.state_dir / f"{handle_str}.json"
+
+    timeout = clamp_timeout(timeout_s)
+    start_mono = time.monotonic()
+
+    while time.monotonic() - start_mono <= min(float(timeout), WAIT_APPEAR_S):
+        if info_file.is_file():
+            break
+        time.sleep(0.05)
+    else:
+        if not info_file.is_file():
+            raise KeyError(f"unknown review handle: {handle_str}")
+
+    while time.monotonic() - start_mono <= timeout:
+        if not info_file.is_file():
+            time.sleep(0.05)
+            continue
+        try:
+            info = json.loads(info_file.read_text())
+        except (OSError, ValueError):
+            time.sleep(0.05)
+            continue
+
+        if info.get("status") in ("ok", "failed") and "lines" in info:
+            return {
+                "state": info["status"],
+                "exit_code": info.get("exit_code", 0),
+                "lines": info["lines"],
+                "handle": handle_str,
+                "plan": info.get("plan"),
+            }
+
+        pid = info.get("pid")
+        if pid:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                time.sleep(0.1)
+                try:
+                    info = json.loads(info_file.read_text())
+                    if "lines" in info:
+                        return {
+                            "state": info.get("status", "failed"),
+                            "exit_code": info.get("exit_code", 1),
+                            "lines": info["lines"],
+                            "handle": handle_str,
+                            "plan": info.get("plan"),
+                        }
+                except (OSError, ValueError):
+                    pass
+
+        time.sleep(0.1)
+
+    return {"state": "running"}
+
+
+async def plan_review_wait_async(
+    handle: str | dict,
+    timeout_s: Any = 60,
+    p: Paths | None = None,
+) -> dict[str, Any]:
+    p = p or paths()
+    handle_str = handle["handle"] if isinstance(handle, dict) else str(handle)
+    info_file = p.state_dir / f"{handle_str}.json"
+
+    timeout = clamp_timeout(timeout_s)
+    start_mono = time.monotonic()
+
+    while time.monotonic() - start_mono <= min(float(timeout), WAIT_APPEAR_S):
+        if info_file.is_file():
+            break
+        await asyncio.sleep(0.05)
+    else:
+        if not info_file.is_file():
+            raise KeyError(f"unknown review handle: {handle_str}")
+
+    while time.monotonic() - start_mono <= timeout:
+        if not info_file.is_file():
+            await asyncio.sleep(0.05)
+            continue
+        try:
+            info = json.loads(info_file.read_text())
+        except (OSError, ValueError):
+            await asyncio.sleep(0.05)
+            continue
+
+        if info.get("status") in ("ok", "failed") and "lines" in info:
+            return {
+                "state": info["status"],
+                "exit_code": info.get("exit_code", 0),
+                "lines": info["lines"],
+                "handle": handle_str,
+                "plan": info.get("plan"),
+            }
+
+        pid = info.get("pid")
+        if pid:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                await asyncio.sleep(0.1)
+                try:
+                    info = json.loads(info_file.read_text())
+                    if "lines" in info:
+                        return {
+                            "state": info.get("status", "failed"),
+                            "exit_code": info.get("exit_code", 1),
+                            "lines": info["lines"],
+                            "handle": handle_str,
+                            "plan": info.get("plan"),
+                        }
+                except (OSError, ValueError):
+                    pass
+
+        await asyncio.sleep(0.1)
+
+    return {"state": "running"}
+
+
+def plan_review(
+    plan_path: str,
+    task: str | None = None,
+    p: Paths | None = None,
+) -> dict[str, Any]:
+    p = p or paths()
+    plan_file, plan = validate_plan_args(plan_path=plan_path, p=p)
+    plan_dir = plan.path.parent
+    state_file = plan_dir / "state.json"
+
+    if not state_file.is_file():
+        raise UsageError("state.json not found")
+
+    from agenthub.planstate import load_or_init
+
+    state = load_or_init(plan)
+    done_tasks = [t for t in plan.tasks if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"]
+    if task is not None and not any(t.name == task for t in done_tasks):
+        raise UsageError(f"no done implement task named {task}")
+
+    cmd = [
+        sys.executable,
+        "-P",
+        "-m",
+        "agenthub",
+        "plan",
+        "review",
+        str(plan_file),
+    ]
+    if task is not None:
+        cmd.extend(["--task", task])
+
+    env = os.environ.copy()
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    if "PYTHONPATH" in env:
+        if repo_root not in env["PYTHONPATH"].split(os.pathsep):
+            env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{env['PYTHONPATH']}"
+    else:
+        env["PYTHONPATH"] = repo_root
+
+    p.state_dir.mkdir(parents=True, exist_ok=True)
+    handle = f"review-{plan.slug}-{time.time_ns()}"
+    stdout_file = p.state_dir / f"{handle}.stdout"
+    stderr_file = p.state_dir / f"{handle}.stderr"
+    info_file = p.state_dir / f"{handle}.json"
+
+    try:
+        stdout_fd = open(stdout_file, "w")
+        stderr_fd = open(stderr_file, "w")
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_fd,
+            stderr=stderr_fd,
+            start_new_session=True,
+            env=env,
+            cwd=p.state_dir,
+        )
+    except OSError as e:
+        return {"error": f"spawn failed: {e}", "handle": handle}
+
+    info = {
+        "handle": handle,
+        "plan": plan.slug,
+        "pid": proc.pid,
+        "status": "running",
+        "stdout": str(stdout_file),
+        "stderr": str(stderr_file),
+    }
+    info_file.write_text(json.dumps(info))
+
+    def _wait_and_record():
+        try:
+            proc.wait()
+        finally:
+            try:
+                stdout_fd.close()
+            except OSError:
+                pass
+            try:
+                stderr_fd.close()
+            except OSError:
+                pass
+
+        lines = []
+        if stdout_file.is_file():
+            try:
+                lines = [line.strip() for line in stdout_file.read_text(errors="replace").splitlines() if line.strip()]
+            except OSError:
+                pass
+
+        err_text = ""
+        if stderr_file.is_file():
+            try:
+                err_text = stderr_file.read_text(errors="replace").strip()
+            except OSError:
+                pass
+
+        updated_info = {
+            "handle": handle,
+            "plan": plan.slug,
+            "pid": proc.pid,
+            "status": "ok" if proc.returncode == 0 else "failed",
+            "exit_code": proc.returncode,
+            "lines": lines,
+            "stderr": err_text,
+        }
+        try:
+            info_file.write_text(json.dumps(updated_info))
+        except OSError:
+            pass
+
+    threading.Thread(target=_wait_and_record, daemon=True).start()
+
+    return {"handle": handle, "plan": plan.slug, "runner_pid": proc.pid}
+
+
+def plan_merge(
+    plan_path: str,
+    into: str | None = None,
+    p: Paths | None = None,
+) -> dict[str, Any]:
+    p = p or paths()
+    plan_file, plan = validate_plan_args(plan_path=plan_path, p=p)
+    plan_dir = plan.path.parent
+    state_file = plan_dir / "state.json"
+
+    if not state_file.is_file():
+        raise UsageError("state.json not found")
+
+    from agenthub.planrun import merge_order, merge_target_problem, merge_task
+    from agenthub.planstate import load_or_init
+
+    state = load_or_init(plan)
+    target = into or plan.base
+    tasks = [t for t in merge_order(plan) if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"]
+    if not tasks:
+        return {"merged": [], "stopped_at": None}
+
+    try:
+        problem = merge_target_problem(plan.repo, target)
+    except guards.GuardError as e:
+        raise UsageError(str(e)) from None
+
+    if problem:
+        raise UsageError(problem)
+
+    jobs = list_jobs(p, ALL_JOBS)
+    merged: list[str] = []
+    stopped_at: dict[str, Any] | None = None
+
+    for task in tasks:
+        result = merge_task(plan, task, state.task(task.name), target, jobs)
+        if result["status"] == "merged":
+            merged.append(task.name)
+        elif result["status"] == "already-merged":
+            merged.append(task.name)
+        elif result["status"] == "not-ready":
+            stopped_at = {
+                "task": task.name,
+                "status": "not-ready",
+                "problems": result.get("problems", []),
+                "reason": result.get("reason", ""),
+            }
+            break
+        else:
+            stopped_at = {
+                "task": task.name,
+                "status": result.get("status", "failed"),
+                "problems": result.get("problems", []),
+                "reason": result.get("reason", ""),
+            }
+            break
+
+    return {"merged": merged, "stopped_at": stopped_at}
+
+
+def plan_wait(
+    plan_path: str | None = None,
+    timeout_s: Any = 60,
+    handle: str | None = None,
+    p: Paths | None = None,
+) -> dict[str, Any]:
+    p = p or paths()
+    if handle is not None:
+        return plan_review_wait(handle=handle, timeout_s=timeout_s, p=p)
+    if plan_path is not None and _is_review_handle(plan_path, p):
+        return plan_review_wait(handle=plan_path, timeout_s=timeout_s, p=p)
+    if not plan_path:
+        raise UsageError("plan_path or handle is required")
+
     plan_file, plan = validate_plan_args(plan_path=plan_path, p=p)
     plan_dir = plan.path.parent
     state_file = plan_dir / "state.json"
@@ -695,11 +1017,19 @@ def plan_wait(
 
 
 async def plan_wait_async(
-    plan_path: str,
+    plan_path: str | None = None,
     timeout_s: Any = 60,
+    handle: str | None = None,
     p: Paths | None = None,
 ) -> dict[str, Any]:
     p = p or paths()
+    if handle is not None:
+        return await plan_review_wait_async(handle=handle, timeout_s=timeout_s, p=p)
+    if plan_path is not None and _is_review_handle(plan_path, p):
+        return await plan_review_wait_async(handle=plan_path, timeout_s=timeout_s, p=p)
+    if not plan_path:
+        raise UsageError("plan_path or handle is required")
+
     plan_file, plan = validate_plan_args(plan_path=plan_path, p=p)
     plan_dir = plan.path.parent
     state_file = plan_dir / "state.json"
@@ -837,11 +1167,30 @@ def build_server() -> "MCPServer":
 
     @server.tool(
         name="plan_wait",
-        description="Wait for a plan to finish, bounded by timeout_s (at most 300s)",
+        description="Wait for a plan or review to finish, bounded by timeout_s (at most 300s)",
         annotations=ToolAnnotations(readOnlyHint=True),
     )
-    async def plan_wait_tool(plan_path: str, timeout_s: int = 60) -> dict[str, Any]:
-        return await plan_wait_async(plan_path=plan_path, timeout_s=timeout_s)
+    async def plan_wait_tool(
+        plan_path: str | None = None,
+        handle: str | None = None,
+        timeout_s: int = 60,
+    ) -> dict[str, Any]:
+        return await plan_wait_async(plan_path=plan_path, handle=handle, timeout_s=timeout_s)
+
+    @server.tool(
+        name="plan_review",
+        description="Review done tasks of a plan detached, returning a review handle",
+    )
+    def plan_review_tool(plan_path: str, task: str | None = None) -> dict[str, Any]:
+        return plan_review(plan_path=plan_path, task=task)
+
+    @server.tool(
+        name="plan_merge",
+        description="Merge ready tasks of a plan in dependency order",
+        annotations=ToolAnnotations(destructiveHint=True),
+    )
+    def plan_merge_tool(plan_path: str, into: str | None = None) -> dict[str, Any]:
+        return plan_merge(plan_path=plan_path, into=into)
 
     return server
 

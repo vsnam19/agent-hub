@@ -20,6 +20,8 @@ from agenthub.mcpserver import (
     clamp_timeout,
     gate_start,
     jobs_data,
+    plan_merge,
+    plan_review,
     plan_run,
     plan_status,
     plan_wait,
@@ -33,7 +35,7 @@ from agenthub.mcpserver import (
 )
 from agenthub.plan import PlanError
 from tests.gitrepo import make_repo
-from tests.test_plan_cli import make_plan_file, run_cli_plan
+from tests.test_plan_cli import fake_review, make_gated_plan_run, make_plan_file, run_cli_plan
 
 BRIEF = "## Input\n\nfoo\n\n## Expected output\n\nbar\n"
 
@@ -142,6 +144,8 @@ def test_server_lists_tools(env_sandbox):
         "plan_run",
         "plan_status",
         "plan_wait",
+        "plan_review",
+        "plan_merge",
     }
     for name in ["pool", "jobs", "show_job", "wait_job", "ready", "plan_status", "plan_wait"]:
         tool = tool_map[name]
@@ -150,6 +154,9 @@ def test_server_lists_tools(env_sandbox):
     assert tool_map["run_job"].annotations is None or tool_map["run_job"].annotations.read_only_hint is not True
     assert tool_map["gate_start"].annotations is None or tool_map["gate_start"].annotations.read_only_hint is not True
     assert tool_map["plan_run"].annotations is None or tool_map["plan_run"].annotations.read_only_hint is not True
+    assert tool_map["plan_review"].annotations is None or tool_map["plan_review"].annotations.read_only_hint is not True
+    assert tool_map["plan_merge"].annotations is not None
+    assert tool_map["plan_merge"].annotations.destructive_hint is True
 
     pool_res = asyncio.run(server.call_tool("pool", {}))
     assert not pool_res.is_error
@@ -1320,3 +1327,111 @@ def test_plan_wait_tool_does_not_block_event_loop(env_sandbox, repo, tmp_path, m
             os.kill(runner_pid, 9)
         except OSError:
             pass
+
+
+def test_plan_review_tool_returns_handle(env_sandbox, tmp_path):
+    with pytest.raises(UsageError):
+        plan_review("")
+
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+
+    with pytest.raises(UsageError, match="no done implement task named nope"):
+        plan_review(str(plan_file), task="nope")
+
+    res = plan_review(str(plan_file))
+    assert "handle" in res
+    handle = res["handle"]
+    assert isinstance(handle, str)
+    assert len(handle) > 0
+    assert "plan" in res
+    assert res["plan"] == "plan-1"
+
+    wait_res = plan_wait(handle, timeout_s=30)
+    assert "lines" in wait_res
+    assert len(wait_res["lines"]) == 2
+    for line in wait_res["lines"]:
+        assert "gate=" in line and "review=" in line and "job=" in line
+
+    server = build_server()
+    tool_res = asyncio.run(server.call_tool("plan_review", {"plan_path": str(plan_file), "task": "t1"}))
+    assert not tool_res.is_error
+    data = json.loads(tool_res.content[0].text)
+    assert "handle" in data
+    wait_data = asyncio.run(server.call_tool("plan_wait", {"handle": data["handle"], "timeout_s": 30}))
+    assert not wait_data.is_error
+    wdata = json.loads(wait_data.content[0].text)
+    assert "lines" in wdata
+    assert len(wdata["lines"]) == 1
+    assert "t1" in wdata["lines"][0]
+
+
+def test_plan_merge_tool_refuses_dirty_checkout(env_sandbox, tmp_path, monkeypatch, capsys):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    fake_review(monkeypatch, "approve")
+    assert main(["plan", "review", str(plan_file)]) == 0
+    capsys.readouterr()
+    repo = tmp_path / "repo"
+    head_before = subprocess.run(
+        ["git", "rev-parse", "master"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    (repo / "stray.txt").write_text("uncommitted\n")
+
+    with pytest.raises(UsageError, match="main checkout is not clean"):
+        plan_merge(str(plan_file))
+
+    head_after = subprocess.run(
+        ["git", "rev-parse", "master"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert head_before == head_after
+
+
+def test_plan_merge_tool_is_destructive_and_merges_ready(env_sandbox, tmp_path, monkeypatch, capsys):
+    server = build_server()
+    tools = asyncio.run(server.list_tools())
+    tool_map = {t.name: t for t in tools}
+    assert tool_map["plan_merge"].annotations is not None
+    assert tool_map["plan_merge"].annotations.destructive_hint is True
+
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    t2_file = Path(state["tasks"]["t2"]["worktree"]) / "t2.txt"
+    t2_file.write_text("t2 work\n")
+    subprocess.run(["git", "add", "t2.txt"], cwd=t2_file.parent, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "t2 work"], cwd=t2_file.parent, check=True)
+    fake_review(monkeypatch, "approve")
+    assert main(["plan", "review", str(plan_file)]) == 0
+    capsys.readouterr()
+    repo = tmp_path / "repo"
+
+    res = plan_merge(str(plan_file))
+    assert res["merged"] == ["t1", "t2"]
+    assert res["stopped_at"] is None
+
+    log_res = subprocess.run(
+        ["git", "log", "--format=%s", "-n", "2"], cwd=repo, capture_output=True, text=True, check=True
+    )
+    subjects = log_res.stdout.splitlines()
+    assert len(subjects) == 2
+    assert "Merge orch/plan-1/t2" in subjects[0]
+    assert "Merge orch/plan-1/t1" in subjects[1]
+    assert (repo / "agent_wrote.txt").is_file()
+    assert (repo / "t2.txt").is_file()
+
+    for name in ("t1", "t2"):
+        assert not Path(state["tasks"][name]["worktree"]).exists()
+        assert subprocess.run(["git", "show-ref", f"refs/heads/orch/plan-1/{name}"], cwd=repo).returncode != 0
+
+    p2 = tmp_path / "p2"
+    p2.mkdir()
+    plan_file2, state2 = make_gated_plan_run(env_sandbox, p2)
+    fake_review(monkeypatch, "approve")
+    assert main(["plan", "review", str(plan_file2)]) == 0
+    capsys.readouterr()
+    t1_worktree = state2["tasks"]["t1"]["worktree"]
+    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "after review"], cwd=t1_worktree, check=True)
+
+    res2 = plan_merge(str(plan_file2))
+    assert res2["merged"] == []
+    assert res2["stopped_at"] is not None
+    assert res2["stopped_at"]["task"] == "t1"
+    assert res2["stopped_at"]["status"] == "not-ready"
+    assert len(res2["stopped_at"]["problems"]) > 0
