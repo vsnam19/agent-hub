@@ -1,0 +1,10 @@
+title = "report subcommand"
+paths_allowed = [
+  "include/minilib/report.hpp",
+  "src/report.cpp",
+  "tests/test_report.cpp",
+  "src/cli.cpp",
+  "tests/test_cli.cpp",
+  "CMakeLists.txt",
+]
+visible_tests = []

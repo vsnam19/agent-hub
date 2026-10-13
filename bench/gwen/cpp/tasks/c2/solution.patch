@@ -1,0 +1,106 @@
+diff --git a/include/minilib/textstats.hpp b/include/minilib/textstats.hpp
+index cfaa1a8..fcf6e5a 100644
+--- a/include/minilib/textstats.hpp
++++ b/include/minilib/textstats.hpp
+@@ -3,6 +3,8 @@
+ #include <cstddef>
+ #include <map>
+ #include <string>
++#include <utility>
++#include <vector>
+ 
+ namespace minilib {
+ 
+@@ -12,4 +14,7 @@ std::size_t word_count(const std::string& text);
+ // How often each character occurs.
+ std::map<char, int> char_freq(const std::string& text);
+ 
++// The k most frequent words (lower-cased runs of [a-z0-9']), by count descending, then word ascending.
++std::vector<std::pair<std::string, int>> top_words(const std::string& text, int k);
++
+ }  // namespace minilib
+diff --git a/src/textstats.cpp b/src/textstats.cpp
+index 257eb5d..a080953 100644
+--- a/src/textstats.cpp
++++ b/src/textstats.cpp
+@@ -1,5 +1,6 @@
+ #include "minilib/textstats.hpp"
+ 
++#include <algorithm>
+ #include <sstream>
+ 
+ namespace minilib {
+@@ -22,4 +23,35 @@ std::map<char, int> char_freq(const std::string& text) {
+     return freq;
+ }
+ 
++std::vector<std::pair<std::string, int>> top_words(const std::string& text, int k) {
++    if (k <= 0) {
++        return {};
++    }
++    std::map<std::string, int> counts;
++    std::string word;
++    auto flush = [&]() {
++        if (!word.empty()) {
++            ++counts[word];
++            word.clear();
++        }
++    };
++    for (char c : text) {
++        if (c >= 'A' && c <= 'Z') {
++            c = static_cast<char>(c - 'A' + 'a');
++        }
++        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '\'') {
++            word += c;
++        } else {
++            flush();
++        }
++    }
++    flush();
++    std::vector<std::pair<std::string, int>> ranked(counts.begin(), counts.end());
++    std::stable_sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
++    if (ranked.size() > static_cast<std::size_t>(k)) {
++        ranked.resize(static_cast<std::size_t>(k));
++    }
++    return ranked;
++}
++
+ }  // namespace minilib
+diff --git a/tests/test_textstats.cpp b/tests/test_textstats.cpp
+index 22602ce..f3b9b63 100644
+--- a/tests/test_textstats.cpp
++++ b/tests/test_textstats.cpp
+@@ -2,10 +2,13 @@
+ 
+ #include <map>
+ #include <string>
++#include <utility>
++#include <vector>
+ 
+ #include "minilib/textstats.hpp"
+ 
+ using minilib::char_freq;
++using minilib::top_words;
+ using minilib::word_count;
+ 
+ TEST(TextStats, CountsWords) {
+@@ -21,3 +24,19 @@ TEST(TextStats, CharFreq) {
+     const std::map<char, int> expected = {{'a', 2}, {'b', 1}};
+     EXPECT_EQ(char_freq("aba"), expected);
+ }
++
++using Ranked = std::vector<std::pair<std::string, int>>;
++
++TEST(TextStats, TopWordsRanksByCountThenWord) {
++    EXPECT_EQ(top_words("b a b c a b", 2), (Ranked{{"b", 3}, {"a", 2}}));
++    EXPECT_EQ(top_words("pear apple fig", 3), (Ranked{{"apple", 1}, {"fig", 1}, {"pear", 1}}));
++}
++
++TEST(TextStats, TopWordsLowerCasesAndSplitsOnPunctuation) {
++    EXPECT_EQ(top_words("The the, THE! it's", 5), (Ranked{{"the", 3}, {"it's", 1}}));
++}
++
++TEST(TextStats, TopWordsNonPositiveKIsEmpty) {
++    EXPECT_TRUE(top_words("a b", 0).empty());
++    EXPECT_TRUE(top_words("a b", -1).empty());
++}

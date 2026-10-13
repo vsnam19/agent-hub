@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from bench.gwen.tasks import FIXTURE_DIR, install_hidden, load_tasks, prepare
+from bench.gwen.tasks import FIXTURE_DIR, Suite, install_hidden, load_tasks, prepare
 
 TASK_IDS = ["t1", "t2", "t3", "t4", "t5", "t6"]
 
@@ -28,7 +28,7 @@ def _apply(repo, patch):
 
 
 def test_load_tasks_has_six():
-    assert sorted(load_tasks()) == TASK_IDS
+    assert sorted(t for t, task in load_tasks().items() if task.suite == "python") == TASK_IDS
 
 
 def test_fixture_tests_and_lint_pass(tmp_path):
@@ -88,3 +88,16 @@ def test_prepare_does_not_touch_fixture(tmp_path):
     prepare(load_tasks()["t1"], tmp_path / "x")
     assert sorted(p.relative_to(FIXTURE_DIR) for p in FIXTURE_DIR.rglob("*")) == before
     assert not (FIXTURE_DIR / ".git").exists()
+
+
+def test_prepare_skips_build_output(tmp_path):
+    fixture = tmp_path / "fixture"
+    (fixture / "build").mkdir(parents=True)
+    (fixture / "build" / "CMakeCache.txt").write_text("CMAKE_HOME_DIRECTORY:INTERNAL=.\n", encoding="utf-8")
+    (fixture / "src").mkdir()
+    (fixture / "src" / "x.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+    suite = Suite(name="temp", fixture=fixture, tasks_dir=tmp_path, gate={})
+    repo = tmp_path / "repo"
+    prepare(load_tasks()["t2"], repo, suite=suite)  # t2 has an empty setup patch
+    assert (repo / "src" / "x.cpp").is_file()
+    assert not (repo / "build").exists()

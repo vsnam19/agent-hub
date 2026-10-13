@@ -75,3 +75,28 @@ def test_render_uses_real_newlines():
     lines = out.splitlines()
     assert len(lines) > 3
     assert any(line.startswith("| Harness") for line in lines)
+
+
+def test_report_lists_cpp_tasks_by_suite():
+    base = {"model": "m", "harness": "h", "wall_s": 10, "usage": None, "mem": None, "infra_error": False}
+    records = [
+        {**base, "task": "t2", "pass": True},
+        {**base, "task": "t10", "pass": False},
+        {**base, "task": "t1", "pass": True},
+    ]
+    records += [{**base, "suite": "cpp", "task": f"c{i}", "pass": True} for i in range(1, 7)]
+
+    out = render(records)
+
+    python_part = out.split("### Suite: python")[1]
+    cpp_part = out.split("### Suite: cpp")[1].split("### Suite: python")[0]
+    # python: records without a suite; task columns in natural order (t2 before t10)
+    python_header = next(line for line in python_part.splitlines() if line.startswith("| Harness"))
+    assert [c.strip() for c in python_header.strip("|").split("|")[:4]] == ["Harness", "t1", "t2", "t10"]
+    # cpp: all six tasks as their own columns, not dropped
+    cpp_header = next(line for line in cpp_part.splitlines() if line.startswith("| Harness"))
+    assert [c.strip() for c in cpp_header.strip("|").split("|")[:7]] == ["Harness", "c1", "c2", "c3", "c4", "c5", "c6"]
+    cpp_row = next(line for line in cpp_part.splitlines() if line.startswith("| h "))
+    assert cpp_row.split("|")[1:7] == [" h ", " 1/1 ", " 1/1 ", " 1/1 ", " 1/1 ", " 1/1 "]
+    assert "t1" not in cpp_part
+    assert "c1" not in python_part

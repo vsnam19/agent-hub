@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -140,6 +141,7 @@ def test_fix_rounds_counted_per_branch(tmp_path):
 
     assert extract.fix_rounds["feat-one"] == {
         "fix_briefs": 2,
+        "fix_brief_titles": ["# Brief: hub review round 1 fixes", "# Brief: hub review round 2 fix — x"],
         "reviews": 2,
         "verdicts": ["request-changes", "approve"],
     }
@@ -460,3 +462,501 @@ def test_groups_by_severity_and_module(tmp_path):
     md = skillmine.render_md(extract)
     assert "4× high in tests/bench (2 branches)" in md
     assert "Alone" not in md
+
+
+def test_category_redacts_case_sensitive_secrets(tmp_path):
+    aws = "AKIAABCDEFGHIJKLMNOP"
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4"
+    pem = "-----BEGIN RSA PRIVATE KEY----- MIIEowIBAAKCAQEAsecretbody -----END RSA PRIVATE KEY-----"
+    claims = [f"leaks {aws} here", f"token {jwt} here", f"key {pem} here"]
+    reply = review_reply(*[f"- high — a.py:{i} — {c}" for i, c in enumerate(claims)])
+    make_job(tmp_path / "state", "20261010-100000-review-aaaa", reply=reply)
+
+    extract = run_mine(tmp_path)
+    out = tmp_path / "out"
+    skillmine.write(extract, out)
+
+    assert len(extract.findings) == 3
+    for secret in (aws, jwt, "MIIEowIBAAKCAQEAsecretbody", aws.lower(), jwt.lower()):
+        assert all(secret not in f["category"] for f in extract.findings)
+        for name in ("extract.json", "metrics.json", "extract.md"):
+            assert secret not in (out / name).read_text()
+
+
+def test_home_in_file_url_and_brackets_redacted():
+    assert skillmine.redact("see file:///home/alice/x.py") == "see file://~/x.py"
+    assert skillmine.redact("paths [/home/bob/y] done") == "paths [~/y] done"
+    assert skillmine.redact("at https://example.org/home/carol/z") == "at https://example.org/home/carol/z"
+
+
+def test_non_dict_tool_input_skipped(tmp_path):
+    root = tmp_path / "claude"
+    records = []
+    for i, bad in enumerate(["agent-hub run x", ["agent-hub run x"], None, 7]):
+        block = {"type": "tool_use", "name": "Bash", "input": bad}
+        records.append(
+            {
+                "type": "assistant",
+                "message": {"content": [block]},
+                "timestamp": RECENT.isoformat(),
+                "sessionId": f"s{i}",
+            }
+        )
+    records += [bash_msg("agent-hub run a && agent-hub review b && agent-hub merge c")]
+    write_transcript(root, records)
+
+    extract = run_mine(tmp_path)
+
+    assert extract.agenthub_commands == {"run > review > merge": {"count": 1, "sessions": 1}}
+
+
+def test_fix_brief_titles_extracted(tmp_path):
+    state = tmp_path / "state"
+    make_job(
+        state,
+        "20261010-100000-implement-aaaa",
+        kind="implement",
+        brief="# Brief: round 1: fix things in /home/alice/repo\n",
+    )
+    make_job(
+        state,
+        "20261010-110000-implement-bbbb",
+        kind="implement",
+        started=RECENT + timedelta(hours=1),
+        brief="# Brief: other\n",
+    )
+    make_job(state, "20261010-120000-review-cccc", started=RECENT + timedelta(hours=2), reply=review_reply())
+    make_job(state, "20261010-130000-review-dddd", started=RECENT + timedelta(hours=3), reply=review_reply())
+
+    extract = run_mine(tmp_path)
+    out = tmp_path / "out"
+    summary = skillmine.write(extract, out)
+
+    entry = extract.fix_rounds["feat-one"]
+    assert entry["fix_brief_titles"] == ["# Brief: round 1: fix things in ~/repo"]
+    assert all(len(t) <= 300 for t in entry["fix_brief_titles"])
+    assert "round 1: fix things in ~/repo" in summary
+    assert "alice" not in (out / "extract.json").read_text()
+
+
+def test_bold_and_alternate_severity_scales(tmp_path):
+    reply = review_reply(
+        "- **high** — agenthub/a.py:1 — Bold",
+        "- critical — agenthub/b.py — Critical",
+        "- **Important** - agenthub/c.py - Important",
+        "- minor — agenthub/d.py — Minor",
+    )
+    make_job(tmp_path / "state", "20261010-100000-review-aaaa", reply=reply)
+
+    findings = run_mine(tmp_path).findings
+
+    assert [(f["severity"], f["file"]) for f in findings] == [
+        ("high", "agenthub/a.py"),
+        ("high", "agenthub/b.py"),
+        ("medium", "agenthub/c.py"),
+        ("low", "agenthub/d.py"),
+    ]
+
+
+def test_unparsed_findings_counted(tmp_path):
+    reply = review_reply(
+        "- high — agenthub/a.py — Fine",
+        "- something odd without severity",
+        "- high — no separator after file",
+        "not a bullet line",
+    )
+    make_job(tmp_path / "state", "20261010-100000-review-aaaa", reply=reply)
+
+    extract = run_mine(tmp_path)
+
+    assert len(extract.findings) == 1
+    assert extract.unparsed_findings == 2
+    assert skillmine.metrics(extract)["unparsed_findings"] == 2
+
+
+def test_redact_colon_and_flag_passwords():
+    cases = [
+        ("password: hunter2hunter2", "hunter2hunter2"),
+        ("db_password : 'two words'", "two words"),
+        ("run --password hunter2hunter2 --verbose", "hunter2hunter2"),
+        ("--api-token abcd1234", "abcd1234"),
+        ('{"client_secret": "s3cr3tvalue"}', "s3cr3tvalue"),
+        ('{"PWD": "pwdvalue1"}', "pwdvalue1"),
+        ("credential=credvalue1", "credvalue1"),
+        ("user_credentials: credvalue2", "credvalue2"),
+    ]
+    for text, secret in cases:
+        assert secret not in skillmine.redact(text), text
+    assert skillmine.redact("--password --verbose") == "--password --verbose"
+    assert skillmine.redact("run --password hunter2 --verbose") == "run --password <redacted> --verbose"
+
+
+def test_redact_macos_and_root_home():
+    assert skillmine.redact("see /Users/alice/work/x.py") == "see ~/work/x.py"
+    assert skillmine.redact("cd /root/work and p=/root") == "cd ~/work and p=~"
+    assert skillmine.redact("/rootfs/x and https://e.org/Users/alice/x") == "/rootfs/x and https://e.org/Users/alice/x"
+
+
+def test_long_paths_not_redacted():
+    path = "agenthub/superpowers/specs/phase1/design/notes/overview2"
+    assert skillmine.redact(f"see {path}") == f"see {path}"
+    blob = "QUJDREVGR0hJSktMTU5P/UFFSU1RVVldYWVowMTIzNDU2Nzg5abcdefghijklmnop"
+    assert skillmine.redact(f"blob {blob}") == "blob <redacted>"
+    assert skillmine.redact("blob aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE3fG5hI7k/aB3dE5gH") == "blob <redacted>"
+
+
+def test_redact_basic_auth():
+    out = skillmine.redact("Authorization: Basic dXNlcjpwYXNzd29yZA==")
+    assert "dXNlcjpwYXNzd29yZA" not in out
+    assert skillmine.redact("curl -H 'Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=='").count("QWxhZGRpbjpv") == 0
+    assert skillmine.redact("Basic usage of Basic Authentication") == "Basic usage of Basic Authentication"
+
+
+def test_redact_pass_suffix_names():
+    cases = [
+        ("DB_PASS=hunter2x", "hunter2x"),
+        ("ADMIN_PASS: s3cretvalue", "s3cretvalue"),
+        ("MYSQL_PWD=abc", "abc"),
+        ("export DB_PASS hunter2x", "hunter2x"),
+        ("session_id=abcd", "abcd"),
+        ("cookie: sid=zz", "zz"),
+        ("salt=xy1", "xy1"),
+        ("signature: a1b2", "a1b2"),
+    ]
+    for text, secret in cases:
+        out = skillmine.redact(text)
+        assert secret not in out, text
+        assert "<redacted>" in out, text
+
+
+def test_redact_b64_after_plain_equals():
+    blob = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldY"
+    out = skillmine.redact(f"data={blob} and x:{blob}")
+    assert blob not in out
+    assert out == "data=<redacted> and x:<redacted>"
+
+
+def test_redact_base64url():
+    blob = "dXNlcjpwYXNzLXdvcmQ_YWJjZGVmZ2hpamts-bW5vcA"
+    out = skillmine.redact(f"value {blob} end")
+    assert blob not in out
+    assert out == "value <redacted> end"
+
+
+REAL_FALSE_POSITIVES = [
+    "**Documentation**",
+    "..._foreign_repo_refused_exit_3",
+    "./plugins/token-audit",
+    ".git/worktrees/.../index.lock",
+    "///path/to/cli.py#L42",
+    "/accepted-touched.jsonl",
+    "/plans/*/plan.json",
+    "/tmp/.../wt-slugify",
+    "0005_drop_search_text_index.py",
+    "ASSUMED_generic_*.txt",
+    "Adapter.preflight",
+    "AgyAdapter.classify",
+    "Evidence.balance_after_minor",
+    "Extract.review_failures",
+    "FileNotFoundError",
+    "GenericSmsAdapter",
+    "HubConfig.marketplace_registered",
+    "LEARNED_PLUGINS.",
+    "LoadsTheDataFile",
+    "PrivacyInfo.xcprivacy",
+    "accepted-touched.jsonl",
+    "agent-hub@agent-plugins",
+    "agenthub.agents.claude._now",
+]
+
+
+def test_entropy_rule_spares_paths_identifiers_and_job_ids():
+    keep = [
+        "agenthub/skillmine.py",
+        "orch/phased/skills-mine",
+        "20261012-082712-review-8e6a",
+        "test_redact_basic_auth",
+        "CMAKE_COMPILE_WARNING_AS_ERROR",
+        "docs/superpowers/specs/design.md",
+        "RedactionChokePointHandler",
+    ]
+    for text in keep:
+        assert skillmine.redact(f"see {text} now") == f"see {text} now", text
+    assert skillmine.redact("k Xk9fQ2mP7vLz4TnR8wYb") == "k <redacted>"
+    assert skillmine.redact("aaaaaaaaaaaaaaaaaaaaaaaa1") == "aaaaaaaaaaaaaaaaaaaaaaaa1"
+
+
+def test_real_false_positives_stay():
+    keep = [
+        *REAL_FALSE_POSITIVES,
+        "20261011-140234-haiku-impl-7a9a",
+        "20261011-190458-implement-hard-f179",
+        "docs/superpowers/plans/2026-10-11-model-routing.md",
+        "docs/superpowers/specs/2026-10-12-phase-b-skill-hub-design.md",
+        "docs/superpowers/specs/2026-10-12-phase-b-skill-hub-design.md.",
+        "FastAPI+SQLite+React",
+        "test_hash_token_is_sha256_hex",
+        "test_new_id_is_uuid4_string",
+        "test_no_merge_outside_24h_or_different_account",
+        "test_orders_exit_1_on_bare_line",
+        "test_parse_multipart_and_base64",
+        "test_payload_codec_valid_utf8_is_stored_verbatim",
+        "test_plan_wait_no_state_exit_2",
+        "test_python_suite_loads_t1_to_t6",
+        "test_redact_base64url",
+        "test_uploaded_file_unique_per_tenant_sha256",
+        "✔Validationpassed",
+    ]
+    for text in keep:
+        assert skillmine.redact(f"see {text} now") == f"see {text} now", text
+    assert "<redacted>" in skillmine.redact("AKIAIOSFODNN7EXAMPLE")
+    assert skillmine.redact("k aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE3fG5hI7kLm") == "k <redacted>"
+
+
+def test_real_secrets_still_redacted_after_false_positive_rules():
+    assert skillmine.redact("see AKIAIOSFODNN7EXAMPLE now") == "see <redacted> now"
+    assert skillmine.redact("see cfg.aB3dE5gH7jK9mN1pQ3sT5vW7y now") == "see cfg.<redacted> now"
+    assert skillmine.redact("auth Basic dXNlcjpodW50ZXIy") == "auth Basic <redacted>"
+
+
+def test_random_snake_chunks_redacted():
+    assert skillmine.redact("see k3f9x2m8q7z1_p4w6n0b5v8c2_a9d7e now") == "see <redacted> now"
+    assert skillmine.redact("see ab3k9_zq7w2x8_m5n1p4r6t9 now") == "see <redacted> now"
+    for text in ("test_new_id_is_uuid4_string", "test_python_suite_loads_t1_to_t6", "test_redact_base64url"):
+        assert skillmine.redact(f"see {text} now") == f"see {text} now", text
+
+
+def test_read_reply_uses_reply_path_and_numeric_order(tmp_path):
+    job = tmp_path / "job"
+    for name, body in (("2-a-x", "two"), ("10-a-x", "ten"), ("9-a-x", "nine")):
+        (job / "attempts" / name).mkdir(parents=True)
+        (job / "attempts" / name / "reply.md").write_text(body)
+
+    assert skillmine._read_reply(job, {}) == "ten"
+    assert skillmine._read_reply(job, {"reply_path": str(job / "attempts" / "2-a-x" / "reply.md")}) == "two"
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside")
+    assert skillmine._read_reply(job, {"reply_path": str(outside)}) == "ten"
+    assert skillmine._read_reply(job, {"reply_path": str(job / "missing.md")}) == "ten"
+
+
+def test_group_ties_by_severity_rank():
+    findings = [
+        {"severity": sev, "file": f"{mod}/sub/x.py", "claim": sev, "branch": "b"}
+        for sev, mod in (("low", "aaa"), ("medium", "zzz"), ("high", "mmm"), ("high", "bbb"))
+    ]
+
+    groups = skillmine.group_findings(findings)
+
+    assert [(g["severity"], g["module"]) for g in groups] == [
+        ("high", "bbb/sub"),
+        ("high", "mmm/sub"),
+        ("medium", "zzz/sub"),
+        ("low", "aaa/sub"),
+    ]
+
+
+def test_secret_names_match_whole_parts():
+    secrets = [
+        ("DB_PASS=hunter2hunter2", "hunter2hunter2"),
+        ("api-key: hunter2hunter2", "hunter2hunter2"),
+        ("apiKey=hunter2hunter2", "hunter2hunter2"),
+        ("API_TOKEN=hunter2hunter2", "hunter2hunter2"),
+        ("passwd: hunter2hunter2", "hunter2hunter2"),
+        ("user_credentials: hunter2hunter2", "hunter2hunter2"),
+        ("sessionId=hunter2hunter2", "hunter2hunter2"),
+        ("Authorization: hunter2hunter2", "hunter2hunter2"),
+    ]
+    for text, secret in secrets:
+        out = skillmine.redact(text)
+        assert secret not in out, text
+        assert "<redacted>" in out, text
+    prose = [
+        "Design: the flag",
+        "author: alice",
+        "keyboard: layout",
+        "monkey=banana",
+        "signal: stop",
+        "passage: a corridor",
+    ]
+    for text in prose:
+        assert skillmine.redact(text) == text, text
+
+
+def test_glued_secret_names_redacted():
+    secrets = [
+        ("PGPASSWORD=hunter2hunter2", "hunter2hunter2"),
+        ("DBPASSWORD: hunter2hunter2", "hunter2hunter2"),
+        ("SECRETKEY=hunter2hunter2", "hunter2hunter2"),
+        ("adminpass=hunter2hunter2", "hunter2hunter2"),
+    ]
+    for text, secret in secrets:
+        out = skillmine.redact(text)
+        assert secret not in out, text
+        assert out.endswith("<redacted>"), text
+
+
+def test_url_credentials_redacted():
+    assert (
+        skillmine.redact("postgres://admin:s3cretpass@localhost:5432/app")
+        == "postgres://admin:<redacted>@localhost:5432/app"
+    )
+    assert skillmine.redact("redis://:pw12345@db:6379") == "redis://:<redacted>@db:6379"
+
+
+def test_url_password_with_at_and_slash():
+    out = skillmine.redact("postgres://admin:p@ss@db/app")
+    assert out == "postgres://admin:<redacted>@db/app"
+    assert "ss" not in out
+    out = skillmine.redact("postgres://u:a/b@h/x")
+    assert out == "postgres://u:<redacted>@h/x"
+    assert "a/b" not in out
+
+
+def test_url_creds_after_punctuation():
+    assert skillmine.redact("Cloning.https://u:pw12345@h/x") == "Cloning.https://u:<redacted>@h/x"
+    assert skillmine.redact("1.https://u:pw12345@h/x") == "1.https://u:<redacted>@h/x"
+    assert skillmine.redact("_https://u:pw12345@h/x") == "_https://u:<redacted>@h/x"
+    assert skillmine.redact("+https://u:pw12345@h/x") == "+https://u:<redacted>@h/x"
+    assert skillmine.redact("-https://u:pw12345@h/x") == "-https://u:<redacted>@h/x"
+
+
+def test_long_url_password_redacted():
+    secret = "s" * 300
+    out = skillmine.redact(f"postgres://admin:{secret}@db/app")
+    assert out == "postgres://admin:<redacted>@db/app"
+    assert secret not in out
+    out = skillmine.redact(f"postgres://admin:{secret}@db/app and postgres://u:short@h/x")
+    assert out == "postgres://admin:<redacted>@db/app and postgres://u:<redacted>@h/x"
+
+
+def test_mine_write_error_exit_2(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path / "state"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file, not a directory")
+    out = blocker / "out"
+
+    rc = main(["skills", "mine", "--out", str(out), "--transcripts", str(tmp_path / "claude"), "--days", "7"])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert err.startswith(f"agent-hub: cannot write {out}: "), err
+    assert "Traceback" not in err
+
+
+def test_mine_days_out_of_range_exit_2(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path / "state"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    for days in ("0", "1000000"):
+        argv = ["skills", "mine", "--out", str(tmp_path / "out"), "--transcripts", str(tmp_path / "claude")]
+        rc = main([*argv, "--days", days])
+
+        assert rc == 2, days
+        err = capsys.readouterr().err
+        assert err == "agent-hub: --days must be between 1 and 3650\n", err
+        assert "Traceback" not in err
+
+
+def test_command_key_collisions_summed(tmp_path):
+    first = "aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE3fG5hI7k"
+    second = "aX9kL2mN4pQ6rS8tV0wY1zA3bC5dE7fG9hJ1kL3"
+    records = [
+        bash_msg(f"agent-hub run && agent-hub {first} && agent-hub show", session="s1"),
+        bash_msg(f"agent-hub run && agent-hub {second} && agent-hub show", session="s2"),
+    ]
+    write_transcript(tmp_path / "claude", records)
+
+    commands = run_mine(tmp_path).agenthub_commands
+
+    assert commands == {"run > <redacted> > show": {"count": 2, "sessions": 2}}
+
+
+def test_repo_at_home_root_not_user_name(tmp_path):
+    state = tmp_path / "state"
+    reply = review_reply("- low — docs/a.md — Typo in heading")
+    home_job = make_job(state, "20261010-100000-review-aaaa", reply=reply, verdict="request-changes")
+    nested_job = make_job(state, "20261010-110000-review-bbbb", reply=reply, verdict="request-changes")
+    for job, repo in ((home_job, "/home/alice/.git"), (nested_job, "/home/alice/project/.git")):
+        result = json.loads((job / "result.json").read_text())
+        result["repo"] = repo
+        (job / "result.json").write_text(json.dumps(result))
+
+    repos = {f["job"]: f["repo"] for f in run_mine(tmp_path).findings}
+
+    assert repos == {"20261010-100000-review-aaaa": "~", "20261010-110000-review-bbbb": "project"}
+    assert "alice" not in json.dumps(repos)
+
+
+def test_branch_at_home_root_not_user_name(tmp_path):
+    state = tmp_path / "state"
+    reply = review_reply("- low — docs/a.md — Typo in heading")
+    make_job(state, "20261010-100000-review-aaaa", workdir="/home/alice", reply=reply, verdict="request-changes")
+    make_job(
+        state,
+        "20261010-110000-review-bbbb",
+        workdir="/home/alice/repo/.worktrees/feat",
+        reply=reply,
+        verdict="request-changes",
+    )
+
+    branches = {f["job"]: f["branch"] for f in run_mine(tmp_path).findings}
+
+    assert branches == {"20261010-100000-review-aaaa": "~", "20261010-110000-review-bbbb": "feat"}
+    assert "alice" not in json.dumps(branches)
+
+
+def test_session_uuid_kept_short(tmp_path):
+    uuid = "3f2a9c1e-7b4d-4e8a-9f10-2c5d6e7f8a9b"
+    records = [
+        user_msg("never edit the justfile", session=uuid),
+        user_msg("that is wrong", session=uuid),
+        user_msg("you must run lint", session="s1"),
+    ]
+    write_transcript(tmp_path / "claude", records)
+
+    corrections = run_mine(tmp_path).corrections
+
+    assert [c["session"] for c in corrections] == ["3f2a9c1e", "3f2a9c1e", "s1"]
+    assert uuid not in json.dumps(corrections)
+
+
+def _best_redact_time(text: str, runs: int = 2) -> float:
+    best = float("inf")
+    for _ in range(runs):
+        start = time.perf_counter()
+        skillmine.redact(text)
+        best = min(best, time.perf_counter() - start)
+    return best
+
+
+def _assert_linear(make_text) -> None:
+    # a ratio, not an absolute bound: 4x the input may take up to 6x as long (quadratic would take ~16x)
+    small = _best_redact_time(make_text(10000))
+    large = _best_redact_time(make_text(40000))
+    assert large <= 6 * small + 0.05
+
+
+def test_redact_scales_linearly():
+    for make_text in (
+        lambda n: "x" * n,
+        lambda n: "A" * n,
+        lambda n: "a." * (n // 2),
+        lambda n: "a://:" * (n // 5),
+    ):
+        _assert_linear(make_text)
+        assert skillmine.redact(make_text(10000)) == make_text(10000)
+
+
+def test_word_check_is_linear_on_long_capitals():
+    # the bare runs and their `Basic ` forms: only the latter reach the word check
+    makers = (
+        lambda n: "A" * (n // 2) + "b1",
+        lambda n: "ABCDEFGHIJ" * (n // 10) + "x",
+        lambda n: "Basic " + "A" * (n // 2) + "b1",
+        lambda n: "Basic " + "ABCDEFGHIJ" * (n // 10) + "x",
+    )
+    for make_text in makers:
+        _assert_linear(make_text)
+        assert skillmine.redact(make_text(10000))

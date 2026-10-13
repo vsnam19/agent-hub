@@ -3,11 +3,13 @@
 import fcntl
 import importlib.resources
 import json
+import math
 import re
 import shutil
 import string
 import subprocess
 import sys
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -17,6 +19,7 @@ from typing import NamedTuple
 from agenthub import skillmine
 
 PLUGINS = ("learned-worker", "learned-director")
+LEARNED_DIRS = tuple(f"plugins/{p}/" for p in PLUGINS)
 MANIFESTS = (".claude-plugin/plugin.json", ".codex-plugin/plugin.json", "plugin.json")
 MIN_FINDINGS = 3
 FIX_ROUNDS = 2
@@ -27,6 +30,8 @@ JOB_TIMEOUT = 2 * 60 * 60  # outer safety net; agent-hub enforces its own per-ro
 GATE_TIMEOUT = 30 * 60
 READY_TIMEOUT = 120
 INSTALL_TIMEOUT = 10 * 60
+CLAUDE_TIMEOUT = 120
+DRAFT_ROLE = "implement"  # drafts and fix rounds run on haiku (D-093)
 EXIT_STOPPED = 1
 EXIT_LOCKED = 3
 _VERSION = re.compile(r'("version"\s*:\s*")(\d+)\.(\d+)\.(\d+)(")')
@@ -63,7 +68,7 @@ class Config:
 @dataclass
 class Step:
     name: str
-    status: str  # ok | stopped | would | skipped
+    status: str  # ok | stopped | would | skipped | failed | warning
     detail: str = ""
 
 
@@ -150,6 +155,7 @@ def weekly(cfg: Config, now: datetime, runner: Runner, dry_run: bool) -> Report:
             return report
         run = _Run(cfg, now, runner, report)
         finished = False
+        crash = ""
         try:
             run.pipeline()
             finished = True
@@ -160,8 +166,15 @@ def weekly(cfg: Config, now: datetime, runner: Runner, dry_run: bool) -> Report:
             report.stop_reason = stop.reason
             report.exit_code = stop.code
             report.steps.append(Step("stop", "stopped", stop.reason))
+        except Exception as error:  # an unexpected failure still writes the report and the notification
+            report.outcome = f"crashed: {type(error).__name__}: {error}"
+            report.exit_code = EXIT_STOPPED
+            report.steps.append(Step("crash", "failed", "see crash.txt"))
+            crash = traceback.format_exc()
         run.out.mkdir(parents=True, exist_ok=True)
         (run.out / "report.md").write_text(report.render(), encoding="utf-8")
+        if crash:
+            (run.out / "crash.txt").write_text(crash, encoding="utf-8")
         if finished:
             (skills_dir / "last-run").write_text(now.isoformat() + "\n", encoding="utf-8")
         run.notify(report.one_line())
@@ -177,6 +190,7 @@ class _Run:
         self.branch = f"learned/{self.date}"
         self.wt = self.repo / ".worktrees" / f"learned-{self.date}"
         self.spent = 0.0
+        self.bumped: set[str] = set()
 
     # -- helpers -----------------------------------------------------------------------------------------------
 
@@ -226,7 +240,7 @@ class _Run:
             add(Step("stop", "would", "nothing to learn; advance last-run"))
             return
         add(Step("worktree", "would", f"{self.wt} on new branch {self.branch} from master"))
-        add(Step("draft", "would", "write the drafting brief; agent-hub run --role implement-hard"))
+        add(Step("draft", "would", f"write the drafting brief; agent-hub run --role {DRAFT_ROLE}"))
         add(Step("version", "would", "bump the patch version of each changed plugin in 3 manifests; commit"))
         add(Step("eval", "would", f"claude plugin eval per skill, ablation with-without, max ${self.cfg.max_cost_usd}"))
         add(Step("review", "would", f"gate, review, up to {FIX_ROUNDS} fix rounds, then ready"))
@@ -283,11 +297,25 @@ class _Run:
         if self.wt.exists():
             raise Stop(f"worktree {self.wt} already exists")
         self.git("worktree", "add", "-b", self.branch, str(self.wt), "master")
+        self.exclude_extract()
         learned = self.wt / ".agent-hub" / "learned"
         learned.mkdir(parents=True, exist_ok=True)
         for name in ("extract.json", "extract.md"):
             shutil.copy(self.out / name, learned / name)
         self.step("worktree", f"{self.wt} on {self.branch}")
+
+    def exclude_extract(self) -> None:
+        """Keep the extract copy out of commits whatever the skills repo's .gitignore says."""
+        found = Path(self.git("rev-parse", "--git-path", "info/exclude", cwd=self.wt).stdout.strip())
+        path = found if found.is_absolute() else self.wt / found
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        for pattern in (".agent-hub/learned/", ".worktrees/"):
+            if pattern not in text.splitlines():
+                if text and not text.endswith("\n"):
+                    text += "\n"
+                text += pattern + "\n"
+        path.write_text(text, encoding="utf-8")
 
     def existing_skills(self, plugin: str) -> str:
         found = sorted(p.name for p in (self.wt / "plugins" / plugin / "skills").glob("*") if p.is_dir())
@@ -308,12 +336,13 @@ class _Run:
         brief = self.out / "brief.md"
         brief.write_text(self.brief(), encoding="utf-8")
         proc = self.hub(
-            "run", "--role", "implement-hard", "--brief", str(brief), "-d", str(self.wt), "--json",
+            "run", "--role", DRAFT_ROLE, "--brief", str(brief), "-d", str(self.wt), "--json",
             timeout=JOB_TIMEOUT,
         )  # fmt: skip
         result = self.job("draft", proc)
         if result.get("status") != "ok":
             raise Stop(f"draft job {result.get('status')}: {result.get('error') or ''}".strip())
+        self.learned_only()
         self.report.proposals = [
             line.strip("-* ").strip() for line in self.reply(result).splitlines() if "MCP proposal:" in line
         ]
@@ -331,6 +360,12 @@ class _Run:
         other = self.git("ls-files", "--others", "--exclude-standard", cwd=self.wt).stdout.split("\n")
         return sorted({p for p in diff + other if p.strip()})
 
+    def learned_only(self) -> None:
+        """Stop when a job changed any path outside the learned plugins, committed or not."""
+        for path in self.changed("master"):
+            if not path.startswith(LEARNED_DIRS):
+                raise Stop(f"job changed {path} outside the learned plugins")
+
     def skills_of(self, paths: list[str]) -> list[tuple[str, str]]:
         found: set[tuple[str, str]] = set()
         for path in paths:
@@ -341,15 +376,29 @@ class _Run:
             if parts[2] == "skills":
                 found.add((plugin, parts[3]))
             elif parts[2] == "evals":
-                names = [p.name for p in (self.wt / "plugins" / plugin / "skills").glob("*") if p.is_dir()]
-                owners = [n for n in names if parts[3].startswith(n + "-")]
-                if owners:
-                    found.add((plugin, max(owners, key=len)))
+                owner = self.owner(plugin, parts[3])
+                if owner:
+                    found.add((plugin, owner))
         return sorted(found)
+
+    def owner(self, plugin: str, case: str) -> str | None:
+        """The longest skill name that the eval case directory name starts with, so review-loop-x is not review's."""
+        names = [p.name for p in (self.wt / "plugins" / plugin / "skills").glob("*") if p.is_dir()]
+        owners = [n for n in names if case.startswith(n + "-")]
+        return max(owners, key=len) if owners else None
+
+    def eval_cases(self, plugin: str, skill: str) -> list[str]:
+        evals = self.wt / "plugins" / plugin / "evals"
+        cases = sorted(p.name for p in evals.glob("*") if p.is_dir() and self.owner(plugin, p.name) == skill)
+        if not cases:
+            raise Stop(f"no eval cases for {skill}")
+        return cases
 
     def commit(self, message: str) -> None:
         self.git("add", "-A", "--", *(f"plugins/{p}" for p in PLUGINS), cwd=self.wt)
-        self.git("commit", "-m", message, cwd=self.wt)
+        # A fix job may have committed its own changes already; there is nothing to commit then.
+        if self.git("diff", "--cached", "--quiet", cwd=self.wt, check=False).rc:
+            self.git("commit", "-m", message, cwd=self.wt)
         left = self.git("status", "--porcelain", "-uall", cwd=self.wt).stdout.strip()
         if left:
             raise Stop(f"files outside the learned plugins changed: {left.splitlines()[0][3:]}")
@@ -359,14 +408,22 @@ class _Run:
         skills = self.skills_of(changed)
         if not skills:
             raise Stop("the draft changed no skill (only eval cases or other files)")
-        for plugin in sorted({p for p in map(_plugin_of, changed) if p in PLUGINS}):
-            version = self.bump(plugin)
-            self.report.released.append(f"{plugin} {version}")
+        self.bump_touched(changed)
         names = ", ".join(s for _, s in skills)
         self.commit(f"learned: {self.date} — {names}")
         self.report.drafted = [f"{plugin}/{skill}" for plugin, skill in skills]
         self.step("version", "; ".join(self.report.released))
         return skills
+
+    def bump_touched(self, changed: list[str]) -> list[str]:
+        """Bump each changed plugin not yet bumped in this run; return the new release entries."""
+        new = []
+        for plugin in sorted({p for p in map(_plugin_of, changed) if p in PLUGINS} - self.bumped):
+            version = self.bump(plugin)
+            self.bumped.add(plugin)
+            self.report.released.append(f"{plugin} {version}")
+            new.append(f"{plugin} {version}")
+        return new
 
     def bump(self, plugin: str) -> str:
         texts = {}
@@ -389,12 +446,13 @@ class _Run:
     def evaluate(self, skills: list[tuple[str, str]]) -> None:
         for plugin, skill in skills:
             remaining = self.cfg.max_cost_usd - self.spent
-            if remaining <= 0:
+            if remaining < 0.01:  # less than a cent left cannot pay for an eval, and is passed as 0.00
                 raise Stop(f"eval budget ${self.cfg.max_cost_usd} spent before {skill}")
             target = self.out / f"eval-{skill}.json"
+            cases = [arg for case in self.eval_cases(plugin, skill) for arg in ("--case", case)]
             proc = self.runner(
                 [
-                    "claude", "plugin", "eval", str(self.wt / "plugins" / plugin), "--case", f"{skill}-*",
+                    "claude", "plugin", "eval", str(self.wt / "plugins" / plugin), *cases,
                     "--ablation", "with-without", "--max-cost-usd", f"{remaining:.2f}", "--json", str(target),
                     "--no-publish", "--trust-plugin",
                 ],
@@ -406,10 +464,20 @@ class _Run:
             try:
                 data = json.loads(target.read_text(encoding="utf-8"))
             except (OSError, ValueError):
+                self.spent += remaining  # no cost is readable, so the whole remaining budget counts as spent
+                self.report.evals[skill] = "cost unknown"
                 raise Stop(f"eval of {skill} wrote no readable result") from None
-            with_mean, without_mean = _arm_means(skill, data)
-            self.spent += float(data.get("costUsd") or 0)
-            self.report.evals[skill] = f"with {with_mean:.2f} vs without {without_mean:.2f}"
+            try:
+                with_mean, without_mean = _arm_means(skill, data, target)
+            except Stop:
+                self.spent += _cost_or(data, remaining)
+                if _cost(data) is None:
+                    self.report.evals[skill] = "cost unknown"
+                raise
+            cost = _cost(data)
+            self.spent += _cost_or(data, remaining)
+            unknown = " (cost unknown)" if cost is None else ""
+            self.report.evals[skill] = f"with {with_mean:.2f} vs without {without_mean:.2f}{unknown}"
             if with_mean < PASS_SCORE or with_mean <= without_mean:
                 raise Stop(
                     f"eval of {skill} below baseline: with {with_mean:.2f}, without {without_mean:.2f} "
@@ -452,16 +520,21 @@ class _Run:
             "- Do not commit and do not change versions.\n",
             encoding="utf-8",
         )
+        before = self.git("rev-parse", "HEAD", cwd=self.wt).stdout.strip()
         proc = self.hub(
-            "run", "--role", "implement-hard", "--brief", str(brief), "-d", str(self.wt), "--json",
+            "run", "--role", DRAFT_ROLE, "--brief", str(brief), "-d", str(self.wt), "--json",
             timeout=JOB_TIMEOUT,
         )  # fmt: skip
         result = self.job(f"fix round {round_no}", proc)
         if result.get("status") != "ok":
             raise Stop(f"fix round {round_no} job {result.get('status')}")
-        changed = self.changed("HEAD")
+        self.learned_only()
+        changed = self.changed(before)
         if not changed:
             raise Stop(f"fix round {round_no} changed nothing")
+        released = self.bump_touched(self.changed("master"))
+        if released:
+            self.step("version", "; ".join(released))
         self.commit(f"learned: {self.date} — review round {round_no} fixes")
         skills = self.skills_of(changed)
         self.evaluate(skills)
@@ -473,18 +546,80 @@ class _Run:
             raise Stop(f"main checkout is on {head}, not master")
         if self.git("status", "--porcelain").stdout.strip():
             raise Stop("main checkout is not clean")
+        director = any(item.startswith("learned-director ") for item in self.report.released)
+        marketplace = _marketplace_name(self.repo) if director else ""
         merged = self.git("merge", "--no-ff", "-m", f"Merge {self.branch}", self.branch, check=False)
         if merged.rc != 0:
             self.git("merge", "--abort", check=False)
             raise Stop(f"merge failed: {(merged.stderr or merged.stdout).strip()[:300]}")
         self.step("merge", f"{self.branch} into master")
+        # The merge is already on master, so an install failure must not stop the run before cleanup and last-run.
+        failure = self.install(marketplace)
+        self.cleanup()
+        if failure:
+            self.report.outcome = f"released, install failed: {failure}"
+            self.report.exit_code = EXIT_STOPPED
+        else:
+            self.report.outcome = "released " + ", ".join(self.report.released)
+
+    def cleanup(self) -> None:
+        """Remove the worktree and branch after the merge; a failure is a warning, never a stop."""
+        for args in (("worktree", "remove", "--force", str(self.wt)), ("branch", "-d", self.branch)):
+            proc = self.git(*args, check=False)
+            if proc.rc != 0:
+                reason = (proc.stderr or proc.stdout).strip()[:200]
+                self.report.steps.append(Step("cleanup", "warning", f"git {args[0]} {args[1]}: {reason}"))
+
+    def install(self, marketplace: str) -> str:
+        """Run the post-merge installs; return the failure reason, or "" when all of them succeed."""
         installed = self.hub("hub", "install", "--apply", timeout=INSTALL_TIMEOUT)
         if installed.rc != 0:
-            raise Stop(f"merged, but hub install failed: {(installed.stdout or installed.stderr).strip()[-300:]}")
+            reason = (installed.stdout or installed.stderr).strip()[-300:]
+            self.report.steps.append(Step("install", "failed", "hub install --apply"))
+            return f"hub install --apply: {reason}"
         self.step("install", "hub install --apply")
-        self.git("worktree", "remove", "--force", str(self.wt))
-        self.git("branch", "-d", self.branch)
-        self.report.outcome = "released " + ", ".join(self.report.released)
+        if marketplace:
+            return self.update_director_plugin(marketplace)
+        return ""
+
+    def update_director_plugin(self, marketplace: str) -> str:
+        commands = (
+            ("plugin", "marketplace", "update", marketplace),
+            ("plugin", "update", f"learned-director@{marketplace}"),
+        )
+        for args in commands:
+            proc = self.runner(["claude", *args], None, CLAUDE_TIMEOUT)
+            if proc.rc != 0:
+                reason = (proc.stderr or proc.stdout).strip()[:300]
+                self.report.steps.append(Step("claude", "failed", " ".join(args)))
+                return f"claude plugin update: {reason}"
+        self.step("claude", f"claude plugin update learned-director@{marketplace}")
+        return ""
+
+
+def _marketplace_name(repo: Path) -> str:
+    """The Claude marketplace name from the skills repo's .claude-plugin/marketplace.json; a missing name stops."""
+    try:
+        name = json.loads((repo / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8")).get("name")
+    except (OSError, ValueError, AttributeError):
+        name = None
+    if not isinstance(name, str) or not name:
+        raise Stop("learned-director released but .claude-plugin/marketplace.json has no name")
+    return name
+
+
+def _cost(data: object) -> float | None:
+    """The top-level costUsd of an eval result when numeric, finite and non-negative, else None."""
+    cost = data.get("costUsd") if isinstance(data, dict) else None
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)) or not math.isfinite(cost) or cost < 0:
+        return None
+    return float(cost)
+
+
+def _cost_or(data: object, fallback: float) -> float:
+    """The top-level costUsd of an eval result, or the fallback when it has none."""
+    cost = _cost(data)
+    return fallback if cost is None else cost
 
 
 def _plugin_of(path: str) -> str:
@@ -503,7 +638,7 @@ def _section(text: str, title: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _arm_means(skill: str, data: object) -> tuple[float, float]:
+def _arm_means(skill: str, data: object, source: Path) -> tuple[float, float]:
     """Mean score of the plugin arm ('with') and the baseline arm ('without') over all runs of all cases."""
     scores: dict[str, list[float]] = {"with": [], "without": []}
     cases = data.get("cases") if isinstance(data, dict) else None
@@ -514,7 +649,17 @@ def _arm_means(skill: str, data: object) -> tuple[float, float]:
         if not isinstance(arms, dict) or not set(scores) <= set(arms):
             raise Stop(f"eval of {skill}: unknown arm shape {sorted(arms) if isinstance(arms, dict) else arms!r}")
         for arm in scores:
-            scores[arm] += [float(r["score"]) for r in arms[arm] if isinstance(r, dict) and "score" in r]
+            runs = arms[arm]
+            if not isinstance(runs, list):
+                raise Stop(f"eval of {skill}: malformed score in {source}")
+            scores[arm] += [_score(skill, run, source) for run in runs]
     if not scores["with"] or not scores["without"]:
         raise Stop(f"eval of {skill}: an arm has no scored runs")
     return tuple(sum(v) / len(v) for v in scores.values())  # type: ignore[return-value]
+
+
+def _score(skill: str, run: object, source: Path) -> float:
+    score = run.get("score") if isinstance(run, dict) else None
+    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
+        raise Stop(f"eval of {skill}: malformed score in {source}")
+    return float(score)

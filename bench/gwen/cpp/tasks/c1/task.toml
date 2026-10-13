@@ -1,0 +1,3 @@
+title = "Fix the off-by-one in paginate()"
+paths_allowed = ["src/paging.cpp", "tests/test_paging.cpp"]
+visible_tests = []

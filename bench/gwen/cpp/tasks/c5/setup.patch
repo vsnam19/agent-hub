@@ -1,0 +1,9 @@
+diff --git a/data/items.csv b/data/items.csv
+index aea06e8..aa870ca 100644
+--- a/data/items.csv
++++ b/data/items.csv
+@@ -1,3 +1,4 @@
+ name,qty,price
+ Nail,100,0.05
+ Screw,3,0.10
++"Bolt, large",12,0.30

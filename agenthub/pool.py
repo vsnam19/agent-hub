@@ -7,22 +7,40 @@ from datetime import datetime
 from pathlib import Path
 
 from agenthub.config import ConfigError
+from agenthub.config import load_pool as load_pool
+
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
 @dataclass(frozen=True)
 class Link:
     agent: str
     model: str
+    effort: str = ""
+
+    @property
+    def quota_key(self) -> str:
+        # Quota is per agent and model; effort does not get its own cooldown.
+        return f"{self.agent}:{self.model}"
 
     def __str__(self) -> str:
-        return f"{self.agent}:{self.model}"
+        text = self.quota_key
+        if self.effort:
+            text += f"@{self.effort}"
+        return text
 
 
 def parse_link(text: str) -> Link:
     parts = text.split(":", 1)
     if len(parts) != 2 or not parts[0] or not parts[1]:
         raise ConfigError(f"Invalid link: {text!r}")
-    return Link(agent=parts[0], model=parts[1])
+    model, at, effort = parts[1].rpartition("@")
+    if not at:
+        return Link(agent=parts[0], model=parts[1])
+    if not model or effort not in EFFORT_LEVELS:
+        levels = ", ".join(EFFORT_LEVELS)
+        raise ConfigError(f"Invalid effort in link {text!r}; valid levels: {levels}")
+    return Link(agent=parts[0], model=model, effort=effort)
 
 
 class Cooldowns:
@@ -55,7 +73,7 @@ class Cooldowns:
             raise ValueError("datetime must be timezone-aware")
 
         data = self._read()
-        link_str = str(link)
+        link_str = link.quota_key
         if link_str in data:
             try:
                 dt = datetime.fromisoformat(data[link_str])
@@ -71,7 +89,7 @@ class Cooldowns:
 
         def _do_set():
             data = self._read()
-            data[str(link)] = until.isoformat()
+            data[link.quota_key] = until.isoformat()
 
             fd, tmp_path = tempfile.mkstemp(dir=self._path.parent, prefix="cooldowns_", suffix=".json")
             with os.fdopen(fd, "w") as f:
@@ -83,7 +101,7 @@ class Cooldowns:
     def clear(self, link: Link) -> bool:
         def _do_clear():
             data = self._read()
-            link_str = str(link)
+            link_str = link.quota_key
             if link_str in data:
                 del data[link_str]
                 fd, tmp_path = tempfile.mkstemp(dir=self._path.parent, prefix="cooldowns_", suffix=".json")

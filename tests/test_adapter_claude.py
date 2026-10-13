@@ -77,14 +77,38 @@ def test_claude_build_review_argv(tmp_path):
         "project,local",
         "--append-system-prompt",
         WORKER_PROMPT,
+        "--tools",
+        "Read,Grep,Glob,Skill",
         "--allowedTools",
-        "Read,Grep,Glob",
+        "Read,Grep,Glob,Skill",
+        "--strict-mcp-config",
         "--add-dir",
         str(tmp_path),
     ]
     assert inv.stdin_path == brief
     for arg in inv.argv:
         assert '"' not in arg
+
+
+def test_review_argv_allows_only_read_grep_glob_skill(tmp_path):
+    argv = _build_for(tmp_path, "review")
+    tools = argv[argv.index("--tools") + 1].split(",")
+    assert tools == ["Read", "Grep", "Glob", "Skill"]
+    assert "--permission-mode" not in argv
+
+
+def test_review_argv_loads_no_mcp_server(tmp_path):
+    argv = _build_for(tmp_path, "review")
+    assert "--strict-mcp-config" in argv
+    assert "--mcp-config" not in argv
+
+
+def test_implement_argv_unchanged_by_review_restriction(tmp_path):
+    argv = _build_for(tmp_path, "implement")
+    assert "--tools" not in argv
+    assert "--allowedTools" not in argv
+    assert "--strict-mcp-config" not in argv
+    assert argv[-2:] == ["--permission-mode", "bypassPermissions"]
 
 
 def _build_for(tmp_path, role):
@@ -278,7 +302,9 @@ def test_claude_build_adds_plugin_dirs(tmp_path):
 
     argv = adapter.build(req).argv
     assert argv[-4:] == ["--plugin-dir", str(telaf), "--plugin-dir", str(aspice)]
-    assert argv[argv.index("--allowedTools") + 1] == "Read,Grep,Glob"
+    assert argv[argv.index("--allowedTools") + 1] == "Read,Grep,Glob,Skill"
+    assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob,Skill"
+    assert "--strict-mcp-config" in argv
 
 
 def _classify_stdout(tmp_path, adapter, payload, rc=1):
@@ -343,3 +369,27 @@ def test_claude_limit_unknown_zone_has_no_reset(tmp_path, adapter_claude):
     c = _classify_stdout(tmp_path, adapter_claude, _limit_payload(text, api_error_status=429))
     assert c.outcome == Outcome.QUOTA
     assert c.reset_at is None
+
+
+def test_claude_effort_in_argv(tmp_path):
+    adapter = ClaudeAdapter()
+    adapter.config = type("C", (), {"binary": "claude"})()
+
+    brief = tmp_path / "b.md"
+    brief.write_text("hello")
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+
+    req = Request(
+        role="implement",
+        model="m",
+        workdir=tmp_path,
+        brief_path=brief,
+        attempt_dir=attempt,
+        git_common_dir=tmp_path / ".git",
+        effort="low",
+    )
+
+    argv = adapter.build(req).argv
+    assert argv[-2:] == ["--effort", "low"]
+    assert argv.count("--effort") == 1

@@ -35,6 +35,7 @@ class Request:
     attempt_dir: Path
     git_common_dir: Path
     plugin_dirs: tuple[Path, ...] = ()
+    effort: str = ""
 
 
 @dataclass(frozen=True)
