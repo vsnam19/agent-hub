@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from agenthub import handoff, orchestrate
+from agenthub.brief import BriefError
 from agenthub.config import ConfigError, Pool, paths
 from agenthub.jobs import list_jobs
 from agenthub.orchestrate import EXIT, RunArgs, run_job
@@ -408,6 +409,40 @@ def test_review_brief_has_no_footer(env_sandbox, repo):
     sent = fake_calls(env_sandbox.fakelog, "codex")[0]["stdin"]
     assert "## Status" not in sent
     assert "## Status" not in (job_dir(result) / "brief.md").read_text()
+
+
+PLAN_BRIEF = "## Goal\n\nsplit the work\n\n## Input\n\nthe spec\n"
+
+
+def test_plan_job_has_no_diff_and_no_gates(env_sandbox, repo):
+    result = go(repo, ["codex:m1"], role="plan", brief=PLAN_BRIEF, gates=["exit 1"])
+    assert result["status"] == "ok"
+    assert result["kind"] == "plan"
+    assert result["base"] is None
+    assert result["gate"] == []
+    assert result["gate_touched"] == []
+    assert result["handoff"] is None
+    assert result["handoff_missing"] is False
+    assert not (job_dir(result) / "diff.patch").exists()
+    sent = fake_calls(env_sandbox.fakelog, "codex")[0]["stdin"]
+    assert PLAN_BRIEF in sent
+    assert "do not run commands" in sent
+    assert "## Status" not in sent
+    assert "## Status" not in (job_dir(result) / "brief.md").read_text()
+
+
+def test_plan_job_that_modifies_tree_is_modified_tree(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "codex", "write")
+    result = go(repo, ["codex:m1", "agy:m2"], role="plan", brief=PLAN_BRIEF)
+    assert result["status"] == "modified-tree"
+    assert len(result["attempts"]) == 1
+    assert fake_calls(env_sandbox.fakelog, "agy") == []
+
+
+def test_plan_brief_needs_goal_and_input(env_sandbox, repo):
+    with pytest.raises(BriefError, match="Brief missing headings: Goal"):
+        go(repo, ["codex:m1"], role="plan", brief=BRIEF)
+    assert fake_calls(env_sandbox.fakelog, "codex") == []
 
 
 def test_standing_orders_user_and_repo_appended_in_order(env_sandbox, repo):
