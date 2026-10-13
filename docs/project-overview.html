@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>agent-hub — Tổng quan dự án</title>
+<style>
+  :root { --ink:#1b1f24; --muted:#5b6470; --line:#d9dee5; --accent:#2f5bd3; --soft:#eef2fb; --warn:#a1460f; --ok:#1d7a46; }
+  @page { size: A4; margin: 16mm 14mm 18mm 14mm; }
+  body { font-family: "Inter","Segoe UI","Noto Sans",Arial,sans-serif; color:var(--ink); font-size:10.2pt; line-height:1.45; margin:0; }
+  h1 { font-size:22pt; margin:0 0 4px; letter-spacing:-0.3px; }
+  h2 { font-size:14pt; margin:22px 0 8px; padding-bottom:4px; border-bottom:2px solid var(--accent); page-break-after:avoid; }
+  h3 { font-size:11.5pt; margin:14px 0 6px; color:var(--accent); page-break-after:avoid; }
+  p { margin:5px 0; }
+  .sub { color:var(--muted); margin-bottom:14px; }
+  .cover { border-left:5px solid var(--accent); padding:10px 14px; background:var(--soft); margin:10px 0 16px; }
+  table { border-collapse:collapse; width:100%; margin:6px 0 10px; font-size:9.2pt; page-break-inside:auto; }
+  tr { page-break-inside:avoid; }
+  th,td { border:1px solid var(--line); padding:4px 6px; vertical-align:top; text-align:left; }
+  th { background:#f3f5f8; font-weight:600; }
+  code { font-family:"JetBrains Mono","DejaVu Sans Mono",monospace; font-size:8.8pt; background:#f3f5f8; padding:0 3px; border-radius:3px; }
+  .flow { display:flex; flex-wrap:wrap; align-items:center; gap:4px; margin:8px 0 12px; }
+  .box { border:1.5px solid var(--accent); border-radius:6px; padding:5px 8px; background:#fff; font-size:8.8pt; text-align:center; min-width:70px; }
+  .box b { display:block; font-size:9pt; }
+  .box.gate { border-color:var(--warn); }
+  .box.done { border-color:var(--ok); }
+  .arrow { color:var(--muted); font-size:12pt; }
+  .loop { border:1px dashed var(--muted); border-radius:6px; padding:6px 8px; font-size:8.8pt; color:var(--muted); margin:4px 0 10px; }
+  .two { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .note { font-size:8.8pt; color:var(--muted); }
+  .tag { display:inline-block; font-size:8pt; padding:0 5px; border-radius:8px; background:var(--soft); color:var(--accent); margin-right:3px; }
+  ul { margin:4px 0 6px 18px; padding:0; }
+  li { margin:2px 0; }
+  .pb { page-break-before:always; }
+</style>
+</head>
+<body>
+
+<h1>agent-hub — Tổng quan dự án</h1>
+<div class="sub">Khái niệm · workflow pipeline · các tiêu chí dùng trong quy trình &nbsp;|&nbsp; Trạng thái ngày 13/10/2026 · repo <code>~/Workspaces/tools/agent-hub</code> + <code>~/Workspaces/tools/agent-plugins</code></div>
+
+<div class="cover">
+<b>Một câu:</b> agent-hub biến nhiều coding agent (Claude Code, agy/Gemini, codex/GPT, model local gwen) thành một
+<b>“phòng ban”</b>: một <b>director</b> chia việc và kiểm chứng, các <b>worker</b> làm theo tier, một <b>reviewer độc lập</b>
+duyệt, và chỉ <code>agent-hub ready</code> mới cho merge — mọi bằng chứng nằm trên đĩa, không tin lời agent.
+Mục tiêu đầu tiên: tiết kiệm quota Claude; mục tiêu lâu dài: chất lượng có kiểm chứng, tự học từ việc lặp lại.
+</div>
+
+<h2>1. Khái niệm</h2>
+<table>
+<tr><th style="width:22%">Vai</th><th>Ai</th><th>Làm gì / không làm gì</th></tr>
+<tr><td><b>Owner</b> (bạn)</td><td>người</td><td>Đặt mục tiêu, ra quyết định (đánh dấu <i>(user)</i> trong <code>decisions.md</code>); duyệt push, remote, việc cần sudo.</td></tr>
+<tr><td><b>Director</b> (trưởng phòng)</td><td>Claude Code · Opus</td><td>Viết spec, chia task, viết brief, chạy job, tự kiểm chứng, gửi review, merge qua <code>ready</code>. <b>Không viết code sản phẩm</b> (D-058).</td></tr>
+<tr><td><b>Techlead</b> <span class="tag">Phase E</span></td><td>model chọn bằng bench (tạm: claude:sonnet; ứng viên opus@low)</td><td>Đọc spec + repo (read-only), chia thành task nhỏ kèm brief; director duyệt trước khi chạy (D-094).</td></tr>
+<tr><td><b>Worker (implement)</b></td><td>claude:haiku mặc định; agy, codex, gwen theo tier</td><td>Làm một task nhỏ trong worktree riêng, chạy gate, trả handoff có cấu trúc.</td></tr>
+<tr><td><b>Reviewer</b></td><td>claude:opus / agy Opus / codex / agy Gemini</td><td>Đọc diff (không shell, không ghi, không MCP), trả findings + verdict; phải khác <b>mọi</b> implementer của nhánh.</td></tr>
+<tr><td><b>gwen</b></td><td>Qwen3.5-9B trên MacBook Air (opencode)</td><td>Tier rẻ nhất cho task rất nhỏ ở repo nhỏ. <b>LLM local chỉ chạy trên Mac</b> (D-096).</td></tr>
+</table>
+
+<h3>Thành phần</h3>
+<table>
+<tr><th style="width:24%">Thành phần</th><th>Vai trò</th></tr>
+<tr><td><code>agent-hub</code> CLI</td><td><code>run / wait / gate / ready / plan run|wait|status / pool / hub / skills</code>; walk role chain với quota fallback, ghi job record, chạy gate + gate-guard.</td></tr>
+<tr><td>Adapters</td><td><code>agenthub/agents/{claude,agy,codex,gwen}</code>: cách gọi từng tool, đọc output, phân loại quota/lỗi, chế độ read-only cho review/plan.</td></tr>
+<tr><td>Skills của director</td><td><code>orchestrate</code> + 7 <code>principle-*</code> (route by tier, prove it works, review on another tier, …).</td></tr>
+<tr><td>agent-plugins (skills hub)</td><td><code>worker</code>, <code>telaf</code>, <code>aspice</code>, <code>learned-worker</code>, <code>learned-director</code>, <code>token-audit</code>; manifest cho Claude, codex, agy; worker nhận skill qua cơ chế chính thức của từng tool (D-083).</td></tr>
+<tr><td>gwen bench</td><td>Suite Python (t1–t6) + C++ (c1–c6, CMake/gtest), hidden tests, proxy đo token, đo RAM Mac.</td></tr>
+<tr><td>Job records</td><td><code>~/.local/state/agent-hub/jobs/&lt;id&gt;/</code>: brief gửi đi, mỗi attempt, gate log, diff, <code>result.json</code>.</td></tr>
+</table>
+
+<h2>2. Workflow pipeline</h2>
+<h3>2.1 Từ yêu cầu tới merge</h3>
+<div class="flow">
+  <div class="box"><b>Yêu cầu</b>owner</div><span class="arrow">→</span>
+  <div class="box"><b>Spec + D-xxx</b>director</div><span class="arrow">→</span>
+  <div class="box"><b>Chia task</b>techlead → director duyệt</div><span class="arrow">→</span>
+  <div class="box"><b>Brief</b>Goal/Input/Expected/Constraints/Gate</div><span class="arrow">→</span>
+  <div class="box"><b>Worktree</b>nhánh riêng</div><span class="arrow">→</span>
+  <div class="box"><b>Implement</b>tier chain, quota fallback</div><span class="arrow">→</span>
+  <div class="box gate"><b>Gate</b>lint + toàn bộ test + gate-guard</div>
+</div>
+<div class="flow">
+  <span class="arrow">→</span><div class="box"><b>Director kiểm chứng</b>đọc diff, chạy dữ liệu thật</div><span class="arrow">→</span>
+  <div class="box gate"><b>gate -d</b>trên HEAD đã commit</div><span class="arrow">→</span>
+  <div class="box"><b>Review độc lập</b>read-only, verdict</div><span class="arrow">→</span>
+  <div class="box"><b>Fix rounds</b>task nhỏ, haiku</div><span class="arrow">→</span>
+  <div class="box gate"><b>agent-hub ready</b></div><span class="arrow">→</span>
+  <div class="box done"><b>Merge</b>--no-ff, lý do ghi trong commit</div>
+</div>
+<div class="loop">Vòng lặp: findings → brief sửa nhỏ (một cụm finding) → gate → review lại trên HEAD mới → … cho tới khi verdict <b>approve</b>
+và <code>ready</code> trả <code>ready: &lt;sha&gt;</code>. Finding bị dữ liệu thật bác bỏ được ghi kèm bằng chứng trong merge commit (“no change, with evidence”).</div>
+
+<table>
+<tr><th style="width:4%">#</th><th style="width:22%">Bước</th><th>Chi tiết</th></tr>
+<tr><td>1</td><td>Spec &amp; quyết định</td><td>Director viết spec trong <code>docs/superpowers/specs/</code> và ghi quyết định tự chủ vào <code>docs/decisions.md</code> (D-001…D-096) kèm lý do và phương án bị loại.</td></tr>
+<tr><td>2</td><td>Chia task</td><td>Mỗi task một mục tiêu, vừa sức một lần chạy haiku (§3.2). Phase E: techlead đề xuất plan JSON, <code>tasksize</code> kiểm tra, director duyệt rồi mới <code>plan run</code>.</td></tr>
+<tr><td>3</td><td>Brief</td><td>Theo <code>brief-template.md</code>; CLI từ chối brief thiếu <code>## Input</code>/<code>## Expected output</code>; CLI tự thêm standing orders, footer handoff, mục <code>## Skills</code> nếu dùng <code>--skill</code>.</td></tr>
+<tr><td>4</td><td>Chạy</td><td><code>agent-hub run --role implement …</code> (nền) + <code>agent-hub wait</code>; hoặc <code>plan run</code> cho đồ thị task (worktree <code>orch/&lt;slug&gt;/&lt;task&gt;</code>, retry theo nguyên nhân, leo tier khi gate trượt).</td></tr>
+<tr><td>5</td><td>Gate</td><td>CLI chạy gate của repo (<code>.agent-hub/config.toml</code>, đọc từ merge base) + gate-guard (assert bị xóa, skip thêm vào, test bị xóa, sửa cấu hình gate).</td></tr>
+<tr><td>6</td><td>Kiểm chứng của director</td><td>Đọc toàn bộ diff, mọi hunk <code>gate_touched</code>, chạy trên dữ liệu thật (ví dụ: chạy <code>skills mine</code> trên job record thật để tìm redact sai).</td></tr>
+<tr><td>7</td><td>Review</td><td>Reviewer ≠ implementer (so theo <code>agent:model</code>, bỏ qua effort); chỉ có Read/Grep/Glob/Skill, không MCP; trả <code>## Findings</code>, <code>## Verdict</code>, <code>## Gate-touched</code>.</td></tr>
+<tr><td>8</td><td>ready &amp; merge</td><td><code>ready</code> kiểm: gate pass trên đúng HEAD, review approve trên HEAD bởi người không phải implementer, mọi gate-touched được reviewer phán <i>legitimate</i>. Không có cờ bỏ qua (D-081).</td></tr>
+<tr><td>9</td><td>Không push</td><td>Mọi thứ local; push/tạo remote luôn hỏi owner trước.</td></tr>
+</table>
+
+<h3>2.2 Vòng “learned skills” hằng tuần <span class="tag">Phase D</span></h3>
+<div class="flow">
+  <div class="box"><b>Timer</b>CN 20:17 (systemd user)</div><span class="arrow">→</span>
+  <div class="box"><b>skills mine</b>job records + transcripts, redact</div><span class="arrow">→</span>
+  <div class="box"><b>Draft</b>haiku viết ≤3 skill + eval</div><span class="arrow">→</span>
+  <div class="box gate"><b>Eval</b>claude plugin eval, with vs without</div><span class="arrow">→</span>
+  <div class="box gate"><b>Gate + review + ready</b></div><span class="arrow">→</span>
+  <div class="box done"><b>Release local</b>bump version, hub install</div><span class="arrow">→</span>
+  <div class="box"><b>Report</b>+ notify</div>
+</div>
+<p class="note">Dữ liệu đo cho thấy câu lệnh owner gần như không lặp (597 prompt, hầu hết khác nhau); thứ lặp là <b>vòng review → sửa → review</b> và các loại lỗi reviewer bắt được — đó là nguồn của skill. Skill mặc định là văn bản; MCP chỉ là đề xuất cần owner duyệt.</p>
+
+<h2>3. Các tiêu chí dùng trong quy trình</h2>
+
+<h3>3.1 Routing theo tier</h3>
+<table>
+<tr><th style="width:17%">Tier (<code>--role</code>)</th><th style="width:38%">Chọn khi</th><th>Chain mặc định</th></tr>
+<tr><td><code>implement-small</code></td><td>≤ 2 file, ≤ ~100 dòng, đặc tả đầy đủ, repo nhỏ</td><td>gwen → claude:haiku</td></tr>
+<tr><td><code>implement</code> <b>(mặc định)</b></td><td>Đã đặc tả, task nhỏ theo §3.2 — mọi task implement và fix round dùng tier này (owner, D-093)</td><td>claude:haiku → agy Sonnet → agy Gemini → codex</td></tr>
+<tr><td><code>implement-hard</code></td><td>Thiết kế chưa chốt, xuyên suốt, concurrency/security, bug chưa rõ nguyên nhân — phải nêu lý do</td><td>agy Opus → agy Sonnet → codex → claude:sonnet</td></tr>
+<tr><td><code>review</code></td><td>Mọi review (bỏ qua link trùng implementer)</td><td>agy Opus → codex → agy Gemini → claude:sonnet; hay ép <code>--agent claude:opus</code></td></tr>
+<tr><td><code>techlead</code> (plan)</td><td>Chia spec thành task</td><td>Chọn bằng bench E7 (opus@low, sonnet, sonnet@low, agy gemini, agy opus)</td></tr>
+</table>
+<p class="note">Fallback sang link kế tiếp chỉ khi cây chưa đổi (quota, chưa cài, lỗi auth/model). Gate trượt → leo một tier. Link có thể mang effort: <code>claude:opus@low</code> → <code>--effort low</code>; cooldown quota tính theo <code>agent:model</code>.</p>
+
+<h3>3.2 Kích thước task (<code>tasksize.check</code>, D-094)</h3>
+<div class="two">
+<table>
+<tr><th>Tiêu chí</th><th>Giới hạn</th></tr>
+<tr><td>File thay đổi (bullet <code>- Only … change</code> + path trong Expected output)</td><td>≤ 3</td></tr>
+<tr><td>Deliverable đánh số trong Expected output</td><td>≤ 4</td></tr>
+<tr><td>Test được nêu tên (duy nhất)</td><td>≤ 6</td></tr>
+<tr><td>Heading bắt buộc</td><td>Goal, Input, Expected output, Constraints, Gate</td></tr>
+</table>
+<div><p><b>Vì sao:</b> brief lớn (<code>skills-mine</code>: parser + redact + CLI + metrics) mất 9 vòng review, 14 commit sửa; task nhỏ một mục tiêu thường xong trong 1–2 vòng. Fix round cũng chỉ xử lý <b>một cụm finding</b>.</p></div>
+</div>
+
+<h3>3.3 Tiêu chí của một brief tốt</h3>
+<ul>
+<li><b>Goal</b>: kết quả và lý do, không chi tiết cài đặt. <b>Input</b>: file, hành vi hiện tại, interface (có số dòng ~).</li>
+<li><b>Expected output</b> bắt đầu bằng <i>Done means</i>: lệnh chính xác + kết quả mong đợi, tên test chính xác, message commit.</li>
+<li><b>Constraints</b>: file được đổi, không thêm dependency, không test thiếu assertion, test chỉ ghi vào <code>tmp_path</code>.</li>
+<li><b>Real check</b> khi chạm tool ngoài (ví dụ chạy <code>claude -p</code> thật để chứng minh reviewer không có shell).</li>
+<li>Bảng <b>Rationalizations to refuse</b> (“Tôi biết bug rồi, sửa luôn” → “Tái hiện bằng test fail trước”).</li>
+<li>Không chứa secret; không trỏ tới đường dẫn ngoài repo khi worker không đọc được.</li>
+</ul>
+
+<h3>3.4 Gate và gate-guard</h3>
+<table>
+<tr><th style="width:28%">Tiêu chí</th><th>Quy tắc</th></tr>
+<tr><td>Lệnh gate</td><td>Lint đầy đủ + toàn bộ test (agent-hub: <code>just lint</code>, <code>uv run pytest -q</code>; agent-plugins: <code>check.sh</code> + pytest); đọc từ <b>merge base</b>, không từ HEAD (chống tự làm yếu).</td></tr>
+<tr><td>gate-guard (tĩnh)</td><td>Gắn cờ: assertion bị bỏ/yếu đi (so AST theo từng test), skip/xfail thêm vào, test bị xóa/đổi tên, sửa cấu hình gate.</td></tr>
+<tr><td>Phán xử gate-touched</td><td>Chỉ <b>reviewer độc lập</b> phán <i>legitimate</i>/<i>weakening</i>; weakening luôn thắng; director không được tự chấp nhận (D-081).</td></tr>
+<tr><td>Không lách</td><td>Không cờ bypass, không skip để xanh, không hạ ngưỡng; false positive sửa ở chính check. Test chập chờn phải tìm nguyên nhân (ví dụ chuỗi <code>512</code> trong <code>pytest-5121</code>).</td></tr>
+</table>
+
+<h3>3.5 Review và merge</h3>
+<table>
+<tr><th style="width:28%">Tiêu chí</th><th>Quy tắc</th></tr>
+<tr><td>Độc lập</td><td>Reviewer khác mọi implementer của worktree (so <code>agent:model</code>; cùng model khác effort vẫn không độc lập).</td></tr>
+<tr><td>Quyền của reviewer</td><td>Claude: <code>--tools Read,Grep,Glob,Skill --strict-mcp-config</code>; agy: plan mode; codex: sandbox read-only; review làm đổi cây → <code>modified-tree</code>.</td></tr>
+<tr><td>Định dạng</td><td><code>- &lt;severity&gt; — &lt;file:line&gt; — &lt;claim&gt; — scenario — evidence</code>; severity high/medium/low; verdict approve/request-changes.</td></tr>
+<tr><td>Xử lý finding</td><td>Sửa, không để tồn (“fixed, not parked”). Finding bị dữ liệu/tool thật bác bỏ, hoặc là đánh đổi thiết kế đã ghi trong D-xxx → ghi “judged no change, with evidence” trong merge commit. Đã bác bỏ: <i>env placeholders</i> (test pass), <i>.gitignore</i> (repo thật đã ignore).</td></tr>
+<tr><td><code>ready</code></td><td>Gate pass trên đúng HEAD + approve trên HEAD bởi non-implementer + mọi gate-touched legitimate → <code>ready: &lt;sha&gt;</code>, rồi mới merge.</td></tr>
+</table>
+
+<h3>3.6 Trạng thái job</h3>
+<table>
+<tr><th>status</th><th>exit</th><th>Ý nghĩa → hành động</th></tr>
+<tr><td>ok</td><td>0</td><td>Có reply → director vẫn phải kiểm chứng.</td></tr>
+<tr><td>failed / empty</td><td>1 / 7</td><td>Đọc reply, stderr, cây → brief lại hoặc nhận việc.</td></tr>
+<tr><td>gate-failed</td><td>9</td><td>Đọc đuôi gate → sửa hoặc leo tier.</td></tr>
+<tr><td>exhausted / interrupted</td><td>4 / 8</td><td>Hết link (quota) / quota sau khi cây đã đổi → kiểm cây dở, chạy lại từ trạng thái sạch.</td></tr>
+<tr><td>modified-tree, timeout, refused, cancelled</td><td>5, 6, 3, 130</td><td>Review đổi cây (không tin), quá giờ (thu nhỏ task), sai thư mục/nhánh, bị hủy.</td></tr>
+</table>
+
+<h3>3.7 Tiêu chí của learned skill (D-091, D-092)</h3>
+<table>
+<tr><th style="width:28%">Tiêu chí</th><th>Quy tắc</th></tr>
+<tr><td>Ứng viên</td><td>Một lỗi/vòng lặp thấy ≥ 3 lần trên ≥ 2 nhánh/phiên trong cửa sổ ≥ 28 ngày; tối đa 3 skill/tuần; ưu tiên cập nhật skill có sẵn.</td></tr>
+<tr><td>Nội dung</td><td>≤ 450 từ, YAML name/description, bảng rationalizations, dòng Sources (job id), không secret/hook/script. Worker → <code>learned-worker</code>; điều phối/correction của owner → <code>learned-director</code>.</td></tr>
+<tr><td>Eval</td><td>≥ 2 case/skill (1 dương, 1 off-topic); <code>claude plugin eval --ablation with-without</code>; đạt khi điểm arm có plugin ≥ 0.8 <b>và</b> &gt; baseline; ngân sách <code>--max-cost-usd</code>.</td></tr>
+<tr><td>Release</td><td>Chỉ qua review + <code>ready</code>; bump patch ở cả 3 manifest; <code>hub install --apply</code> (codex, agy) + <code>claude plugin update</code> cho director; không push.</td></tr>
+<tr><td>An toàn dữ liệu</td><td>Redact trước khi rời máy: PEM, JWT, Bearer/Basic, prefix key, credential trong URL, e-mail, home path, tên biến chứa từ khóa secret, token entropy cao (đánh giá theo mảnh, tha tên code/file/path/job id). Redact là lớp phòng thủ bổ sung, không phải ranh giới quyền riêng tư (D-092).</td></tr>
+<tr><td>Dừng an toàn</td><td>Bất kỳ bước nào lỗi → dừng, giữ nhánh, vẫn viết report + notify; job chỉ được sửa file trong 2 plugin learned.</td></tr>
+</table>
+
+<h3>3.8 Tiêu chí bench (đo model trước khi giao việc)</h3>
+<ul>
+<li>Chấm điểm: mọi bước gate pass (lint/build, visible tests, <b>hidden tests</b>), không vi phạm scope (<code>paths_allowed</code>), không <code>infra_error</code> (server rớt thì run không tính).</li>
+<li>Hidden tests được cài sau khi agent làm xong; build C++ ở thư mục sạch ngoài repo; hidden tests build ở bước riêng.</li>
+<li>Quyết định theo số đo, không theo benchmark của nhà cung cấp (Granite/Gemma thắng SWE-bench nhưng thua trong harness agent).</li>
+</ul>
+
+<h3>3.9 Quy tắc vận hành (standing rules)</h3>
+<div class="two">
+<ul>
+<li>Director không code; chia việc theo tier; quyết định ghi D-xxx.</li>
+<li>Task implement chạy <b>haiku</b>; task phải <b>nhỏ</b>.</li>
+<li>Không lách gate; sửa chính thức; finding được sửa.</li>
+<li>Hỏi trước khi push / tạo remote; không đưa secret vào brief.</li>
+</ul>
+<ul>
+<li>Dùng cơ chế chính thức của từng tool (plugin install, marketplace), không sửa tay config của tool.</li>
+<li><b>LLM local chỉ trên Mac</b> (D-096).</li>
+<li>Cancel chỉ trong repo của mình (D-078).</li>
+<li>Ở ranh giới phase: đưa trạng thái lên đĩa rồi compact.</li>
+</ul>
+</div>
+
+<h2>4. Kết quả đo được</h2>
+<table>
+<tr><th style="width:34%">Hạng mục</th><th>Kết quả</th></tr>
+<tr><td>Bench Python, opencode × qwen3.5-9b</td><td>~55% (12/22 run); quyết định chọn harness/model theo tool-calling thực tế</td></tr>
+<tr><td>Bench C++ (Stage A, 12/10)</td><td>2/6: đạt c1 (off-by-one), c3 (rename qua header/source); trượt c2, c4, c5, c6 → <b>gwen chưa nhận task C++</b> (D-095)</td></tr>
+<tr><td>Phase B: một bộ skill cho mọi worker</td><td>claude/gwen per-run, codex/agy cài bằng <code>hub install</code>; kiểm thật bằng job haiku trích dẫn skill</td></tr>
+<tr><td>Kỷ luật review</td><td>Nhánh lớn: tới 9 vòng; task nhỏ: 1–3 vòng. Lỗi thật tìm được nhờ review: ReDoS trong regex, lộ secret khi lowercase trước redact, reviewer chạy được shell, hạ effort phá luật độc lập.</td></tr>
+<tr><td>Test suite</td><td>~730 test (agent-hub); CPU bị firmware kẹp 544 MHz sau suspend làm suite chậm ~10× (13/10)</td></tr>
+</table>
+
+<h2>5. Trạng thái và việc tiếp theo</h2>
+<table>
+<tr><th style="width:12%">Phase</th><th style="width:34%">Nội dung</th><th>Trạng thái</th></tr>
+<tr><td>A–B</td><td>Tiered routing, trust mechanics, một bộ skill cho mọi worker</td><td>Xong (v0.9.0)</td></tr>
+<tr><td>C</td><td>Bench C++ cho gwen</td><td>Merged; bench 2/6; lặp lại với <code>--repeat 2</code></td></tr>
+<tr><td>D</td><td>Learned skills hằng tuần</td><td>mine, plugins merged; weekly, schedule chờ gate (máy đang bị hạ xung); sau đó chạy thật lần đầu + cài timer</td></tr>
+<tr><td>E</td><td>Techlead chia task</td><td>E1, E2, E4 merged; E0 (effort), E3 (kind plan) đang review; E5 <code>plan draft</code>, E6, E7 bench chọn model</td></tr>
+</table>
+<p class="note">Nguồn chi tiết: <code>docs/overview.md</code>, <code>docs/decisions.md</code> (D-001…D-096), <code>docs/superpowers/specs/*</code>, <code>docs/follow-ups.md</code>, README.</p>
+
+</body>
+</html>
