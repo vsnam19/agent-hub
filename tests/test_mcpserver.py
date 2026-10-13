@@ -483,6 +483,99 @@ def test_announce_writes_job_id(env_sandbox, repo, tmp_path):
     assert "-gate-" in announced_gate_id
 
 
+def test_announced_job_has_running_record(env_sandbox, repo, tmp_path, monkeypatch):
+    import agenthub.cli as cli
+
+    brief = write_brief(tmp_path)
+    announce_run = tmp_path / "announce-run.txt"
+
+    seen_at_announce = []
+    orig_atomic_write = cli._atomic_write
+
+    def checking_atomic_write(path, content):
+        job_id = content.strip()
+        job = get_job(paths(), job_id)
+        assert (job.dir / "result.json").is_file(), f"result.json must exist when job {job_id} is announced"
+        rec = job.read_json("result.json")
+        assert rec["status"] == "running", f"status must be running when announced, got {rec['status']}"
+        assert rec["id"] == job_id
+        assert rec["workdir"] == str(repo.resolve())
+        assert rec["started"] is not None
+        seen_at_announce.append(rec)
+        orig_atomic_write(path, content)
+
+    monkeypatch.setattr(cli, "_atomic_write", checking_atomic_write)
+
+    rc = main(
+        [
+            "run",
+            "--role",
+            "implement",
+            "--brief",
+            str(brief),
+            "-d",
+            str(repo),
+            "--agent",
+            "claude:haiku",
+            "--announce",
+            str(announce_run),
+        ]
+    )
+    assert rc == 0
+    assert len(seen_at_announce) == 1
+    assert seen_at_announce[0]["role"] == "implement"
+    assert seen_at_announce[0]["kind"] == "implement"
+    run_job_obj = get_job(paths(), seen_at_announce[0]["id"])
+    assert (run_job_obj.dir / "pid").is_file()
+
+    set_repo_gates(repo, ["true"])
+    announce_gate = tmp_path / "announce-gate.txt"
+    rc = main(
+        [
+            "gate",
+            "-d",
+            str(repo),
+            "--announce",
+            str(announce_gate),
+        ]
+    )
+    assert rc == 0
+    assert len(seen_at_announce) == 2
+    assert seen_at_announce[1]["role"] == "gate"
+    assert seen_at_announce[1]["kind"] == "gate"
+
+
+def test_gate_job_running_record_before_gates(env_sandbox, repo, tmp_path):
+    record_file = tmp_path / "seen_record.json"
+    gate_cmd = (
+        f'{sys.executable} -c "'
+        f"import json, pathlib; "
+        f"from agenthub.config import paths; "
+        f"from agenthub.jobs import list_jobs; "
+        f"jobs = list_jobs(paths(), 10); "
+        f"assert len(jobs) >= 1, 'no jobs found during gate run'; "
+        f"g = jobs[0]; "
+        f"assert g['kind'] == 'gate', f'unexpected kind: {{g[\"kind\"]}}'; "
+        f"assert g['status'] == 'running', f'unexpected status: {{g[\"status\"]}}'; "
+        f"pathlib.Path({str(record_file)!r}).write_text(json.dumps(g)); "
+        f'"'
+    )
+    set_repo_gates(repo, [gate_cmd])
+    rc = main(["gate", "-d", str(repo), "--json"])
+    assert rc == 0
+    assert record_file.is_file()
+    seen = json.loads(record_file.read_text())
+    assert seen["kind"] == "gate"
+    assert seen["status"] == "running"
+    assert seen["workdir"] == str(repo.resolve())
+    assert seen["started"] is not None
+    assert seen["ended"] is None
+
+    final_job = get_job(paths(), seen["id"]).read_json("result.json")
+    assert final_job["status"] == "ok"
+    assert final_job["ended"] is not None
+
+
 def test_spawn_uses_announced_id_not_newest_job(env_sandbox, repo, tmp_path):
     repo2 = make_repo(tmp_path / "repo2")
     p = paths()

@@ -64,18 +64,19 @@ def _announcing(announce_path: str | None):
         return
     import agenthub.orchestrate as orch
 
-    orig_new_job = orch.new_job
+    orig_on_started = orch.on_started
 
-    def wrapped_new_job(*a, **kw):
-        job = orig_new_job(*a, **kw)
-        _atomic_write(Path(announce_path), f"{job.id}\n")
-        return job
+    def announce(job_id: str) -> None:
+        try:
+            orig_on_started(job_id)
+        finally:
+            _atomic_write(Path(announce_path), f"{job_id}\n")
 
-    orch.new_job = wrapped_new_job
+    orch.on_started = announce
     try:
         yield
     finally:
-        orch.new_job = orig_new_job
+        orch.on_started = orig_on_started
 
 
 def _build_parser() -> argparse.ArgumentParser:

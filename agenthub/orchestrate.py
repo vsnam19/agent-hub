@@ -163,6 +163,11 @@ def run_gates(
     return records, True
 
 
+def on_started(job_id: str) -> None:
+    """Hook called immediately after a job's initial running record (result.json) is written."""
+    pass
+
+
 def run_gate_job(
     p: Paths,
     repo: guards.Repo,
@@ -170,6 +175,8 @@ def run_gate_job(
     base: str,
     since: str,
     now: Callable[[], datetime],
+    *,
+    on_started: Callable[[str], None] | None = None,
 ) -> dict:
     """Run the repo's default gates, then `cli_gates`, on the committed HEAD of a clean work tree and record them
     as a `gate` job, with what the diff from `since` (the merge base with `base`) touched.
@@ -202,6 +209,8 @@ def run_gate_job(
         "diffstat": "",
         "reply_path": None,
     }
+    job.write_json("result.json", record)
+    (on_started or globals()["on_started"])(job.id)
     with _Cancel() as cancel:
         try:
             record["gate"], passed = run_gates(
@@ -240,7 +249,14 @@ class _Cancel:
             signal.signal(sig, old)
 
 
-def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) -> dict:
+def run_job(
+    args: RunArgs,
+    p: Paths,
+    pool: Pool,
+    now: Callable[[], datetime],
+    *,
+    on_started: Callable[[str], None] | None = None,
+) -> dict:
     kind = args.kind or args.role
     # read-only jobs must leave the tree as they found it; a review also gets a diff, a plan has no base
     read_only = kind in ("review", "plan")
@@ -356,6 +372,7 @@ def run_job(args: RunArgs, p: Paths, pool: Pool, now: Callable[[], datetime]) ->
         "verdict": None,
     }
     job.write_json("result.json", record)
+    (on_started or globals()["on_started"])(job.id)
 
     if refusal is not None:
         record["error"] = refusal
