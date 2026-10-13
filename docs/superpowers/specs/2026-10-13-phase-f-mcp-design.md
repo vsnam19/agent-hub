@@ -34,7 +34,7 @@ sau này)" → "đồng ý, mcp nên có sớm".
 | `pool` | read | roles, chains, cooldowns (as `agent-hub pool --json`) |
 | `jobs`, `show_job` | read | recent jobs of a repository; one job's result |
 | `run_job` | start | `run --role/--agent/--brief/-d/--gate/--skill/--base` detached; returns job id |
-| `wait_job` | read | bounded wait on a job id or work dir |
+| `wait_job` | read | bounded wait by job id |
 | `gate_start`, `ready` | start / read | gate the committed HEAD; readiness check |
 | `plan_run`, `plan_status`, `plan_wait`, `plan_review` | start / read | plan mode |
 | `plan_merge` | destructive | merge ready tasks in dependency order through `ready` |

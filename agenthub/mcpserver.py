@@ -1,4 +1,3 @@
-import json
 import os
 import subprocess
 import sys
@@ -12,7 +11,7 @@ from agenthub import guards
 from agenthub.agents import registry
 from agenthub.cli import ALL_JOBS, WAIT_APPEAR_S, UsageError, _job_repo, _repo_of
 from agenthub.config import ConfigError, Paths, parse_duration, paths, role_kind
-from agenthub.jobs import JOB_ID_RE, Job, get_job, list_jobs
+from agenthub.jobs import get_job, list_jobs
 from agenthub.orchestrate import readiness, skills_hint
 from agenthub.pool import Cooldowns, load_pool, parse_link
 from agenthub.workers import available_skills
@@ -215,7 +214,7 @@ def _spawn_detached(
     except OSError as e:
         return {"error": f"spawn failed: {e} (log: {log_file})", "log": str(log_file)}
 
-    poll_deadline = spawn_monotonic + 10.0
+    poll_deadline = spawn_monotonic + 60.0
     target_job_id = None
 
     while time.monotonic() < poll_deadline:
@@ -248,10 +247,25 @@ def _spawn_detached(
         time.sleep(0.05)
 
     if target_job_id is None:
+        # Timeout: terminate the child's process group and clean up the announce file
+        try:
+            import signal
+
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        try:
+            announce_file.unlink(missing_ok=True)
+        except OSError:
+            pass
         err_msg = ""
         if log_file.is_file():
             err_msg = log_file.read_text().strip()
-        msg = err_msg or "job record did not appear within 10s"
+        msg = err_msg or "job record did not appear within 60s"
         return {"error": f"{msg} (log: {log_file})", "log": str(log_file)}
 
     if is_temp_announce and announce_file.is_file():
@@ -267,12 +281,7 @@ def _spawn_detached(
             try:
                 log_file.replace(job_dir / "spawn.log")
             except OSError:
-                try:
-                    import shutil
-
-                    shutil.move(str(log_file), str(job_dir / "spawn.log"))
-                except OSError:
-                    pass
+                res["log"] = str(log_file)
         else:
             res["log"] = str(log_file)
 
@@ -352,46 +361,13 @@ def _format_wait_result(result: dict[str, Any]) -> dict[str, Any]:
     return res
 
 
-def _job_dir_workdir(job_dir: Path) -> str | None:
-    for name in ("request.json", "result.json", "gate.json", "record.json"):
-        f = job_dir / name
-        if f.is_file():
-            try:
-                with open(f) as fp:
-                    data = json.load(fp)
-                if isinstance(data, dict):
-                    w = data.get("workdir")
-                    if w:
-                        return str(w)
-            except Exception:
-                pass
-    return None
-
-
-def _find_job_for_workdir(p: Paths, resolved_workdir: Path) -> Job | None:
-    if not p.jobs_dir.is_dir():
-        return None
-    entries = []
-    for entry in os.scandir(p.jobs_dir):
-        if entry.is_dir() and JOB_ID_RE.match(entry.name):
-            entries.append(entry)
-    entries.sort(key=lambda e: e.name, reverse=True)
-    for entry in entries:
-        dir_path = Path(entry.path)
-        job_workdir = _job_dir_workdir(dir_path)
-        if job_workdir and Path(job_workdir).expanduser().resolve() == resolved_workdir:
-            return get_job(p, entry.name)
-    return None
-
-
 def wait_job(
-    job_id: str | None = None,
-    workdir: str | None = None,
+    job_id: str,
     timeout_s: int = 60,
     p: Paths | None = None,
 ) -> dict[str, Any]:
-    if job_id is None and workdir is None:
-        raise UsageError("job_id or workdir is required")
+    if not job_id or not str(job_id).strip():
+        raise UsageError("job_id is required")
 
     timeout = clamp_timeout(timeout_s)
     p = p or paths()
@@ -399,29 +375,26 @@ def wait_job(
 
     target_job = None
     while time.monotonic() - start_mono <= min(float(timeout), WAIT_APPEAR_S):
-        if job_id is not None:
-            try:
-                target_job = get_job(p, job_id)
-                break
-            except KeyError:
-                pass
-        elif workdir is not None:
-            resolved_workdir = Path(workdir).expanduser().resolve()
-            target_job = _find_job_for_workdir(p, resolved_workdir)
-            if target_job is not None:
-                break
+        try:
+            target_job = get_job(p, job_id)
+            break
+        except KeyError:
+            pass
         time.sleep(0.05)
 
     if target_job is None:
-        if job_id is not None:
-            raise KeyError(f"unknown job: {job_id}")
-        raise UsageError(f"agent-hub: no job for {workdir}")
+        raise KeyError(f"unknown job: {job_id}")
 
     while time.monotonic() - start_mono <= timeout:
+        job_result_path = target_job.dir / "result.json"
+        if not job_result_path.is_file():
+            time.sleep(0.1)
+            continue
         try:
             result = target_job.read_json("result.json")
         except (OSError, ValueError):
-            result = {"status": "running"}
+            time.sleep(0.1)
+            continue
 
         if result.get("status") != "running":
             return _format_wait_result(result)
@@ -493,13 +466,11 @@ def build_server() -> "MCPServer":
         annotations=ToolAnnotations(readOnlyHint=True),
     )
     def wait_job_tool(
-        job_id: str | None = None,
-        workdir: str | None = None,
+        job_id: str,
         timeout_s: int = 60,
     ) -> dict[str, Any]:
         return wait_job(
             job_id=job_id,
-            workdir=workdir,
             timeout_s=timeout_s,
         )
 

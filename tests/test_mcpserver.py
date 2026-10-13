@@ -166,9 +166,6 @@ def test_wait_job_times_out_running(env_sandbox, repo, monkeypatch):
     try:
         wait_res = wait_job(job_id=job_id, timeout_s=1)
         assert wait_res == {"state": "running"}
-
-        wait_dir_res = wait_job(workdir=str(repo), timeout_s=1)
-        assert wait_dir_res == {"state": "running"}
     finally:
         main(["cancel", job_id, "-d", str(repo)])
 
@@ -192,10 +189,6 @@ def test_wait_job_returns_result(env_sandbox, repo, monkeypatch):
     assert wait_res["model"] is not None
     assert "reply_path" in wait_res
     assert "gate" in wait_res
-
-    wait_dir_res = wait_job(workdir=str(repo), timeout_s=5)
-    assert wait_dir_res["status"] == "ok"
-    assert wait_dir_res["id"] == job_id
 
 
 def test_wait_job_clamps_timeout(env_sandbox, repo, monkeypatch):
@@ -266,13 +259,32 @@ def test_run_job_validation_errors(env_sandbox, repo):
 
 def test_wait_job_errors(env_sandbox, repo):
     with pytest.raises(UsageError):
-        wait_job()
+        wait_job("")
 
     with pytest.raises(KeyError):
         wait_job(job_id="nonexistent-id", timeout_s=1)
 
+
+def test_wait_job_requires_id(env_sandbox):
+    """wait_job must accept job_id and reject missing or empty ids."""
+    with pytest.raises(TypeError):
+        wait_job()  # type: ignore[call-arg]
+
     with pytest.raises(UsageError):
-        wait_job(workdir=str(repo / "nonexistent-dir"), timeout_s=1)
+        wait_job("")
+
+    with pytest.raises(UsageError):
+        wait_job("   ")
+
+    with pytest.raises(KeyError):
+        wait_job(job_id="20260101-000000-implement-ffff", timeout_s=1)
+
+    p = paths()
+    job = new_job(p, "implement", datetime.now(timezone.utc))
+    job.write_json("result.json", {"id": job.id, "status": "ok", "role": "implement"})
+    res = wait_job(job_id=job.id, timeout_s=5)
+    assert res["status"] == "ok"
+    assert res["job_id"] == job.id
 
 
 def test_wait_job_running_before_result(env_sandbox, repo):
@@ -303,44 +315,6 @@ def test_wait_job_running_before_result(env_sandbox, repo):
     assert res_done["status"] == "ok"
     assert res_done["job_id"] == job.id
     assert res_done["state"] == "ok"
-
-
-def test_wait_workdir_sees_running_gate(env_sandbox, repo):
-    p = paths()
-    past = datetime.now(timezone.utc) - timedelta(minutes=5)
-    old_job = new_job(p, "implement", past)
-    old_job.write_json("request.json", {"role": "implement", "workdir": str(repo.resolve())})
-    old_job.write_json(
-        "result.json",
-        {"id": old_job.id, "status": "ok", "role": "implement", "workdir": str(repo.resolve())},
-    )
-
-    now = datetime.now(timezone.utc)
-    gate_job = new_job(p, "gate", now)
-    # The gate job has an early record with workdir, but no completed result.json
-    gate_job.write_json("request.json", {"role": "gate", "workdir": str(repo.resolve())})
-    assert not (gate_job.dir / "result.json").is_file()
-
-    # wait_job(workdir) must see the newest running gate job rather than returning the old completed job
-    res = wait_job(workdir=str(repo), timeout_s=1)
-    assert res == {"state": "running"}
-
-    # When gate finishes, wait_job returns the gate result
-    gate_job.write_json(
-        "result.json",
-        {
-            "id": gate_job.id,
-            "status": "ok",
-            "role": "gate",
-            "kind": "gate",
-            "workdir": str(repo.resolve()),
-            "gate": [{"cmd": "true", "rc": 0}],
-        },
-    )
-    res_done = wait_job(workdir=str(repo), timeout_s=2)
-    assert res_done["status"] == "ok"
-    assert res_done["job_id"] == gate_job.id
-    assert res_done["gate_summary"] == "passed (1)"
 
 
 def git_head(repo):
@@ -611,3 +585,60 @@ def test_spawn_log_stays_if_job_dir_missing(env_sandbox, repo):
     assert log_path.parent == p.state_dir
     # Job directory was NOT created by _spawn_detached
     assert not (p.jobs_dir / fake_id).exists()
+
+
+def test_spawn_timeout_kills_child_and_cleans_up(env_sandbox, repo, monkeypatch):
+    """On announce timeout: child process group is terminated and announce file is removed."""
+    p = paths()
+
+    # Child writes its PID to a file then sleeps indefinitely without writing the announce file
+    pid_file = repo / "child_pid.txt"
+    script = f"import os, time, pathlib; pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(300)"
+
+    real_monotonic = time.monotonic
+    real_sleep = time.sleep
+
+    def fast_monotonic():
+        # Only advance past 60s poll_deadline once child has started and written pid
+        if pid_file.is_file():
+            return real_monotonic() + 120.0
+        return real_monotonic()
+
+    monkeypatch.setattr(time, "monotonic", fast_monotonic)
+    monkeypatch.setattr(time, "sleep", lambda _: real_sleep(0.01))
+
+    res = _spawn_detached(
+        cmd=[sys.executable, "-c", script],
+        workdir_path=repo,
+        p=p,
+    )
+
+    # Returns an error because no announce file appeared (timeout)
+    assert "error" in res
+    assert "log" in res
+    log_path = Path(res["log"])
+    assert log_path.is_file()
+    assert str(log_path) in res["error"]
+
+    # No temporary announce files should remain in the state dir
+    assert list(p.state_dir.glob("*announce*")) == []
+
+    # Verify the child process was actually killed
+    assert pid_file.is_file(), "child process should have written its pid file"
+    child_pid = int(pid_file.read_text().strip())
+
+    # Process should no longer be running (SIGTERM was sent and proc.wait was called)
+    deadline2 = real_monotonic() + 5.0
+    while real_monotonic() < deadline2:
+        try:
+            os.kill(child_pid, 0)
+        except OSError:
+            break  # Process gone
+        real_sleep(0.05)
+    else:
+        # Process still alive after 5s — clean up and fail
+        try:
+            os.kill(child_pid, 9)
+        except OSError:
+            pass
+        raise AssertionError(f"child process {child_pid} was not killed by _spawn_detached timeout")
