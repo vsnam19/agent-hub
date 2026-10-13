@@ -9,8 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from agenthub.config import load_pool, paths
+from agenthub import guards
+from agenthub.config import ConfigError, load_pool, paths
 from agenthub.guards import _git_argv
+from agenthub.jobs import list_jobs
+from agenthub.orchestrate import RunArgs, run_gate_job, run_job
 from agenthub.plan import Plan, Task
 from agenthub.planstate import AttemptState, State, TaskState
 from agenthub.pool import parse_link
@@ -533,3 +536,84 @@ def escalate(tstate: TaskState, task: Task, job_result: dict, job_status: str) -
     tstate.role = target
     tstate.status = "pending"
     tstate.reason = f"## Previous attempt failed\n{failure}"
+
+
+def _approved_job(workdir: Path, head: str) -> dict | None:
+    """The newest approving review of `head` in `workdir`, if there is one."""
+    for j in list_jobs(paths(), 100000):
+        if (
+            j.get("kind") == "review"
+            and j.get("status") == "ok"
+            and j.get("verdict") == "approve"
+            and j.get("head") == head
+            and j.get("workdir")
+            and Path(j["workdir"]).resolve() == workdir.resolve()
+        ):
+            return j
+    return None
+
+
+def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], datetime]) -> dict:
+    """Gate the committed HEAD of a done task, then run the plan's review role on it, unless HEAD already has an
+    approving review. A failed gate skips the review. Returns {"gate", "review", "job", "reason"}, where gate is
+    ok|failed and review is approve|request-changes|failed, or up_to_date when HEAD was already approved."""
+    failed = {"gate": "failed", "review": "failed", "job": "-"}
+    if not tstate.worktree:
+        return {**failed, "reason": "no work tree recorded"}
+    try:
+        repo = guards.inspect(Path(tstate.worktree))
+    except guards.GuardError as e:
+        return {**failed, "reason": str(e)}
+
+    head = guards.head(repo)
+    approved = _approved_job(repo.root, head)
+    if approved:
+        return {"gate": "ok", "review": "approve", "job": approved["id"], "reason": "", "up_to_date": True}
+
+    if guards._run_git(repo.root, "status", "--porcelain"):
+        return {**failed, "reason": "work tree is not clean; commit before review"}
+
+    # The branch the task was created from: the plan base, or its dependency's branch.
+    base = tstate.start_ref or plan.base
+    try:
+        since = guards._run_git(repo.root, "merge-base", "HEAD", base)
+    except subprocess.CalledProcessError:
+        return {**failed, "reason": f"no merge base of HEAD and {base}"}
+
+    try:
+        gate = run_gate_job(paths(), repo, task.gate, base, since, now)
+    except ConfigError as e:
+        return {**failed, "reason": str(e)}
+    if gate["status"] != "ok":
+        return {**failed, "gate": "failed", "job": gate["id"], "reason": f"gate {gate['status']}"}
+
+    pool = load_pool()
+    implementer = _implementer(tstate)
+    if implementer and not _reviewers_besides("review", implementer):
+        return {
+            "gate": "ok",
+            "review": "failed",
+            "job": gate["id"],
+            "reason": f"no reviewer different from {implementer}",
+        }
+
+    review = run_job(
+        RunArgs(
+            role="review",
+            kind="review",
+            brief="",
+            workdir=repo.root,
+            links=[parse_link(x) for x in pool.roles["review"].chain],
+            timeout=pool.timeouts["review"],
+            base=base,
+            jev=plan.jev,
+            exclude=[implementer] if implementer else [],
+        ),
+        paths(),
+        pool,
+        now,
+    )
+    verdict = review.get("verdict") if review["status"] == "ok" else None
+    if verdict not in ("approve", "request-changes"):
+        verdict = "failed"
+    return {"gate": "ok", "review": verdict, "job": review["id"], "reason": review.get("error", "")}

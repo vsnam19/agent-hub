@@ -110,6 +110,11 @@ def _build_parser() -> argparse.ArgumentParser:
     plan_wait.add_argument("plan_file", metavar="<plan.json>")
     plan_wait.add_argument("--timeout", help="e.g. 9m")
     plan_wait.add_argument("--json", action="store_true")
+    plan_review = plan_sub.add_parser(
+        "review", help="gate and review each done task's HEAD (exit 0 only if every reviewed task is approved)"
+    )
+    plan_review.add_argument("plan_file", metavar="<plan.json>")
+    plan_review.add_argument("--task", metavar="NAME", help="review only this task")
     plan_cancel = plan_sub.add_parser("cancel", help="stop the plan's runner and its running jobs")
     plan_cancel.add_argument("plan_file", metavar="<plan.json>")
     plan_cancel.add_argument("-d", "--dir", default=".", dest="workdir", help="repository the caller runs from")
@@ -811,6 +816,34 @@ def _cmd_plan(args) -> int:
                         line += f" handoff={parsed['status']} · {parsed['verification']}"
             print(_safe(line))
         return 0
+
+    elif args.plan_command == "review":
+        from agenthub.planrun import review_task
+        from agenthub.planstate import load_or_init
+
+        if not state_file.is_file():
+            raise UsageError("state.json not found")
+        state = load_or_init(plan)
+        tasks = [t for t in plan.tasks if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"]
+        if args.task is not None:
+            tasks = [t for t in tasks if t.name == args.task]
+            if not tasks:
+                raise UsageError(f"no done implement task named {args.task}")
+        if not tasks:
+            print("no done tasks to review", file=sys.stderr)
+            return 1
+
+        all_approved = True
+        for task in tasks:
+            result = review_task(plan, task, state.task(task.name), _now)
+            if result.get("up_to_date"):
+                print(_safe(f"{task.name} up to date (review job={result['job']})"))
+                continue
+            all_approved = all_approved and result["review"] == "approve"
+            print(_safe(f"{task.name} gate={result['gate']} review={result['review']} job={result['job']}"))
+            if result["reason"]:
+                print(_safe(result["reason"]), file=sys.stderr)
+        return 0 if all_approved else 1
 
     elif args.plan_command == "wait":
         import argparse

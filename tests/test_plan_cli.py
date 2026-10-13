@@ -6,6 +6,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import agenthub.planrun
 from agenthub.cli import main
 from agenthub.config import paths
 from agenthub.jobs import list_jobs, new_job
@@ -400,3 +401,82 @@ def test_plan_unknown_skill_lists_available(env_sandbox, tmp_path):
     assert res.returncode == 2
     assert "task t1: unknown skill nope: available skills are debug-playbook, telaf" in res.stderr
     assert not (plan_file.parent / "state.json").exists()
+
+
+def make_gated_plan_run(env_sandbox, tmp_path):
+    """Run a two-task plan with fake agents in a repo whose gates are committed on the plan base."""
+    repo = tmp_path / "repo"
+    make_repo(repo, branch=None)
+    (repo / ".agent-hub").mkdir()
+    (repo / ".agent-hub" / "config.toml").write_text('gates = ["test -f README.md"]\n')
+    subprocess.run(["git", "add", ".agent-hub"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "repo gates"], cwd=repo, check=True)
+    plan_file = make_plan_file(tmp_path, repo)
+    env = {"FAKE_CLAUDE_SCENARIO": "handoff", "FAKE_AGY_SCENARIO": "handoff", "FAKE_CODEX_SCENARIO": "handoff"}
+    run_cli_plan(env_sandbox, plan_file, "run", extra_env=env)
+    state = json.loads((plan_file.parent / "state.json").read_text())
+    assert state["tasks"]["t1"]["status"] == "done"
+    assert state["tasks"]["t2"]["status"] == "done"
+    return plan_file, state
+
+
+def fake_review(monkeypatch, verdict):
+    """Stand in for the review agent: record each review as a job whose verdict is `verdict`."""
+    calls = []
+
+    def run(args, p, pool, now):
+        calls.append(args)
+        job = new_job(p, "review", now())
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=args.workdir, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        record = {
+            "id": job.id,
+            "role": "review",
+            "kind": "review",
+            "status": "ok",
+            "verdict": verdict,
+            "head": head,
+            "workdir": str(args.workdir),
+            "error": "",
+        }
+        job.write_json("result.json", record)
+        return record
+
+    monkeypatch.setattr(agenthub.planrun, "run_job", run)
+    return calls
+
+
+def test_plan_review_gates_and_reviews_done_tasks(env_sandbox, tmp_path, monkeypatch, capsys):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    calls = fake_review(monkeypatch, "approve")
+
+    rc = main(["plan", "review", str(plan_file)])
+
+    lines = capsys.readouterr().out.splitlines()
+    assert rc == 0
+    assert [line.split(" job=")[0] for line in lines] == ["t1 gate=ok review=approve", "t2 gate=ok review=approve"]
+    gates = [j for j in list_jobs(paths(), 100) if j["kind"] == "gate"]
+    assert len(gates) == 2
+    assert [c.base for c in calls] == ["master", "orch/plan-1/t1"]
+    assert [c.workdir.resolve() for c in calls] == [Path(state["tasks"][t]["worktree"]).resolve() for t in ("t1", "t2")]
+    # The implementer of t1 is excluded from its review
+    implement_job = state["tasks"]["t1"]["attempts"][-1]["job"]
+    implementer = json.loads((paths().jobs_dir / implement_job / "result.json").read_text())
+    assert calls[0].exclude == [f"{implementer['agent']}:{implementer['model']}"]
+
+
+def test_plan_review_skips_approved_head(env_sandbox, tmp_path, monkeypatch, capsys):
+    plan_file, _state = make_gated_plan_run(env_sandbox, tmp_path)
+    calls = fake_review(monkeypatch, "approve")
+    assert main(["plan", "review", str(plan_file)]) == 0
+    capsys.readouterr()
+    gate_jobs = len([j for j in list_jobs(paths(), 100) if j["kind"] == "gate"])
+
+    rc = main(["plan", "review", str(plan_file)])
+
+    lines = capsys.readouterr().out.splitlines()
+    assert rc == 0
+    assert [line.split(" (")[0] for line in lines] == ["t1 up to date", "t2 up to date"]
+    assert len(calls) == 2
+    assert len([j for j in list_jobs(paths(), 100) if j["kind"] == "gate"]) == gate_jobs
