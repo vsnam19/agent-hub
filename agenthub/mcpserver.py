@@ -1,4 +1,3 @@
-import json
 import os
 import subprocess
 import sys
@@ -12,7 +11,7 @@ from agenthub import guards
 from agenthub.agents import registry
 from agenthub.cli import ALL_JOBS, WAIT_APPEAR_S, UsageError, _job_repo, _repo_of
 from agenthub.config import ConfigError, Paths, parse_duration, paths, role_kind
-from agenthub.jobs import JOB_ID_RE, get_job, list_jobs
+from agenthub.jobs import get_job, list_jobs
 from agenthub.orchestrate import readiness, skills_hint
 from agenthub.pool import Cooldowns, load_pool, parse_link
 from agenthub.workers import available_skills
@@ -193,16 +192,19 @@ def _spawn_detached(
     p.state_dir.mkdir(parents=True, exist_ok=True)
     log_file = p.state_dir / f"{log_prefix}-{time.time_ns()}.log"
 
-    existing_job_ids: set[str] = set()
-    if p.jobs_dir.is_dir():
-        existing_job_ids = {entry.name for entry in os.scandir(p.jobs_dir) if entry.is_dir()}
+    full_cmd = list(cmd)
+    if "--announce" in full_cmd:
+        announce_file = Path(full_cmd[full_cmd.index("--announce") + 1])
+    else:
+        announce_file = p.state_dir / f"{log_prefix}-announce-{time.time_ns()}.txt"
+        full_cmd.extend(["--announce", str(announce_file)])
 
     spawn_monotonic = time.monotonic()
 
     try:
         with open(log_file, "w") as log_fd:
             proc = subprocess.Popen(
-                cmd,
+                full_cmd,
                 stdout=log_fd,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
@@ -215,47 +217,30 @@ def _spawn_detached(
     target_job_id = None
 
     while time.monotonic() < poll_deadline:
-        if p.jobs_dir.is_dir():
-            for entry in os.scandir(p.jobs_dir):
-                if not entry.is_dir() or not JOB_ID_RE.match(entry.name):
-                    continue
-                if entry.name in existing_job_ids:
-                    continue
-
-                req_file = Path(entry.path) / "request.json"
-                if req_file.is_file():
-                    try:
-                        req_data = json.loads(req_file.read_text())
-                    except (OSError, ValueError):
-                        continue
-                    req_workdir = req_data.get("workdir")
-                    if req_workdir and Path(req_workdir).resolve() == workdir_path:
-                        target_job_id = entry.name
-                        break
-
-                res_file = Path(entry.path) / "result.json"
-                if res_file.is_file():
-                    try:
-                        res_data = json.loads(res_file.read_text())
-                    except (OSError, ValueError):
-                        continue
-                    res_workdir = res_data.get("workdir")
-                    if res_workdir and Path(res_workdir).resolve() == workdir_path:
-                        target_job_id = entry.name
-                        break
-
-                if role == "gate" and "-gate-" in entry.name:
-                    target_job_id = entry.name
+        if announce_file.is_file():
+            try:
+                content = announce_file.read_text().strip()
+                if content:
+                    target_job_id = content
                     break
+            except OSError:
+                pass
 
-            if target_job_id is not None:
-                break
-
-        if proc.poll() is not None and proc.returncode != 0:
-            err_msg = ""
-            if log_file.is_file():
-                err_msg = log_file.read_text().strip()
-            return {"error": err_msg or f"process exited with returncode {proc.returncode}"}
+        if proc.poll() is not None:
+            if announce_file.is_file():
+                try:
+                    content = announce_file.read_text().strip()
+                    if content:
+                        target_job_id = content
+                        break
+                except OSError:
+                    pass
+            if proc.returncode != 0:
+                err_msg = ""
+                if log_file.is_file():
+                    err_msg = log_file.read_text().strip()
+                return {"error": err_msg or f"process exited with returncode {proc.returncode}"}
+            break
 
         time.sleep(0.05)
 

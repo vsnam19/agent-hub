@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import unicodedata
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -43,6 +44,40 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _atomic_write(path: Path, content: str) -> None:
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}_{time.time_ns()}")
+    try:
+        tmp.write_text(content)
+        tmp.replace(path)
+    except BaseException:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        raise
+
+
+@contextmanager
+def _announcing(announce_path: str | None):
+    if not announce_path:
+        yield
+        return
+    import agenthub.orchestrate as orch
+
+    orig_new_job = orch.new_job
+
+    def wrapped_new_job(*a, **kw):
+        job = orig_new_job(*a, **kw)
+        _atomic_write(Path(announce_path), f"{job.id}\n")
+        return job
+
+    orch.new_job = wrapped_new_job
+    try:
+        yield
+    finally:
+        orch.new_job = orig_new_job
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="agent-hub", description="Run coding agents by role with quota fallback")
     sub = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
@@ -68,6 +103,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--skill", action="append", default=[], dest="skills", metavar="NAME", help="worker skill to load (repeatable)"
     )
+    run.add_argument("--announce", help=argparse.SUPPRESS)
     run.add_argument("--jev", action="store_true", help="use jev fallback for missing handoffs")
     run.add_argument("--json", action="store_true")
 
@@ -149,6 +185,7 @@ def _build_parser() -> argparse.ArgumentParser:
     gate = sub.add_parser("gate", help="run the gates on the committed HEAD and record them (exit 9 if one fails)")
     gate.add_argument("-d", "--dir", default=".", dest="workdir", help="clean work tree to gate")
     gate.add_argument("--gate", action="append", dest="gates", help="gate command to run after the repo gates")
+    gate.add_argument("--announce", help=argparse.SUPPRESS)
     gate.add_argument("--json", action="store_true")
 
     sub.add_parser("mcp", help="run the MCP server over stdio")
@@ -266,7 +303,8 @@ def _cmd_run(args) -> int:
         allow=args.allow,
         skills=args.skills,
     )
-    result = run_job(run_args, p, pool, _now)
+    with _announcing(getattr(args, "announce", None)):
+        result = run_job(run_args, p, pool, _now)
     if args.json:
         print(json.dumps(result, indent=2))
     else:
@@ -489,7 +527,8 @@ def _cmd_gate(args) -> int:
         since = guards._run_git(repo.root, "merge-base", "HEAD", base)
     except subprocess.CalledProcessError:
         raise UsageError(f"no merge base of HEAD and {base}") from None
-    result = run_gate_job(paths(), repo, args.gates or [], base, since, _now)
+    with _announcing(getattr(args, "announce", None)):
+        result = run_gate_job(paths(), repo, args.gates or [], base, since, _now)
     if args.json:
         print(json.dumps(result, indent=2))
     else:

@@ -382,3 +382,99 @@ def test_spawn_env_does_not_add_state_or_config(env_sandbox, monkeypatch, tmp_pa
     monkeypatch.setenv("AGENT_HUB_STATE", state_from_server)
     _spawn_detached(cmd=["true"], workdir_path=tmp_path, p=p)
     assert seen_envs[1]["AGENT_HUB_STATE"] == state_from_server
+
+
+def test_announce_writes_job_id(env_sandbox, repo, tmp_path):
+    brief = write_brief(tmp_path)
+    announce_run = tmp_path / "announce-run.txt"
+    rc = main(
+        [
+            "run",
+            "--role",
+            "implement",
+            "--brief",
+            str(brief),
+            "-d",
+            str(repo),
+            "--agent",
+            "claude:haiku",
+            "--announce",
+            str(announce_run),
+        ]
+    )
+    assert rc == 0
+    assert announce_run.is_file()
+    announced_run_id = announce_run.read_text().strip()
+    assert announced_run_id
+    run_record = get_job(paths(), announced_run_id).read_json("result.json")
+    assert run_record["id"] == announced_run_id
+    assert run_record["role"] == "implement"
+
+    set_repo_gates(repo, ["true"])
+    announce_gate = tmp_path / "announce-gate.txt"
+    rc = main(
+        [
+            "gate",
+            "-d",
+            str(repo),
+            "--announce",
+            str(announce_gate),
+        ]
+    )
+    assert rc == 0
+    assert announce_gate.is_file()
+    announced_gate_id = announce_gate.read_text().strip()
+    assert announced_gate_id
+    gate_record = get_job(paths(), announced_gate_id).read_json("result.json")
+    assert gate_record["id"] == announced_gate_id
+    assert gate_record["role"] == "gate"
+    assert "-gate-" in announced_gate_id
+
+
+def test_spawn_uses_announced_id_not_newest_job(env_sandbox, repo, tmp_path):
+    repo2 = make_repo(tmp_path / "repo2")
+    p = paths()
+    future = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+    # Decoy job for the same workdir created first
+    decoy_same_workdir = new_job(p, "implement", future)
+    decoy_same_workdir.write_json(
+        "request.json",
+        {"role": "implement", "workdir": str(repo.resolve())},
+    )
+    decoy_same_workdir.write_json(
+        "result.json",
+        {"id": decoy_same_workdir.id, "status": "ok", "role": "implement", "workdir": str(repo.resolve())},
+    )
+
+    # Decoy gate job for another repo created first
+    decoy_gate_other_repo = new_job(p, "gate", future)
+    decoy_gate_other_repo.write_json(
+        "request.json",
+        {"role": "gate", "workdir": str(repo2.resolve())},
+    )
+    decoy_gate_other_repo.write_json(
+        "result.json",
+        {"id": decoy_gate_other_repo.id, "status": "ok", "role": "gate", "workdir": str(repo2.resolve())},
+    )
+
+    set_repo_gates(repo, ["true"])
+    res_gate = gate_start(str(repo))
+    assert "job_id" in res_gate
+    assert res_gate["job_id"] != decoy_gate_other_repo.id
+    assert res_gate["job_id"] != decoy_same_workdir.id
+    assert "-gate-" in res_gate["job_id"]
+
+    brief = write_brief(repo)
+    res_run = run_job(workdir=str(repo), role="implement", brief_path=str(brief))
+    assert "job_id" in res_run
+    assert res_run["job_id"] != decoy_same_workdir.id
+    assert res_run["job_id"] != decoy_gate_other_repo.id
+    assert res_run["job_id"] != res_gate["job_id"]
+
+    # Verify announce files were used under state dir
+    announce_files = list(p.state_dir.glob("*announce*"))
+    assert len(announce_files) >= 2
+    announced_ids = {f.read_text().strip() for f in announce_files}
+    assert res_gate["job_id"] in announced_ids
+    assert res_run["job_id"] in announced_ids
