@@ -354,7 +354,7 @@ def _systemd_word(value: str, *, exec_line: bool = False) -> str:
 
     Only ExecStart= expands $VARS, so a literal $ is doubled there and nowhere else.
     """
-    specials = ' \t"\\%$' if exec_line else ' \t"\\%'
+    specials = " \t\"'\\%$" if exec_line else " \t\"'\\%"
     if not any(c in value for c in specials):
         return value
     escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
@@ -434,8 +434,11 @@ def _cmd_skills_schedule(args) -> int:
                 _systemctl("disable", "--now", timer)
             except ScheduleError as e:
                 failures.append(f"disable {timer}: {e}")
-            service_path.unlink(missing_ok=True)
-            timer_path.unlink(missing_ok=True)
+            for path in (service_path, timer_path):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as e:
+                    failures.append(f"unlink {path}: {e}")
             try:
                 _systemctl("daemon-reload")
             except ScheduleError as e:

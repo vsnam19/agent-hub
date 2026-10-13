@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agenthub.cli import main
+from agenthub.cli import _systemd_word, main
 
 SERVICE = "agent-hub-skills-weekly.service"
 TIMER = "agent-hub-skills-weekly.timer"
@@ -307,3 +307,64 @@ def test_restore_error_keeps_original_error(sched, capsys, monkeypatch):
     assert lines[0] == "agent-hub: Failed to connect to bus"
     assert any("permission denied during restore" in line for line in lines[1:])
     assert err.index("Failed to connect to bus") < err.index("permission denied during restore")
+
+
+def test_single_quote_value_quoted(sched, capsys, monkeypatch):
+    assert _systemd_word("o'neil") == '"o\'neil"'
+    assert _systemd_word("PATH=/home/o'neil/bin") == '"PATH=/home/o\'neil/bin"'
+    assert _systemd_word("/home/o'neil/bin/agent-hub", exec_line=True) == '"/home/o\'neil/bin/agent-hub"'
+
+    quote_bin = sched.bin.parent / "tools'x"
+    quote_bin.mkdir()
+    script(quote_bin / "agent-hub", "exit 0")
+    monkeypatch.setenv("PATH", f"{quote_bin}:{os.environ['PATH']}")
+
+    rc = main(["skills", "schedule", "--apply"])
+
+    assert rc == 0
+    service = (sched.unit_dir / SERVICE).read_text(encoding="utf-8")
+    assert f'ExecStart="{quote_bin / "agent-hub"}" skills weekly' in service
+    assert f'Environment="PATH={os.environ["PATH"]}"\n' in service
+
+
+def test_remove_unlink_error_still_reloads(sched, capsys, monkeypatch):
+    assert main(["skills", "schedule", "--apply"]) == 0
+    capsys.readouterr()
+    log_before = len(calls(sched))
+
+    orig_unlink = Path.unlink
+
+    def fake_unlink(self, *args, **kwargs):
+        if self.name == SERVICE:
+            raise OSError("permission denied during unlink")
+        return orig_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fake_unlink)
+    monkeypatch.setenv("FAKE_SYSTEMCTL_FAIL_ON", "disable")
+
+    rc = main(["skills", "schedule", "--remove"])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert f"disable {TIMER}" in err
+    assert "permission denied during unlink" in err
+    assert calls(sched)[log_before:] == [
+        f"--user disable --now {TIMER}",
+        "--user daemon-reload",
+    ]
+    assert not (sched.unit_dir / TIMER).exists()
+    assert (sched.unit_dir / SERVICE).exists()
+
+    monkeypatch.delenv("FAKE_SYSTEMCTL_FAIL_ON")
+    log_before = len(calls(sched))
+    capsys.readouterr()
+
+    rc2 = main(["skills", "schedule", "--remove"])
+
+    assert rc2 == 1
+    err2 = capsys.readouterr().err
+    assert "permission denied during unlink" in err2
+    assert calls(sched)[log_before:] == [
+        f"--user disable --now {TIMER}",
+        "--user daemon-reload",
+    ]
