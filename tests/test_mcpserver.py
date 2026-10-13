@@ -642,3 +642,76 @@ def test_spawn_timeout_kills_child_and_cleans_up(env_sandbox, repo, monkeypatch)
         except OSError:
             pass
         raise AssertionError(f"child process {child_pid} was not killed by _spawn_detached timeout")
+
+
+def test_job_id_traversal_rejected(env_sandbox, tmp_path):
+    p = paths()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = {"id": "escaped-outside-job", "status": "ok", "role": "implement"}
+    (outside / "result.json").write_text(json.dumps(secret))
+
+    # Path traversal: ../../x and relative escape to outside dir
+    for traversal_id in ["../../x", f"../../{outside.name}"]:
+        with pytest.raises(KeyError):
+            show_job_data(traversal_id)
+        with pytest.raises(KeyError):
+            wait_job(traversal_id, timeout_s=1)
+
+    # Absolute path
+    for abs_id in [str(outside), "/etc", "/tmp"]:
+        with pytest.raises(KeyError):
+            show_job_data(abs_id)
+        with pytest.raises(KeyError):
+            wait_job(abs_id, timeout_s=1)
+
+    # Empty and whitespace
+    for empty_id in ["", "   "]:
+        with pytest.raises(UsageError):
+            show_job_data(empty_id)
+        with pytest.raises(UsageError):
+            wait_job(empty_id)
+
+    # Symlink matching job id pattern but escaping jobs dir is rejected
+    symlink_job_id = "20260101-000000-implement-0000"
+    p.jobs_dir.mkdir(parents=True, exist_ok=True)
+    (p.jobs_dir / symlink_job_id).symlink_to(outside)
+    with pytest.raises(KeyError):
+        show_job_data(symlink_job_id)
+    with pytest.raises(KeyError):
+        wait_job(symlink_job_id, timeout_s=1)
+
+
+def test_spawned_child_is_reaped(env_sandbox, repo, tmp_path):
+    p = paths()
+    fake_id = "20260101-000000-gate-9999"
+    pid_file = tmp_path / "child_pid.txt"
+    script = (
+        "import os, sys, pathlib, time; "
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); "
+        "idx = sys.argv.index('--announce'); "
+        "announce = pathlib.Path(sys.argv[idx + 1]); "
+        f"announce.write_text('{fake_id}\\n'); "
+        "time.sleep(0.1)"
+    )
+    res = _spawn_detached(
+        cmd=[sys.executable, "-c", script],
+        workdir_path=repo,
+        p=p,
+    )
+    assert res["job_id"] == fake_id
+    assert pid_file.is_file()
+    child_pid = int(pid_file.read_text().strip())
+
+    # Wait bounded time for daemon thread to reap the child
+    deadline = time.monotonic() + 5.0
+    reaped = False
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            reaped = True
+            break
+        time.sleep(0.05)
+
+    assert reaped, f"Child process {child_pid} was not reaped by daemon thread"

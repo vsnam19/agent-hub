@@ -1,6 +1,8 @@
 import os
+import re
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +20,23 @@ from agenthub.workers import available_skills
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import MCPServer
+
+JOB_ID_RE = re.compile(r"^\d{8}-\d{6}-[a-z-]+-[0-9a-f]{4}$")
+
+
+def validate_job_id(job_id: str, p: Paths) -> Path:
+    if not job_id or not str(job_id).strip():
+        raise UsageError("job_id is required")
+    if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
+        raise KeyError(f"unknown job: {job_id}")
+    job_dir = (p.jobs_dir / job_id).resolve()
+    jobs_dir = p.jobs_dir.resolve()
+    try:
+        if not job_dir.is_relative_to(jobs_dir) or job_dir == jobs_dir:
+            raise KeyError(f"unknown job: {job_id}")
+    except ValueError:
+        raise KeyError(f"unknown job: {job_id}") from None
+    return job_dir
 
 
 def pool_data(p: Paths | None = None, now: datetime | None = None) -> dict[str, Any]:
@@ -62,6 +81,7 @@ def jobs_data(
 
 def show_job_data(job_id: str, p: Paths | None = None) -> dict[str, Any]:
     p = p or paths()
+    validate_job_id(job_id, p)
     job = get_job(p, job_id)
     return job.read_json("result.json")
 
@@ -268,6 +288,8 @@ def _spawn_detached(
         msg = err_msg or "job record did not appear within 60s"
         return {"error": f"{msg} (log: {log_file})", "log": str(log_file)}
 
+    threading.Thread(target=proc.wait, daemon=True).start()
+
     if is_temp_announce and announce_file.is_file():
         try:
             announce_file.unlink(missing_ok=True)
@@ -366,11 +388,10 @@ def wait_job(
     timeout_s: int = 60,
     p: Paths | None = None,
 ) -> dict[str, Any]:
-    if not job_id or not str(job_id).strip():
-        raise UsageError("job_id is required")
+    p = p or paths()
+    validate_job_id(job_id, p)
 
     timeout = clamp_timeout(timeout_s)
-    p = p or paths()
     start_mono = time.monotonic()
 
     target_job = None
