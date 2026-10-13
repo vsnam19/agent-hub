@@ -747,3 +747,47 @@ def test_named_skill_plugin_is_added_for_per_run_hosts(env_sandbox, repo, tmp_pa
     assert result["status"] == "ok"
     argv = fake_calls(env_sandbox.fakelog, "claude")[1]["argv"]
     assert [argv[i + 1] for i, a in enumerate(argv) if a == "--plugin-dir"] == [str(worker), str(telaf)]
+
+
+def test_non_claude_link_with_effort_is_refused(env_sandbox, repo):
+    result = go(repo, ["agy:m1@low", "claude:sonnet"])
+    assert result["status"] == "ok"
+    first, second = result["attempts"]
+    assert first["outcome"] == "config" and first["n"] == 1
+    assert first["reason"] == "effort is only supported for claude links"
+    assert second["outcome"] == "ok" and second["n"] == 2
+    assert fake_calls(env_sandbox.fakelog, "agy") == []
+
+
+def test_reviewer_with_effort_excluded_as_implementer(env_sandbox, repo):
+    # the implementer ran claude:opus at its default effort; the same model at another effort is not independent
+    args = args_for(repo, ["claude:opus@low", "claude:sonnet"], role="review")
+    args.exclude = ["claude:opus"]
+    result = run_job(args, paths(), make_pool(), now)
+    assert result["status"] == "ok"
+    assert [(a["agent"], a["model"]) for a in result["attempts"]] == [("claude", "sonnet")]
+    request = json.loads((job_dir(result) / "request.json").read_text())
+    assert request["links"] == ["claude:sonnet"]
+    calls = fake_calls(env_sandbox.fakelog, "claude")
+    assert len(calls) == 1 and "sonnet" in " ".join(calls[0]["argv"])
+
+
+def test_effort_recorded_in_result(env_sandbox, repo):
+    result = go(repo, ["claude:sonnet@low"])
+    assert result["status"] == "ok"
+    assert result["effort"] == "low"
+    assert result["attempts"][0]["effort"] == "low"
+    attempt_meta = json.loads((Path(result["reply_path"]).parent / "attempt.json").read_text())
+    assert attempt_meta["effort"] == "low"
+    assert json.loads((job_dir(result) / "result.json").read_text())["effort"] == "low"
+
+
+def test_effort_cleared_after_fallback(env_sandbox, repo, monkeypatch):
+    # the record names the effort of the link that ran; a fallback to a link without effort drops the old one
+    scenario(monkeypatch, "claude", "quota,ok")
+    result = go(repo, ["claude:opus@low", "claude:sonnet"])
+    assert result["status"] == "ok"
+    assert [(a["model"], a["outcome"]) for a in result["attempts"]] == [("opus", "quota"), ("sonnet", "ok")]
+    assert result["model"] == "sonnet"
+    assert "effort" not in result
+    assert json.loads((job_dir(result) / "result.json").read_text()).get("effort") is None

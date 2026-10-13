@@ -369,3 +369,27 @@ def test_claude_limit_unknown_zone_has_no_reset(tmp_path, adapter_claude):
     c = _classify_stdout(tmp_path, adapter_claude, _limit_payload(text, api_error_status=429))
     assert c.outcome == Outcome.QUOTA
     assert c.reset_at is None
+
+
+def test_claude_effort_in_argv(tmp_path):
+    adapter = ClaudeAdapter()
+    adapter.config = type("C", (), {"binary": "claude"})()
+
+    brief = tmp_path / "b.md"
+    brief.write_text("hello")
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+
+    req = Request(
+        role="implement",
+        model="m",
+        workdir=tmp_path,
+        brief_path=brief,
+        attempt_dir=attempt,
+        git_common_dir=tmp_path / ".git",
+        effort="low",
+    )
+
+    argv = adapter.build(req).argv
+    assert argv[-2:] == ["--effort", "low"]
+    assert argv.count("--effort") == 1

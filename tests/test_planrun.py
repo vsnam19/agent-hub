@@ -6,7 +6,7 @@ import agenthub.planrun
 from agenthub.config import load_pool, paths
 from agenthub.guards import _git_argv
 from agenthub.plan import Plan, Task
-from agenthub.planrun import compose_brief, run_plan
+from agenthub.planrun import _reviewers_besides, compose_brief, run_plan
 from agenthub.planstate import load_or_init
 from tests.gitrepo import make_repo
 
@@ -424,6 +424,17 @@ def test_review_blocked_when_only_implementing_model_left(tmp_path):
     assert state.task("r1").status == "blocked"
     assert state.task("r1").reason == "no reviewer different from claude:haiku"
     assert len(spawn.spawns) == 1
+
+
+def test_reviewers_besides_ignores_effort(tmp_path):
+    config_dir = paths().config_dir
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "pool.toml").write_text(
+        '[roles.review]\nkind = "review"\nchain = ["claude:opus@low", "claude:haiku@high"]\n'
+    )
+    assert _reviewers_besides("review", "claude:opus") == ["claude:haiku@high"]
+    assert _reviewers_besides("review", "claude:haiku") == ["claude:opus@low"]
+    assert _reviewers_besides("review", "claude:sonnet") == ["claude:opus@low", "claude:haiku@high"]
 
 
 def _escalating_plan(tmp_path, role="implement-small"):

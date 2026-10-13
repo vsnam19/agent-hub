@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from agenthub.config import ConfigError
-from agenthub.pool import Cooldowns, parse_link
+from agenthub.pool import Cooldowns, Link, parse_link
 
 
 def test_parse_link_ok():
@@ -26,6 +26,31 @@ def test_parse_link_model_with_colon_kept():
     assert link.agent == "codex"
     assert link.model == "gpt:5"
     assert str(link) == "codex:gpt:5"
+
+
+def test_parse_link_with_effort():
+    link = parse_link("claude:opus@low")
+    assert link == Link("claude", "opus", "low")
+    assert link.quota_key == "claude:opus"
+    assert str(link) == "claude:opus@low"
+
+
+@pytest.mark.parametrize("text", ["claude:opus@", "claude:opus@turbo", "claude:@low", "claude:opus@LOW"])
+def test_parse_link_bad_effort(text):
+    with pytest.raises(ConfigError, match="low, medium, high, xhigh, max"):
+        parse_link(text)
+
+
+def test_effort_shares_cooldown(tmp_path):
+    c = Cooldowns(tmp_path / "cooldowns.json")
+    now = datetime(2026, 10, 8, tzinfo=timezone.utc)
+    until = now + timedelta(hours=1)
+    c.set(parse_link("claude:opus@low"), until)
+    assert c.until(parse_link("claude:opus"), now) == until
+    assert c.until(parse_link("claude:opus@max"), now) == until
+    assert list(c.all(now)) == ["claude:opus"]
+    assert c.clear(parse_link("claude:opus@high")) is True
+    assert c.until(parse_link("claude:opus@low"), now) is None
 
 
 def test_cooldown_roundtrip(tmp_path):
@@ -98,3 +123,31 @@ def test_cooldown_concurrent_writes(tmp_path):
         link_str = f"agent{i}:m"
         assert link_str in all_cd
         assert all_cd[link_str] == datetime(2026, 10, 8, tzinfo=timezone.utc) + timedelta(hours=i + 1)
+
+
+def test_effort_check_independent_of_import_order(monkeypatch, tmp_path):
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    (conf / "pool.toml").write_text('[roles.implement]\nchain = ["agy:m@low"]\n')
+    monkeypatch.setenv("AGENT_HUB_CONFIG", str(conf))
+    import agenthub.config
+    from agenthub.config import paths
+
+    with pytest.raises(ConfigError, match="agy:m@low"):
+        agenthub.config.load_pool(paths())
+
+
+def test_pool_rejects_effort_on_non_claude_link(monkeypatch, tmp_path):
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    (conf / "pool.toml").write_text('[roles.implement]\nchain = ["agy:m1@low"]\n')
+    monkeypatch.setenv("AGENT_HUB_CONFIG", str(conf))
+    from agenthub.config import paths
+    from agenthub.pool import load_pool
+
+    with pytest.raises(ConfigError, match="agy:m1@low"):
+        load_pool(paths())
+
+    (conf / "pool.toml").write_text('[roles.implement]\nchain = ["claude:opus@low"]\n')
+    pool = load_pool(paths())
+    assert pool.roles["implement"].chain == ["claude:opus@low"]
