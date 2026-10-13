@@ -596,3 +596,33 @@ def test_report_command_prints_newest(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     assert main(["skills", "report"]) == 0
     assert capsys.readouterr().out == "report 2026-10-12\n"
+
+
+def test_weekly_transcripts_flag_reaches_mine(tmp_path, monkeypatch):
+    """`skills weekly --transcripts DIR` hands DIR to the mine step; without it the default stays."""
+    from agenthub import cli
+
+    monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path / "state"))
+    monkeypatch.setenv("AGENT_HUB_CONFIG", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(cli, "_skills_repo", lambda config_dir: tmp_path / "skills")
+    seen = []
+
+    class Stub:
+        exit_code = 0
+
+        def render(self) -> str:
+            return ""
+
+    def fake_weekly(cfg, now, run, dry_run):
+        seen.append(cfg)
+        return Stub()
+
+    monkeypatch.setattr(skillweekly, "weekly", fake_weekly)
+    custom = tmp_path / "custom-projects"
+
+    assert main(["skills", "weekly", "--dry-run", "--transcripts", str(custom)]) == 0
+    assert main(["skills", "weekly", "--dry-run"]) == 0
+
+    assert seen[0].transcripts == custom
+    assert seen[1].transcripts == tmp_path / "home" / ".claude" / "projects"
