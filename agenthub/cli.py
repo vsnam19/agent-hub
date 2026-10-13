@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import unicodedata
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -348,11 +349,17 @@ def _unit_dir() -> Path:
     return Path(config_home) / "systemd" / "user"
 
 
-def _systemd_word(value: str) -> str:
-    """Quote a unit-file value only when it has characters systemd would split or expand."""
-    if not any(c in value for c in ' \t"\\%$'):
+def _systemd_word(value: str, *, exec_line: bool = False) -> str:
+    """Quote a unit-file value only when it has characters systemd would split or expand.
+
+    Only ExecStart= expands $VARS, so a literal $ is doubled there and nowhere else.
+    """
+    specials = ' \t"\\%$' if exec_line else ' \t"\\%'
+    if not any(c in value for c in specials):
         return value
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$")
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    if exec_line:
+        escaped = escaped.replace("$", "$$")
     return f'"{escaped}"'
 
 
@@ -363,7 +370,7 @@ def _unit_texts(exe: str, at: str) -> tuple[str, str]:
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
-        f"ExecStart={_systemd_word(exe)} skills weekly\n"
+        f"ExecStart={_systemd_word(exe, exec_line=True)} skills weekly\n"
         f"Environment={_systemd_word('PATH=' + os.environ.get('PATH', ''))}\n"
         "TimeoutStartSec=6h\n"
         "Nice=10\n"
@@ -398,7 +405,8 @@ def _systemctl(*args: str) -> None:
 def _check_calendar(at: str) -> None:
     if not at.strip() or "\n" in at:
         raise UsageError(f"invalid --at: {at!r}")
-    done = _schedule_run(["systemd-analyze", "calendar", at])
+    # "--" keeps a value such as --version from being read as an option
+    done = _schedule_run(["systemd-analyze", "calendar", "--", at])
     if done.returncode != 0:
         raise UsageError(f"invalid --at {at!r}: {(done.stderr or done.stdout).strip()}")
 
@@ -450,7 +458,8 @@ def _cmd_skills_schedule(args) -> int:
 
         files_match = _read_unit(service_path) == service and _read_unit(timer_path) == timer_text
         timer_enabled = files_match and _schedule_run(["systemctl", "--user", "is-enabled", timer]).returncode == 0
-        if timer_enabled:
+        timer_running = timer_enabled and _schedule_run(["systemctl", "--user", "is-active", timer]).returncode == 0
+        if timer_running:
             print(_safe(f"already scheduled: {timer_path} ({args.at})"))
             return 0
         before = {path: _read_unit(path) for path in (service_path, timer_path)}
@@ -461,12 +470,17 @@ def _cmd_skills_schedule(args) -> int:
             _systemctl("daemon-reload")
             _systemctl("enable", "--now", timer)
         except (ScheduleError, OSError):
-            # all-or-nothing: put back what was there before this attempt (new files are removed)
+            # all-or-nothing: stop the timer, put back what was there before this attempt (new files are
+            # removed), then reload so systemd forgets the rolled-back units; errors here must not mask the first
+            with suppress(ScheduleError):
+                _systemctl("disable", "--now", timer)
             for path, text in before.items():
                 if text is None:
                     path.unlink(missing_ok=True)
                 else:
                     path.write_text(text, encoding="utf-8")
+            with suppress(ScheduleError):
+                _systemctl("daemon-reload")
             raise
         print(_safe(f"scheduled: {timer_path} ({args.at})"))
         return 0
