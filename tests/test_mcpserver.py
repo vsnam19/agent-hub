@@ -644,6 +644,51 @@ def test_spawn_timeout_kills_child_and_cleans_up(env_sandbox, repo, monkeypatch)
         raise AssertionError(f"child process {child_pid} was not killed by _spawn_detached timeout")
 
 
+def test_timeout_message_log_bounded(env_sandbox, repo, tmp_path, monkeypatch):
+    """On spawn timeout, error message contains at most the last 40 lines of spawn log."""
+    p = paths()
+
+    pid_file = tmp_path / "child_pid.txt"
+    # Child writes 100 lines to stdout, writes its PID to file, then sleeps
+    script = (
+        "import os, time, pathlib, sys; "
+        "sys.stdout.write(''.join(f'log line {i}\\n' for i in range(100))); sys.stdout.flush(); "
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); "
+        "time.sleep(300)"
+    )
+
+    real_monotonic = time.monotonic
+    real_sleep = time.sleep
+
+    def fast_monotonic():
+        if pid_file.is_file():
+            return real_monotonic() + 120.0
+        return real_monotonic()
+
+    monkeypatch.setattr(time, "monotonic", fast_monotonic)
+    monkeypatch.setattr(time, "sleep", lambda _: real_sleep(0.01))
+
+    res = _spawn_detached(
+        cmd=[sys.executable, "-c", script],
+        workdir_path=repo,
+        p=p,
+    )
+
+    assert "error" in res
+    assert "log" in res
+    err = res["error"]
+
+    # Verify that only the last 40 lines (lines 60 to 99) are kept
+    assert "log line 99" in err
+    assert "log line 60" in err
+    assert "log line 59" not in err
+    assert "log line 0" not in err
+
+    # The prefix before " (log: " has exactly 40 lines
+    log_content = err.rsplit(" (log: ", 1)[0]
+    assert len(log_content.splitlines()) == 40
+
+
 def test_job_id_traversal_rejected(env_sandbox, tmp_path):
     p = paths()
     outside = tmp_path / "outside"
@@ -651,15 +696,15 @@ def test_job_id_traversal_rejected(env_sandbox, tmp_path):
     secret = {"id": "escaped-outside-job", "status": "ok", "role": "implement"}
     (outside / "result.json").write_text(json.dumps(secret))
 
-    # Path traversal: ../../x and relative escape to outside dir
-    for traversal_id in ["../../x", f"../../{outside.name}"]:
+    # Path traversal: ../../x, relative escape to outside dir, a/b, ..
+    for traversal_id in ["../../x", f"../../{outside.name}", "a/b", ".."]:
         with pytest.raises(KeyError):
             show_job_data(traversal_id)
         with pytest.raises(KeyError):
             wait_job(traversal_id, timeout_s=1)
 
     # Absolute path
-    for abs_id in [str(outside), "/etc", "/tmp"]:
+    for abs_id in [str(outside), "/etc", "/tmp", "/abs"]:
         with pytest.raises(KeyError):
             show_job_data(abs_id)
         with pytest.raises(KeyError):
@@ -720,7 +765,7 @@ def test_spawned_child_is_reaped(env_sandbox, repo, tmp_path):
 def test_job_id_with_user_role_names_accepted(env_sandbox):
     p = paths()
     now = datetime.now(timezone.utc)
-    for role in ["review-mvp", "implement2", "Haiku_Impl"]:
+    for role in ["review-mvp", "implement2", "Haiku_Impl", "a.b", "ROLE", "日本語"]:
         job = new_job(p, role, now)
         job.write_json("result.json", {"id": job.id, "status": "ok", "role": role})
         data = show_job_data(job.id)

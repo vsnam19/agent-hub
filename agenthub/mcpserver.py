@@ -1,5 +1,4 @@
 import os
-import re
 import subprocess
 import sys
 import threading
@@ -21,20 +20,20 @@ from agenthub.workers import available_skills
 if TYPE_CHECKING:
     from mcp.server.mcpserver import MCPServer
 
-JOB_ID_RE = re.compile(r"^\d{8}-\d{6}-[A-Za-z0-9_-]+-[0-9a-f]{4}$")
-
 
 def validate_job_id(job_id: str, p: Paths) -> Path:
     if not job_id or not str(job_id).strip():
         raise UsageError("job_id is required")
-    if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
+    if not isinstance(job_id, str):
         raise KeyError(f"unknown job: {job_id}")
-    job_dir = (p.jobs_dir / job_id).resolve()
+    if any(c in job_id for c in ("/", "\\", "\0")) or job_id in (".", ".."):
+        raise KeyError(f"unknown job: {job_id}")
     jobs_dir = p.jobs_dir.resolve()
     try:
-        if not job_dir.is_relative_to(jobs_dir) or job_dir == jobs_dir:
+        job_dir = (p.jobs_dir / job_id).resolve()
+        if job_dir.parent != jobs_dir:
             raise KeyError(f"unknown job: {job_id}")
-    except ValueError:
+    except (ValueError, OSError, RuntimeError):
         raise KeyError(f"unknown job: {job_id}") from None
     return job_dir
 
@@ -292,7 +291,11 @@ def _spawn_detached(
             pass
         err_msg = ""
         if log_file.is_file():
-            err_msg = log_file.read_text().strip()
+            try:
+                lines = log_file.read_text(errors="replace").splitlines()
+                err_msg = "\n".join(lines[-40:]).strip()
+            except OSError:
+                pass
         msg = err_msg or "job record did not appear within 60s"
         return {"error": f"{msg} (log: {log_file})", "log": str(log_file)}
 
