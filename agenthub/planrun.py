@@ -13,7 +13,7 @@ from agenthub import guards
 from agenthub.config import ConfigError, load_pool, paths
 from agenthub.guards import _git_argv
 from agenthub.jobs import list_jobs
-from agenthub.orchestrate import RunArgs, readiness, run_gate_job, run_job
+from agenthub.orchestrate import RunArgs, _passed_gate, readiness, run_gate_job, run_job
 from agenthub.plan import Plan, Task
 from agenthub.planstate import AttemptState, State, TaskState
 from agenthub.pool import parse_link
@@ -539,9 +539,11 @@ def escalate(tstate: TaskState, task: Task, job_result: dict, job_status: str) -
 
 
 def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], datetime]) -> dict:
-    """Gate the committed HEAD of a done task, then run the plan's review role on it, unless HEAD already has an
-    approving review. A failed gate skips the review. Returns {"gate", "review", "job", "reason"}, where gate is
-    ok|failed and review is approve|request-changes|failed, or up_to_date when HEAD was already approved."""
+    """Gate the committed HEAD of a done task, then run the plan's review role on it, unless HEAD is already up to
+    date (the work tree is clean, readiness passes, a passing gate job on HEAD covers every command of task.gate, and
+    the newest ok review of HEAD is an independent approval). A failed gate skips the review. Returns
+    {"gate", "review", "job", "reason"} (or up_to_date when HEAD is up to date), where gate is ok|failed and review is
+    approve|request-changes|failed."""
     failed = {"gate": "failed", "review": "failed", "job": "-"}
     if not tstate.worktree:
         return {**failed, "reason": "no work tree recorded"}
@@ -562,8 +564,15 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
         return f"{j.get('agent')}:{j.get('model')}"
 
     implementers = {who(j) for j in mine if j.get("kind") == "implement" and j.get("status") in ("ok", "gate-failed")}
+    task_gated = any(
+        j.get("kind") == "gate"
+        and _passed_gate(j, head)
+        and set(task.gate) <= {g.get("cmd") for g in (j.get("gate") or [])}
+        for j in mine
+    )
     if (
         not readiness(jobs, repo.root, head)
+        and task_gated
         and on_head
         and on_head[0]["verdict"] == "approve"
         and who(on_head[0]) not in implementers

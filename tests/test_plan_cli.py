@@ -512,7 +512,15 @@ def test_plan_review_self_review_not_up_to_date(env_sandbox, tmp_path, monkeypat
     implement_job = state["tasks"]["t1"]["attempts"][-1]["job"]
     implementer = json.loads((paths().jobs_dir / implement_job / "result.json").read_text())
 
-    job = new_job(paths(), "review", datetime.now(timezone.utc))
+    # An earlier independent approval exists and gates passed, so readiness() alone would accept HEAD.
+    calls = fake_review(monkeypatch, "approve")
+    assert main(["plan", "review", str(plan_file), "--task", "t1"]) == 0
+    capsys.readouterr()
+    assert len(calls) == 1
+
+    # Now the implementer submits a newer approval on the same HEAD.
+    when = datetime.now(timezone.utc) + timedelta(seconds=10)
+    job = new_job(paths(), "review", when)
     job.write_json(
         "result.json",
         {
@@ -529,14 +537,93 @@ def test_plan_review_self_review_not_up_to_date(env_sandbox, tmp_path, monkeypat
         },
     )
 
-    calls = fake_review(monkeypatch, "approve")
     rc = main(["plan", "review", str(plan_file), "--task", "t1"])
 
     out = capsys.readouterr()
     assert rc == 0
     assert "t1 up to date" not in out.out
+    assert len(calls) == 2
+    assert calls[1].exclude == [f"{implementer['agent']}:{implementer['model']}"]
+
+
+def test_plan_review_task_gates_required_for_up_to_date(env_sandbox, tmp_path, monkeypatch, capsys):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    t1_worktree = Path(state["tasks"]["t1"]["worktree"])
+    t1_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=t1_worktree, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    # Passing gate job on t1_head that ran only repo default gates, not t1's task gate.
+    base_time = datetime.now(timezone.utc) - timedelta(seconds=30)
+    gate_job = new_job(paths(), "gate", base_time)
+    gate_job.write_json(
+        "result.json",
+        {
+            "id": gate_job.id,
+            "role": "gate",
+            "kind": "gate",
+            "status": "ok",
+            "head": t1_head,
+            "workdir": str(t1_worktree),
+            "repo_gates": ["test -f README.md"],
+            "gate": [
+                {
+                    "cmd": "test -f README.md",
+                    "rc": 0,
+                    "sha": t1_head,
+                    "duration_s": 0.01,
+                    "tail": "",
+                    "log": "",
+                }
+            ],
+            "gate_touched": [],
+        },
+    )
+
+    # Independent approval on t1_head.
+    review_job = new_job(paths(), "review", base_time + timedelta(seconds=10))
+    review_job.write_json(
+        "result.json",
+        {
+            "id": review_job.id,
+            "role": "review",
+            "kind": "review",
+            "status": "ok",
+            "verdict": "approve",
+            "head": t1_head,
+            "workdir": str(t1_worktree),
+            "agent": "reviewer-agent",
+            "model": "reviewer-model",
+            "error": "",
+        },
+    )
+
+    # readiness() passes here because default repo gates passed and an independent approval exists.
+    # But because t1.gate ("test -f agent_wrote.txt") was not run by any passing gate job on HEAD,
+    # plan review must NOT treat t1 as up to date; it must run the gate (including t1.gate) as usual.
+    calls = fake_review(monkeypatch, "approve")
+    gate_jobs_before = len([j for j in list_jobs(paths(), 100) if j["kind"] == "gate"])
+
+    rc = main(["plan", "review", str(plan_file), "--task", "t1"])
+
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "t1 up to date" not in out.out
+    gate_jobs_after = [j for j in list_jobs(paths(), 100) if j["kind"] == "gate"]
+    assert len(gate_jobs_after) == gate_jobs_before + 1
+    new_gate = next(j for j in gate_jobs_after if j["id"] != gate_job.id)
+    ran_cmds = {g["cmd"] for g in new_gate["gate"]}
+    assert "test -f agent_wrote.txt" in ran_cmds
+    assert "test -f README.md" in ran_cmds
     assert len(calls) == 1
-    assert calls[0].exclude == [f"{implementer['agent']}:{implementer['model']}"]
+
+    # Now that a gate job covering t1.gate has run, a second review is up to date.
+    rc2 = main(["plan", "review", str(plan_file), "--task", "t1"])
+    out2 = capsys.readouterr()
+    assert rc2 == 0
+    assert "t1 up to date" in out2.out
+    assert len([j for j in list_jobs(paths(), 100) if j["kind"] == "gate"]) == len(gate_jobs_after)
+    assert len(calls) == 1
 
 
 def test_plan_review_ungated_approval_not_up_to_date(env_sandbox, tmp_path, monkeypatch, capsys):
