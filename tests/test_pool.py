@@ -125,6 +125,18 @@ def test_cooldown_concurrent_writes(tmp_path):
         assert all_cd[link_str] == datetime(2026, 10, 8, tzinfo=timezone.utc) + timedelta(hours=i + 1)
 
 
+def test_effort_check_independent_of_import_order(monkeypatch, tmp_path):
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    (conf / "pool.toml").write_text('[roles.implement]\nchain = ["agy:m@low"]\n')
+    monkeypatch.setenv("AGENT_HUB_CONFIG", str(conf))
+    import agenthub.config
+    from agenthub.config import paths
+
+    with pytest.raises(ConfigError, match="agy:m@low"):
+        agenthub.config.load_pool(paths())
+
+
 def test_pool_rejects_effort_on_non_claude_link(monkeypatch, tmp_path):
     conf = tmp_path / "conf"
     conf.mkdir()
