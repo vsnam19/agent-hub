@@ -813,6 +813,23 @@ def test_url_password_with_at_and_slash():
     assert "a/b" not in out
 
 
+def test_url_creds_after_punctuation():
+    assert skillmine.redact("Cloning.https://u:pw12345@h/x") == "Cloning.https://u:<redacted>@h/x"
+    assert skillmine.redact("1.https://u:pw12345@h/x") == "1.https://u:<redacted>@h/x"
+    assert skillmine.redact("_https://u:pw12345@h/x") == "_https://u:<redacted>@h/x"
+    assert skillmine.redact("+https://u:pw12345@h/x") == "+https://u:<redacted>@h/x"
+    assert skillmine.redact("-https://u:pw12345@h/x") == "-https://u:<redacted>@h/x"
+
+
+def test_long_url_password_redacted():
+    secret = "s" * 300
+    out = skillmine.redact(f"postgres://admin:{secret}@db/app")
+    assert out == "postgres://admin:<redacted>@db/app"
+    assert secret not in out
+    out = skillmine.redact(f"postgres://admin:{secret}@db/app and postgres://u:short@h/x")
+    assert out == "postgres://admin:<redacted>@db/app and postgres://u:<redacted>@h/x"
+
+
 def test_mine_write_error_exit_2(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path / "state"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -926,6 +943,7 @@ def test_redact_scales_linearly():
         lambda n: "x" * n,
         lambda n: "A" * n,
         lambda n: "a." * (n // 2),
+        lambda n: "a://:" * (n // 5),
     ):
         _assert_linear(make_text)
         assert skillmine.redact(make_text(10000)) == make_text(10000)
