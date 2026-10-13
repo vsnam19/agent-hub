@@ -598,6 +598,52 @@ def test_report_command_prints_newest(tmp_path, monkeypatch, capsys):
     assert capsys.readouterr().out == "report 2026-10-12\n"
 
 
+def test_weekly_uses_default_branch_main(tmp_path):
+    """A skills repo whose default branch is `main` must not hard-fail on `master`."""
+    # Build a skills repo on `main` (not the default `master`).
+    repo = tmp_path / "skills"
+    make_repo(repo, default="main", branch=None)
+    (repo / ".gitignore").write_text(".worktrees/\n.agent-hub/*\n")
+    for plugin in PLUGINS:
+        for manifest in MANIFESTS:
+            file = repo / "plugins" / plugin / manifest
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text(json.dumps({"name": plugin, "version": "0.1.0"}, indent=2) + "\n")
+    write_marketplace(repo, "agent-plugins")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-m", "plugins")
+
+    state = tmp_path / "state"
+    make_state(state)
+    fake = Fake(tmp_path / "fake")
+    (tmp_path / "fake").mkdir()
+    cfg = Config(state_dir=state, skills_repo=repo, transcripts=tmp_path / "claude", max_cost_usd=3.0, notify=False)
+
+    report = skillweekly.weekly(cfg, NOW, fake, dry_run=False)
+
+    assert report.exit_code == 0, report.stop_reason
+
+    # The worktree must branch from `main`, not `master`.
+    worktree_add_calls = [c for c in fake.calls if c[:3] == ["git", "worktree", "add"]]
+    assert worktree_add_calls, "expected a 'git worktree add' call"
+    assert worktree_add_calls[0][-1] == "main", (
+        f"worktree add should branch from 'main', got {worktree_add_calls[0][-1]!r}"
+    )
+
+    # The review job must pass --base main.
+    review_calls = [c for c in fake.calls if "run" in c and "review" in c]
+    assert review_calls, "expected a review job call"
+    for call in review_calls:
+        base_idx = call.index("--base") if "--base" in call else None
+        assert base_idx is not None, "--base not in review call"
+        assert call[base_idx + 1] == "main", f"review --base should be 'main', got {call[base_idx + 1]!r}"
+
+    # The merge commit must land on `main`.
+    assert git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    parents = git(repo, "log", "-1", "--format=%P", "main").split()
+    assert len(parents) == 2, "expected a merge commit on main"
+
+
 def test_weekly_transcripts_flag_reaches_mine(tmp_path, monkeypatch):
     """`skills weekly --transcripts DIR` hands DIR to the mine step; without it the default stays."""
     from agenthub import cli
