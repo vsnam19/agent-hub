@@ -350,9 +350,9 @@ def _unit_dir() -> Path:
 
 def _systemd_word(value: str) -> str:
     """Quote a unit-file value only when it has characters systemd would split or expand."""
-    if not any(c in value for c in ' \t"\\%'):
+    if not any(c in value for c in ' \t"\\%$'):
         return value
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$")
     return f'"{escaped}"'
 
 
@@ -417,10 +417,23 @@ def _cmd_skills_schedule(args) -> int:
     timer = timer_path.name
     try:
         if args.remove:
-            _systemctl("disable", "--now", timer)
+            if not (service_path.exists() or timer_path.exists()):
+                print("nothing scheduled")
+                return 0
+            # remove the files even when disable fails, so a retry is not stuck on a half-removed timer
+            failures = []
+            try:
+                _systemctl("disable", "--now", timer)
+            except ScheduleError as e:
+                failures.append(f"disable {timer}: {e}")
             service_path.unlink(missing_ok=True)
             timer_path.unlink(missing_ok=True)
-            _systemctl("daemon-reload")
+            try:
+                _systemctl("daemon-reload")
+            except ScheduleError as e:
+                failures.append(f"daemon-reload: {e}")
+            if failures:
+                raise ScheduleError("; ".join(failures))
             print(_safe(f"removed: {timer_path}"))
             return 0
 

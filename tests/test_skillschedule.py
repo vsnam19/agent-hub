@@ -147,3 +147,41 @@ def test_failed_enable_removes_new_units(sched, capsys, monkeypatch):
     assert "Failed to connect to bus" in capsys.readouterr().err
     assert not (sched.unit_dir / SERVICE).exists()
     assert not (sched.unit_dir / TIMER).exists()
+
+
+def test_remove_when_not_scheduled_exit_0(sched, capsys):
+    rc = main(["skills", "schedule", "--remove"])
+
+    assert rc == 0
+    assert "nothing scheduled" in capsys.readouterr().out
+    assert not sched.unit_dir.exists()
+    assert calls(sched) == []
+
+
+def test_remove_failed_disable_still_deletes_units_exit_1(sched, capsys, monkeypatch):
+    assert main(["skills", "schedule", "--apply"]) == 0
+    capsys.readouterr()
+    monkeypatch.setenv("FAKE_SYSTEMCTL_FAIL", "1")
+
+    rc = main(["skills", "schedule", "--remove"])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert f"disable {TIMER}" in err
+    assert "Failed to connect to bus" in err
+    assert not (sched.unit_dir / SERVICE).exists()
+    assert not (sched.unit_dir / TIMER).exists()
+
+
+def test_dollar_in_exec_path_escaped(sched, capsys, monkeypatch):
+    dollar_bin = sched.bin.parent / "tools$x"
+    dollar_bin.mkdir()
+    script(dollar_bin / "agent-hub", "exit 0")
+    monkeypatch.setenv("PATH", f"{dollar_bin}:{os.environ['PATH']}")
+
+    rc = main(["skills", "schedule", "--apply"])
+
+    assert rc == 0
+    service = (sched.unit_dir / SERVICE).read_text(encoding="utf-8")
+    escaped = str(dollar_bin / "agent-hub").replace("$", "$$")
+    assert f'ExecStart="{escaped}" skills weekly' in service
