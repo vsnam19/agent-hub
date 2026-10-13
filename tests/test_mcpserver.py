@@ -715,3 +715,43 @@ def test_spawned_child_is_reaped(env_sandbox, repo, tmp_path):
         time.sleep(0.05)
 
     assert reaped, f"Child process {child_pid} was not reaped by daemon thread"
+
+
+def test_job_id_with_user_role_names_accepted(env_sandbox):
+    p = paths()
+    now = datetime.now(timezone.utc)
+    for role in ["review-mvp", "implement2", "Haiku_Impl"]:
+        job = new_job(p, role, now)
+        job.write_json("result.json", {"id": job.id, "status": "ok", "role": role})
+        data = show_job_data(job.id)
+        assert data["id"] == job.id
+        assert data["role"] == role
+        wait_res = wait_job(job.id, timeout_s=1)
+        assert wait_res["state"] == "ok"
+
+
+def test_spawn_early_exit_reported(env_sandbox, repo):
+    p = paths()
+    # Child exits with code 0 before announcing
+    res0 = _spawn_detached(
+        cmd=[sys.executable, "-c", "import sys; sys.stdout.write('clean exit\\n'); sys.exit(0)"],
+        workdir_path=repo,
+        p=p,
+    )
+    assert "error" in res0
+    assert "child exited with code 0 before announcing a job" in res0["error"]
+    assert "clean exit" in res0["error"]
+    assert "log" in res0
+    assert Path(res0["log"]).is_file()
+
+    # Child exits with non-zero code before announcing
+    res1 = _spawn_detached(
+        cmd=[sys.executable, "-c", "import sys; sys.stderr.write('early error\\n'); sys.exit(2)"],
+        workdir_path=repo,
+        p=p,
+    )
+    assert "error" in res1
+    assert "child exited with code 2 before announcing a job" in res1["error"]
+    assert "early error" in res1["error"]
+    assert "log" in res1
+    assert Path(res1["log"]).is_file()

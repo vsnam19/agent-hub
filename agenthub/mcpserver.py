@@ -21,7 +21,7 @@ from agenthub.workers import available_skills
 if TYPE_CHECKING:
     from mcp.server.mcpserver import MCPServer
 
-JOB_ID_RE = re.compile(r"^\d{8}-\d{6}-[a-z-]+-[0-9a-f]{4}$")
+JOB_ID_RE = re.compile(r"^\d{8}-\d{6}-[A-Za-z0-9_-]+-[0-9a-f]{4}$")
 
 
 def validate_job_id(job_id: str, p: Paths) -> Path:
@@ -256,13 +256,21 @@ def _spawn_detached(
                         break
                 except OSError:
                     pass
-            if proc.returncode != 0:
-                err_msg = ""
-                if log_file.is_file():
-                    err_msg = log_file.read_text().strip()
-                msg = err_msg or f"process exited with returncode {proc.returncode}"
-                return {"error": f"{msg} (log: {log_file})", "log": str(log_file)}
-            break
+            if is_temp_announce and announce_file.is_file():
+                try:
+                    announce_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            tail = ""
+            if log_file.is_file():
+                try:
+                    lines = log_file.read_text(errors="replace").splitlines()
+                    tail = "\n".join(lines[-40:]).strip()
+                except OSError:
+                    pass
+            prefix = f"child exited with code {proc.returncode} before announcing a job"
+            msg = f"{prefix}\n{tail}" if tail else prefix
+            return {"error": f"{msg} (log: {log_file})", "log": str(log_file)}
 
         time.sleep(0.05)
 
