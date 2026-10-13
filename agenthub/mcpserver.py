@@ -1,3 +1,4 @@
+import asyncio
 import math
 import os
 import subprocess
@@ -191,6 +192,7 @@ def run_job(
 
     cmd = [
         sys.executable,
+        "-P",
         "-m",
         "agenthub",
         "run",
@@ -245,6 +247,7 @@ def _spawn_detached(
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
                 env=env,
+                cwd=p.state_dir,
             )
     except OSError as e:
         return {"error": f"spawn failed: {e} (log: {log_file})", "log": str(log_file)}
@@ -291,16 +294,43 @@ def _spawn_detached(
 
     if target_job_id is None:
         # Timeout: terminate the child's process group and clean up the announce file
-        try:
-            import signal
+        import signal
 
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        pgid = None
+        try:
+            pgid = os.getpgid(proc.pid)
         except OSError:
             pass
+
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except OSError:
+                pass
+        else:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+
         try:
             proc.wait(timeout=5)
-        except Exception:
-            pass
+        except (subprocess.TimeoutExpired, Exception):
+            if pgid is not None:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except OSError:
+                    pass
+            else:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+            try:
+                proc.wait()
+            except Exception:
+                pass
+
         try:
             announce_file.unlink(missing_ok=True)
         except OSError:
@@ -354,6 +384,7 @@ def gate_start(
 
     cmd = [
         sys.executable,
+        "-P",
         "-m",
         "agenthub",
         "gate",
@@ -452,6 +483,48 @@ def wait_job(
     return {"state": "running"}
 
 
+async def wait_job_async(
+    job_id: str,
+    timeout_s: int = 60,
+    p: Paths | None = None,
+) -> dict[str, Any]:
+    p = p or paths()
+    validate_job_id(job_id, p)
+
+    timeout = clamp_timeout(timeout_s)
+    start_mono = time.monotonic()
+
+    target_job = None
+    while time.monotonic() - start_mono <= min(float(timeout), WAIT_APPEAR_S):
+        try:
+            target_job = get_job(p, job_id)
+            break
+        except KeyError:
+            pass
+        await asyncio.sleep(0.05)
+
+    if target_job is None:
+        raise KeyError(f"unknown job: {job_id}")
+
+    while time.monotonic() - start_mono <= timeout:
+        job_result_path = target_job.dir / "result.json"
+        if not job_result_path.is_file():
+            await asyncio.sleep(0.1)
+            continue
+        try:
+            result = target_job.read_json("result.json")
+        except (OSError, ValueError):
+            await asyncio.sleep(0.1)
+            continue
+
+        if result.get("status") != "running":
+            return _format_wait_result(result)
+
+        await asyncio.sleep(0.1)
+
+    return {"state": "running"}
+
+
 def build_server() -> "MCPServer":
     try:
         from mcp.server.mcpserver import MCPServer
@@ -513,11 +586,11 @@ def build_server() -> "MCPServer":
         description="Wait for a job to finish, bounded by timeout_s (at most 300s)",
         annotations=ToolAnnotations(readOnlyHint=True),
     )
-    def wait_job_tool(
+    async def wait_job_tool(
         job_id: str,
         timeout_s: int = 60,
     ) -> dict[str, Any]:
-        return wait_job(
+        return await wait_job_async(
             job_id=job_id,
             timeout_s=timeout_s,
         )

@@ -70,7 +70,10 @@ def _announcing(announce_path: str | None):
         try:
             orig_on_started(job_id)
         finally:
-            _atomic_write(Path(announce_path), f"{job_id}\n")
+            try:
+                _atomic_write(Path(announce_path), f"{job_id}\n")
+            except Exception as e:
+                print(_safe(f"agent-hub: announce failed: {e}", sys.stderr), file=sys.stderr)
 
     orch.on_started = announce
     try:

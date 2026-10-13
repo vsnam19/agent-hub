@@ -13,7 +13,7 @@ from agenthub import guards
 from agenthub.brief import BriefError
 from agenthub.cli import UsageError, main
 from agenthub.config import ConfigError, Paths, paths
-from agenthub.jobs import get_job, new_job
+from agenthub.jobs import get_job, list_jobs, new_job
 from agenthub.mcpserver import (
     _spawn_detached,
     build_server,
@@ -26,6 +26,7 @@ from agenthub.mcpserver import (
     show_job_data,
     validate_run_args,
     wait_job,
+    wait_job_async,
 )
 from tests.gitrepo import make_repo
 
@@ -972,3 +973,167 @@ def test_brief_path_must_be_absolute_file(env_sandbox, repo, tmp_path, monkeypat
     assert wpath == repo.resolve()
     assert kind == "implement"
     assert text == BRIEF
+
+
+def test_child_does_not_import_cwd_agenthub(env_sandbox, repo, tmp_path, monkeypatch):
+    decoy_dir = tmp_path / "server_cwd"
+    decoy_dir.mkdir()
+    decoy_pkg = decoy_dir / "agenthub"
+    decoy_pkg.mkdir()
+    (decoy_pkg / "__init__.py").write_text("")
+    (decoy_pkg / "__main__.py").write_text("import sys; sys.exit(42)\n")
+
+    monkeypatch.chdir(decoy_dir)
+    brief = write_brief(tmp_path)
+
+    res = run_job(workdir=str(repo), role="implement", brief_path=str(brief))
+    assert "error" not in res
+    assert "job_id" in res
+
+    set_repo_gates(repo, ["true"])
+    gate_res = gate_start(workdir=str(repo))
+    assert "error" not in gate_res
+    assert "job_id" in gate_res
+
+
+def test_spawn_child_cwd_is_state_dir(env_sandbox, repo, tmp_path):
+    p = paths()
+    fake_id = "20260101-000000-gate-9999"
+    out_file = tmp_path / "cwd_check.txt"
+    script = (
+        "import os, sys, pathlib; "
+        "idx = sys.argv.index('--announce'); "
+        "announce = pathlib.Path(sys.argv[idx + 1]); "
+        f"announce.write_text('{fake_id}\\n'); "
+        f"pathlib.Path({str(out_file)!r}).write_text(os.getcwd()); "
+    )
+    res = _spawn_detached(
+        cmd=[sys.executable, "-c", script],
+        workdir_path=repo,
+        p=p,
+    )
+    assert res["job_id"] == fake_id
+    assert out_file.is_file()
+    assert Path(out_file.read_text()).resolve() == p.state_dir.resolve()
+
+
+def test_timeout_escalates_to_sigkill(env_sandbox, repo, monkeypatch):
+    """Child that ignores SIGTERM is escalated to SIGKILL on timeout."""
+    p = paths()
+
+    pid_file = repo / "child_pid.txt"
+    # Child ignores SIGTERM and sleeps
+    script = (
+        "import os, signal, time, pathlib; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); "
+        "time.sleep(300)"
+    )
+
+    real_monotonic = time.monotonic
+    real_sleep = time.sleep
+
+    def fast_monotonic():
+        if pid_file.is_file():
+            return real_monotonic() + 120.0
+        return real_monotonic()
+
+    monkeypatch.setattr(time, "monotonic", fast_monotonic)
+    monkeypatch.setattr(time, "sleep", lambda _: real_sleep(0.01))
+
+    res = _spawn_detached(
+        cmd=[sys.executable, "-c", script],
+        workdir_path=repo,
+        p=p,
+    )
+
+    assert "error" in res
+    assert "log" in res
+    assert list(p.state_dir.glob("*announce*")) == []
+
+    assert pid_file.is_file()
+    child_pid = int(pid_file.read_text().strip())
+
+    try:
+        os.kill(child_pid, 0)
+        alive = True
+    except OSError:
+        alive = False
+
+    if alive:
+        try:
+            os.kill(child_pid, 9)
+        except OSError:
+            pass
+        raise AssertionError(f"child process {child_pid} was not killed by SIGKILL escalation")
+
+
+def test_announce_write_failure_does_not_stop_job(env_sandbox, repo, tmp_path, capsys):
+    brief = write_brief(tmp_path)
+    # A directory path cannot be overwritten as a regular file by _atomic_write
+    bad_announce = tmp_path / "announce_dir"
+    bad_announce.mkdir()
+
+    rc = main(
+        [
+            "run",
+            "-d",
+            str(repo),
+            "--role",
+            "implement",
+            "--brief",
+            str(brief),
+            "--announce",
+            str(bad_announce),
+        ]
+    )
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "announce" in err.lower()
+
+    # The job finished normally (status: "ok")
+    p = paths()
+    jobs = list_jobs(p, 10)
+    assert len(jobs) >= 1
+    assert jobs[0]["status"] == "ok"
+
+
+def test_wait_job_async_returns_result(env_sandbox, repo):
+    p = paths()
+    job = new_job(p, "implement", datetime.now(timezone.utc))
+    job.write_json("result.json", {"id": job.id, "status": "ok", "role": "implement"})
+
+    res = asyncio.run(wait_job_async(job_id=job.id, timeout_s=1))
+    assert res["status"] == "ok"
+    assert res["state"] == "ok"
+
+
+def test_wait_job_tool_does_not_block_event_loop(env_sandbox, repo):
+    p = paths()
+    job = new_job(p, "implement", datetime.now(timezone.utc))
+    job.write_json("result.json", {"id": job.id, "status": "running"})
+
+    server = build_server()
+
+    async def run_test():
+        ticks = 0
+        stop = False
+
+        async def heartbeat():
+            nonlocal ticks
+            while not stop:
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        hb_task = asyncio.create_task(heartbeat())
+        try:
+            tool_res = await server.call_tool("wait_job", {"job_id": job.id, "timeout_s": 1})
+            assert not tool_res.is_error
+            data = json.loads(tool_res.content[0].text)
+            assert data.get("state") == "running"
+            assert ticks >= 5
+        finally:
+            stop = True
+            await hb_task
+
+    asyncio.run(run_test())
