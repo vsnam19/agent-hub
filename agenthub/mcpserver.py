@@ -189,8 +189,6 @@ def _spawn_detached(
     role: str | None = None,
 ) -> dict[str, Any]:
     env = os.environ.copy()
-    env["AGENT_HUB_STATE"] = str(p.state_dir)
-    env["AGENT_HUB_CONFIG"] = str(p.config_dir)
 
     p.state_dir.mkdir(parents=True, exist_ok=True)
     log_file = p.state_dir / f"{log_prefix}-{time.time_ns()}.log"

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import time
@@ -10,9 +11,10 @@ import pytest
 from agenthub import guards
 from agenthub.brief import BriefError
 from agenthub.cli import UsageError, main
-from agenthub.config import ConfigError, paths
+from agenthub.config import ConfigError, Paths, paths
 from agenthub.jobs import get_job, new_job
 from agenthub.mcpserver import (
+    _spawn_detached,
     build_server,
     clamp_timeout,
     gate_start,
@@ -350,3 +352,33 @@ def test_ready_validation_errors(env_sandbox, repo):
 
     with pytest.raises(UsageError):
         ready(str(repo / "nonexistent-dir"))
+
+
+def test_spawn_env_does_not_add_state_or_config(env_sandbox, monkeypatch, tmp_path):
+    monkeypatch.delenv("AGENT_HUB_STATE", raising=False)
+    monkeypatch.delenv("AGENT_HUB_CONFIG", raising=False)
+    seen_envs = []
+
+    class FailedProc:
+        returncode = 1
+
+        def poll(self):
+            return 1
+
+    def fake_popen(cmd, **kwargs):
+        seen_envs.append(kwargs["env"])
+        return FailedProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    p = Paths(config_dir=tmp_path / "config", state_dir=tmp_path / "state")
+
+    res = _spawn_detached(cmd=["true"], workdir_path=tmp_path, p=p)
+    assert "error" in res
+    assert "AGENT_HUB_STATE" not in seen_envs[0]
+    assert "AGENT_HUB_CONFIG" not in seen_envs[0]
+    assert seen_envs[0]["PATH"] == os.environ["PATH"]
+
+    state_from_server = str(tmp_path / "server-state")
+    monkeypatch.setenv("AGENT_HUB_STATE", state_from_server)
+    _spawn_detached(cmd=["true"], workdir_path=tmp_path, p=p)
+    assert seen_envs[1]["AGENT_HUB_STATE"] == state_from_server
