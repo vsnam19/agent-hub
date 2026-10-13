@@ -2,6 +2,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 
 import pytest
 
@@ -321,3 +322,120 @@ def test_review_cancel_after_last_repo_gate_is_not_a_pass(env_sandbox, repo, cap
     ready_out = json.loads(capsys.readouterr().out)
     assert rc == 1
     assert f"no passing gate on {head}" in ready_out["problems"]
+
+
+def test_running_gate_job_has_pid(env_sandbox, repo, tmp_path, capsys, monkeypatch):
+    import agenthub.cli as cli
+    from agenthub.jobs import get_job
+    from agenthub.procinfo import start_time
+
+    seen_during_gate = tmp_path / "seen_pid.json"
+    gate_cmd = (
+        f'{sys.executable} -c "'
+        f"import json, pathlib; "
+        f"from agenthub.config import paths; "
+        f"from agenthub.jobs import list_jobs, get_job; "
+        f"jobs = list_jobs(paths(), 10); "
+        f"assert len(jobs) >= 1; "
+        f"j = get_job(paths(), jobs[0]['id']); "
+        f"assert (j.dir / 'pid').is_file(); "
+        f"pathlib.Path({str(seen_during_gate)!r}).write_text((j.dir / 'pid').read_text()); "
+        f'"'
+    )
+    set_repo_gates(repo, [gate_cmd])
+    announce_file = tmp_path / "announced.txt"
+    seen_at_announce = []
+    orig_atomic_write = cli._atomic_write
+
+    def checking_atomic_write(path, content):
+        if path == announce_file:
+            job_id = content.strip()
+            job = get_job(paths(), job_id)
+            pid_file = job.dir / "pid"
+            assert pid_file.is_file(), f"pid file must exist when job {job_id} is announced"
+            seen_at_announce.append(json.loads(pid_file.read_text()))
+        orig_atomic_write(path, content)
+
+    monkeypatch.setattr(cli, "_atomic_write", checking_atomic_write)
+    rc = main(["gate", "-d", str(repo), "--announce", str(announce_file), "--json"])
+
+    assert rc == 0
+    expected = {"pid": os.getpid(), "start_time": start_time(os.getpid())}
+    assert len(seen_at_announce) == 1
+    assert seen_at_announce[0] == expected
+
+    assert seen_during_gate.is_file()
+    assert json.loads(seen_during_gate.read_text()) == expected
+
+    out = json.loads(capsys.readouterr().out)
+    job = get_job(paths(), out["id"])
+    assert (job.dir / "pid").is_file()
+    assert json.loads((job.dir / "pid").read_text()) == expected
+
+
+def test_cancel_running_gate_job_stops_it(env_sandbox, repo, tmp_path, capsys):
+    import threading
+    import time
+    from datetime import datetime, timezone
+
+    from agenthub.jobs import get_job
+    from agenthub.orchestrate import _finish
+
+    gate2_marker = tmp_path / "gate2_ran.txt"
+    gate1_started = tmp_path / "gate1_started.txt"
+
+    gate1_cmd = (
+        f'{sys.executable} -c "'
+        f"import pathlib, time; "
+        f"pathlib.Path({str(gate1_started)!r}).write_text('started'); "
+        f"time.sleep(30); "
+        f'"'
+    )
+    set_repo_gates(repo, [gate1_cmd, f"touch {gate2_marker}"])
+
+    announce_file = tmp_path / "announce.txt"
+    cancel_output = []
+
+    def cancel_when_started():
+        deadline = time.time() + 10
+        while time.time() < deadline and not gate1_started.exists():
+            time.sleep(0.02)
+        assert gate1_started.exists()
+
+        job_id = announce_file.read_text().strip()
+        rc = main(["cancel", job_id, "-d", str(repo)])
+        assert rc == 0
+        captured = capsys.readouterr()
+        cancel_output.append(captured.out)
+
+    thread = threading.Thread(target=cancel_when_started)
+    thread.start()
+
+    start_t = time.time()
+    rc = main(["gate", "-d", str(repo), "--announce", str(announce_file), "--json"])
+    duration = time.time() - start_t
+    thread.join(timeout=5)
+
+    assert rc == 130
+    assert duration < 10, f"gate took {duration}s, sleep 30 was not stopped"
+    assert not gate2_marker.exists(), "gate 2 should not have run"
+
+    assert len(cancel_output) == 1
+    assert f"sent SIGTERM to {os.getpid()}" in cancel_output[0]
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "cancelled"
+    assert out["exit_code"] == 130
+
+    job = get_job(paths(), out["id"])
+    rec = job.read_json("result.json")
+    assert rec["status"] == "cancelled"
+    assert rec["exit_code"] == 130
+
+    # _finish does not overwrite a cancelled record
+    def now_fn():
+        return datetime.now(timezone.utc)
+
+    finished_rec = _finish(job, {"id": job.id, "status": "running"}, "ok", now_fn, datetime.now(timezone.utc))
+    assert finished_rec["status"] == "cancelled"
+    assert job.read_json("result.json")["status"] == "cancelled"

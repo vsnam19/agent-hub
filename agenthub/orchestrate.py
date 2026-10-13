@@ -209,6 +209,8 @@ def run_gate_job(
         "diffstat": "",
         "reply_path": None,
     }
+    pid = os.getpid()
+    (job.dir / "pid").write_text(json.dumps({"pid": pid, "start_time": start_time(pid)}))
     job.write_json("result.json", record)
     (on_started or globals()["on_started"])(job.id)
     with _Cancel() as cancel:
@@ -218,7 +220,7 @@ def run_gate_job(
             )
             record["gate_touched"] = [] if cancel.cancelled else gateguard.inspect_diff(repo, since)
         except BaseException:
-            _finish(job, record, "failed", now, started)
+            _finish(job, record, "cancelled" if cancel.cancelled else "failed", now, started)
             raise
     if cancel.cancelled:
         return _finish(job, record, "cancelled", now, started)
@@ -657,6 +659,12 @@ def _write_reply(attempt_dir: Path, cl: Classified) -> None:
 
 
 def _finish(job: Job, record: dict, status: str, now, started: datetime) -> dict:
+    try:
+        current = job.read_json("result.json")
+    except (OSError, ValueError):
+        current = {}
+    if current.get("status") == "cancelled" and status != "cancelled":
+        return current
     ended = now()
     record.update(
         status=status,
