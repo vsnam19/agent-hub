@@ -5,11 +5,15 @@ description = "Run coding agents from one orchestrator, by role, with quota fall
 requires-python = ">=3.12"
 dependencies = []
 
+[project.optional-dependencies]
+mcp = ["mcp>=2.3,<3"]
+
 [project.scripts]
 agent-hub = "agenthub.cli:main"
 
 [dependency-groups]
 dev = [
+    "mcp>=2.3,<3",
     "pytest>=8",
     "ruff>=0.16",
 ]

@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 import unicodedata
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -52,6 +52,44 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _atomic_write(path: Path, content: str) -> None:
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}_{time.time_ns()}")
+    try:
+        tmp.write_text(content)
+        tmp.replace(path)
+    except BaseException:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        raise
+
+
+@contextmanager
+def _announcing(announce_path: str | None):
+    if not announce_path:
+        yield
+        return
+    import agenthub.orchestrate as orch
+
+    orig_on_started = orch.on_started
+
+    def announce(job_id: str) -> None:
+        try:
+            orig_on_started(job_id)
+        finally:
+            try:
+                _atomic_write(Path(announce_path), f"{job_id}\n")
+            except Exception as e:
+                print(_safe(f"agent-hub: announce failed: {e}", sys.stderr), file=sys.stderr)
+
+    orch.on_started = announce
+    try:
+        yield
+    finally:
+        orch.on_started = orig_on_started
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="agent-hub", description="Run coding agents by role with quota fallback")
     sub = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
@@ -77,6 +115,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--skill", action="append", default=[], dest="skills", metavar="NAME", help="worker skill to load (repeatable)"
     )
+    run.add_argument("--announce", help=argparse.SUPPRESS)
     run.add_argument("--jev", action="store_true", help="use jev fallback for missing handoffs")
     run.add_argument("--json", action="store_true")
 
@@ -178,7 +217,10 @@ def _build_parser() -> argparse.ArgumentParser:
     gate = sub.add_parser("gate", help="run the gates on the committed HEAD and record them (exit 9 if one fails)")
     gate.add_argument("-d", "--dir", default=".", dest="workdir", help="clean work tree to gate")
     gate.add_argument("--gate", action="append", dest="gates", help="gate command to run after the repo gates")
+    gate.add_argument("--announce", help=argparse.SUPPRESS)
     gate.add_argument("--json", action="store_true")
+
+    sub.add_parser("mcp", help="run the MCP server over stdio")
 
     return parser
 
@@ -200,6 +242,7 @@ def main(argv: list[str] | None = None) -> int:
             "gate": _cmd_gate,
             "hub": _cmd_hub,
             "skills": _cmd_skills,
+            "mcp": _cmd_mcp,
         }[args.command]
         return handler(args)
     except SystemExit as e:  # --help
@@ -292,7 +335,8 @@ def _cmd_run(args) -> int:
         allow=args.allow,
         skills=args.skills,
     )
-    result = run_job(run_args, p, pool, _now)
+    with _announcing(getattr(args, "announce", None)):
+        result = run_job(run_args, p, pool, _now)
     if args.json:
         print(json.dumps(result, indent=2))
     else:
@@ -679,7 +723,8 @@ def _cmd_gate(args) -> int:
         since = guards._run_git(repo.root, "merge-base", "HEAD", base)
     except subprocess.CalledProcessError:
         raise UsageError(f"no merge base of HEAD and {base}") from None
-    result = run_gate_job(paths(), repo, args.gates or [], base, since, _now)
+    with _announcing(getattr(args, "announce", None)):
+        result = run_gate_job(paths(), repo, args.gates or [], base, since, _now)
     if args.json:
         print(json.dumps(result, indent=2))
     else:
@@ -1109,3 +1154,15 @@ def _cmd_plan(args) -> int:
 
         print(_safe(f"still running: {plan.slug}"))
         return 124
+
+
+def _cmd_mcp(args) -> int:
+    try:
+        import mcp.server.mcpserver  # noqa: F401
+    except (ImportError, ModuleNotFoundError):
+        raise UsageError("mcp SDK not installed; install with: uv tool install 'agent-hub[mcp]'") from None
+
+    from agenthub.mcpserver import run_stdio
+
+    run_stdio()
+    return 0

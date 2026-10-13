@@ -11,12 +11,8 @@ from tests.gitrepo import make_repo
 
 @pytest.fixture(autouse=True)
 def _isolate_state(tmp_path, monkeypatch):
-    import os
-
-    if os.environ.get("AGENT_HUB_STATE") is None:
-        monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path / "hub_state"))
-    if os.environ.get("AGENT_HUB_CONFIG") is None:
-        monkeypatch.setenv("AGENT_HUB_CONFIG", str(tmp_path / "hub_config"))
+    monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path / "hub_state"))
+    monkeypatch.setenv("AGENT_HUB_CONFIG", str(tmp_path / "hub_config"))
 
 
 @pytest.fixture
