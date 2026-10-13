@@ -13,6 +13,7 @@ from agenthub.config import load_pool, paths
 from agenthub.guards import _git_argv
 from agenthub.plan import Plan, Task
 from agenthub.planstate import AttemptState, State, TaskState
+from agenthub.pool import parse_link
 
 PLAN_POLL_S = float(os.environ.get("AGENT_HUB_PLAN_POLL_S", "2.0"))
 TRAIL_HEADER = "time\ttask\tphase\tdecision\treason\tevidence\tresult"
@@ -52,7 +53,8 @@ def _implementer(vstate: TaskState) -> str | None:
 
 
 def _reviewers_besides(role: str, implementer: str) -> list[str]:
-    return [link for link in load_pool().roles[role].chain if link != implementer]
+    # Compare agent:model only: a link's effort does not make it a different reviewer.
+    return [link for link in load_pool().roles[role].chain if parse_link(link).quota_key != implementer]
 
 
 def _autocommit(worktree: str, slug: str, task_name: str, job_result: dict) -> str | None:

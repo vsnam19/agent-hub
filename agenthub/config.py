@@ -180,4 +180,13 @@ def load_pool(p: Paths | None = None) -> Pool:
         if role_name not in timeouts:
             timeouts[role_name] = timeouts.get(role.kind, timedelta(minutes=60))
 
+    # Imported here: agenthub.pool imports this module at load time.
+    from agenthub.pool import parse_link
+
+    for role in roles.values():
+        for link_str in role.chain:
+            link = parse_link(link_str)
+            if link.effort and link.agent != "claude":
+                raise ConfigError(f"effort is only supported for claude links: {link_str}")
+
     return Pool(roles=roles, quota_cooldown=quota_cooldown, timeouts=timeouts)
