@@ -8,11 +8,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agenthub import brief as briefmod
+from agenthub import guards
 from agenthub.agents import registry
 from agenthub.cli import ALL_JOBS, WAIT_APPEAR_S, UsageError, _job_repo, _repo_of
 from agenthub.config import ConfigError, Paths, parse_duration, paths, role_kind
 from agenthub.jobs import JOB_ID_RE, get_job, list_jobs
-from agenthub.orchestrate import skills_hint
+from agenthub.orchestrate import readiness, skills_hint
 from agenthub.pool import Cooldowns, load_pool, parse_link
 from agenthub.workers import available_skills
 
@@ -177,12 +178,22 @@ def run_job(
         cmd.extend(["--skill", s])
     cmd.append("--json")
 
+    return _spawn_detached(cmd=cmd, workdir_path=workdir_path, p=p, log_prefix="mcp-run", role=_kind)
+
+
+def _spawn_detached(
+    cmd: list[str],
+    workdir_path: Path,
+    p: Paths,
+    log_prefix: str = "mcp-run",
+    role: str | None = None,
+) -> dict[str, Any]:
     env = os.environ.copy()
     env["AGENT_HUB_STATE"] = str(p.state_dir)
     env["AGENT_HUB_CONFIG"] = str(p.config_dir)
 
     p.state_dir.mkdir(parents=True, exist_ok=True)
-    log_file = p.state_dir / f"mcp-run-{time.time_ns()}.log"
+    log_file = p.state_dir / f"{log_prefix}-{time.time_ns()}.log"
 
     existing_job_ids: set[str] = set()
     if p.jobs_dir.is_dir():
@@ -212,6 +223,7 @@ def run_job(
                     continue
                 if entry.name in existing_job_ids:
                     continue
+
                 req_file = Path(entry.path) / "request.json"
                 if req_file.is_file():
                     try:
@@ -222,6 +234,22 @@ def run_job(
                     if req_workdir and Path(req_workdir).resolve() == workdir_path:
                         target_job_id = entry.name
                         break
+
+                res_file = Path(entry.path) / "result.json"
+                if res_file.is_file():
+                    try:
+                        res_data = json.loads(res_file.read_text())
+                    except (OSError, ValueError):
+                        continue
+                    res_workdir = res_data.get("workdir")
+                    if res_workdir and Path(res_workdir).resolve() == workdir_path:
+                        target_job_id = entry.name
+                        break
+
+                if role == "gate" and "-gate-" in entry.name:
+                    target_job_id = entry.name
+                    break
+
             if target_job_id is not None:
                 break
 
@@ -240,6 +268,53 @@ def run_job(
         return {"error": err_msg or "job record did not appear within 10s"}
 
     return {"job_id": target_job_id, "workdir": str(workdir_path)}
+
+
+def validate_gate_args(workdir: str) -> Path:
+    if not workdir or not str(workdir).strip():
+        raise UsageError("the following arguments are required: -d/--dir")
+    return Path(workdir).expanduser().resolve()
+
+
+def gate_start(
+    workdir: str,
+    gates: list[str] | None = None,
+    p: Paths | None = None,
+) -> dict[str, Any]:
+    p = p or paths()
+    gates = gates or []
+    workdir_path = validate_gate_args(workdir)
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "agenthub",
+        "gate",
+        "-d",
+        str(workdir_path),
+    ]
+    for g in gates:
+        cmd.extend(["--gate", g])
+    cmd.append("--json")
+
+    return _spawn_detached(cmd=cmd, workdir_path=workdir_path, p=p, log_prefix="mcp-gate", role="gate")
+
+
+def ready(workdir: str, p: Paths | None = None) -> dict[str, Any]:
+    if not workdir or not str(workdir).strip():
+        raise UsageError("the following arguments are required: -d/--dir")
+    p = p or paths()
+    try:
+        repo = guards.inspect(Path(workdir).expanduser().resolve())
+    except guards.GuardError as e:
+        raise UsageError(str(e)) from None
+
+    head = guards.head(repo)
+    jobs = list_jobs(p, 100000)
+    problems = readiness(jobs, repo.root, head)
+    if problems:
+        return {"ready": False, "problems": problems}
+    return {"ready": True, "sha": head}
 
 
 def _gate_summary(gates: list[dict] | None) -> str | None:
@@ -390,6 +465,21 @@ def build_server() -> "MCPServer":
             workdir=workdir,
             timeout_s=timeout_s,
         )
+
+    @server.tool(
+        name="gate_start",
+        description="Gate a work tree's committed HEAD detached, returning the gate job id",
+    )
+    def gate_start_tool(workdir: str, gates: list[str] | None = None) -> dict[str, Any]:
+        return gate_start(workdir=workdir, gates=gates)
+
+    @server.tool(
+        name="ready",
+        description="Check readiness of a work tree's committed HEAD to merge",
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
+    def ready_tool(workdir: str) -> dict[str, Any]:
+        return ready(workdir=workdir)
 
     return server
 

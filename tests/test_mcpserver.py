@@ -1,8 +1,9 @@
 import asyncio
 import json
+import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -14,8 +15,10 @@ from agenthub.jobs import get_job, new_job
 from agenthub.mcpserver import (
     build_server,
     clamp_timeout,
+    gate_start,
     jobs_data,
     pool_data,
+    ready,
     run_job,
     show_job_data,
     wait_job,
@@ -109,12 +112,13 @@ def test_server_lists_tools(env_sandbox):
     server = build_server()
     tools = asyncio.run(server.list_tools())
     tool_map = {t.name: t for t in tools}
-    assert set(tool_map.keys()) == {"pool", "jobs", "show_job", "run_job", "wait_job"}
-    for name in ["pool", "jobs", "show_job", "wait_job"]:
+    assert set(tool_map.keys()) == {"pool", "jobs", "show_job", "run_job", "wait_job", "gate_start", "ready"}
+    for name in ["pool", "jobs", "show_job", "wait_job", "ready"]:
         tool = tool_map[name]
         assert tool.annotations is not None
         assert tool.annotations.read_only_hint is True
     assert tool_map["run_job"].annotations is None or tool_map["run_job"].annotations.read_only_hint is not True
+    assert tool_map["gate_start"].annotations is None or tool_map["gate_start"].annotations.read_only_hint is not True
 
     pool_res = asyncio.run(server.call_tool("pool", {}))
     assert not pool_res.is_error
@@ -257,3 +261,92 @@ def test_wait_job_errors(env_sandbox, repo):
 
     with pytest.raises(UsageError):
         wait_job(workdir=str(repo / "nonexistent-dir"), timeout_s=1)
+
+
+def git_head(repo):
+    res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True)
+    return res.stdout.strip()
+
+
+def set_repo_gates(repo, gates):
+    (repo / ".agent-hub").mkdir(exist_ok=True)
+    (repo / ".agent-hub" / "config.toml").write_text(f"gates = {json.dumps(gates)}\n")
+    subprocess.run(["git", "add", ".agent-hub"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "repo gates"], cwd=repo, check=True)
+
+
+def add_job_record(
+    repo, kind, head, *, model="m1", agent="codex", verdict=None, gate_sha=None, n=0, repo_gates=("true",), touched=()
+):
+    when = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=n)
+    job = new_job(paths(), kind, when)
+    record = {
+        "id": job.id,
+        "role": kind,
+        "kind": kind,
+        "status": "ok",
+        "agent": agent,
+        "model": model,
+        "workdir": str(repo),
+        "head": head,
+        "verdict": verdict,
+        "gate": [{"cmd": "true", "rc": 0, "sha": gate_sha or head}] if kind in ("implement", "gate") else [],
+        "gate_touched": list(touched),
+    }
+    if kind == "gate":
+        record["repo_gates"] = list(repo_gates)
+    job.write_json("result.json", record)
+
+
+def test_gate_start_returns_gate_job(env_sandbox, repo):
+    set_repo_gates(repo, ["true"])
+    res = gate_start(str(repo))
+    assert "job_id" in res
+    assert res["workdir"] == str(repo.resolve())
+    job_id = res["job_id"]
+    assert "-gate-" in job_id
+
+    wait_res = wait_job(job_id=job_id, timeout_s=10)
+    assert wait_res["status"] == "ok"
+    assert wait_res["kind"] == "gate"
+    assert wait_res["gate_summary"] == "passed (1)"
+
+
+def test_ready_reports_problems(env_sandbox, repo):
+    head = git_head(repo)
+    res = ready(str(repo))
+    assert res == {"ready": False, "problems": res["problems"]}
+    assert f"no passing gate on {head}" in res["problems"]
+    assert "no implementer recorded: cannot check reviewer independence" in res["problems"]
+    assert "no review" in res["problems"]
+
+
+def test_ready_true_on_approved_head(env_sandbox, repo):
+    head = git_head(repo)
+    add_job_record(repo, "implement", head, model="m1", n=1)
+    add_job_record(repo, "review", head, model="m2", verdict="approve", n=2)
+    res = ready(str(repo))
+    assert res == {"ready": True, "sha": head}
+
+    server = build_server()
+    call_res = asyncio.run(server.call_tool("ready", {"workdir": str(repo)}))
+    assert not call_res.is_error
+    assert json.loads(call_res.content[0].text) == {"ready": True, "sha": head}
+
+
+def test_gate_start_validation_and_errors(env_sandbox, repo):
+    with pytest.raises(UsageError):
+        gate_start("")
+
+    (repo / "dirty.txt").write_text("uncommitted\n")
+    res = gate_start(str(repo))
+    assert "error" in res
+    assert "commit first; gate runs on HEAD" in res["error"]
+
+
+def test_ready_validation_errors(env_sandbox, repo):
+    with pytest.raises(UsageError):
+        ready("")
+
+    with pytest.raises(UsageError):
+        ready(str(repo / "nonexistent-dir"))
