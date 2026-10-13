@@ -22,6 +22,8 @@ from agenthub.mcpserver import (
     jobs_data,
     plan_merge,
     plan_review,
+    plan_review_wait,
+    plan_review_wait_async,
     plan_run,
     plan_status,
     plan_wait,
@@ -145,9 +147,10 @@ def test_server_lists_tools(env_sandbox):
         "plan_status",
         "plan_wait",
         "plan_review",
+        "plan_review_wait",
         "plan_merge",
     }
-    for name in ["pool", "jobs", "show_job", "wait_job", "ready", "plan_status", "plan_wait"]:
+    for name in ["pool", "jobs", "show_job", "wait_job", "ready", "plan_status", "plan_wait", "plan_review_wait"]:
         tool = tool_map[name]
         assert tool.annotations is not None
         assert tool.annotations.read_only_hint is True
@@ -1329,6 +1332,30 @@ def test_plan_wait_tool_does_not_block_event_loop(env_sandbox, repo, tmp_path, m
             pass
 
 
+def test_plan_review_cli_result_file(env_sandbox, tmp_path):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    result_file = tmp_path / "review-result.json"
+    rc = main(["plan", "review", str(plan_file), "--result", str(result_file)])
+    assert result_file.is_file()
+    data = json.loads(result_file.read_text())
+    assert data["exit_code"] == rc
+    assert data["status"] == ("ok" if rc == 0 else "failed")
+    assert isinstance(data["lines"], list)
+    assert len(data["lines"]) == 2
+    assert "stderr_tail" in data
+    assert isinstance(data["stderr_tail"], str)
+
+    # Test error exit (e.g. no done task named nope)
+    err_result = tmp_path / "err-result.json"
+    err_rc = main(["plan", "review", str(plan_file), "--task", "nope", "--result", str(err_result)])
+    assert err_rc == 2
+    assert err_result.is_file()
+    err_data = json.loads(err_result.read_text())
+    assert err_data["exit_code"] == 2
+    assert err_data["status"] == "failed"
+    assert "no done implement task named nope" in err_data["stderr_tail"]
+
+
 def test_plan_review_tool_returns_handle(env_sandbox, tmp_path):
     with pytest.raises(UsageError):
         plan_review("")
@@ -1346,23 +1373,139 @@ def test_plan_review_tool_returns_handle(env_sandbox, tmp_path):
     assert "plan" in res
     assert res["plan"] == "plan-1"
 
-    wait_res = plan_wait(handle, timeout_s=30)
+    wait_res = plan_review_wait(handle, timeout_s=30)
     assert "lines" in wait_res
     assert len(wait_res["lines"]) == 2
     for line in wait_res["lines"]:
         assert "gate=" in line and "review=" in line and "job=" in line
+
+    wait_res_async = asyncio.run(plan_review_wait_async(handle, timeout_s=30))
+    assert wait_res_async["lines"] == wait_res["lines"]
+    assert wait_res_async["state"] == wait_res["state"]
 
     server = build_server()
     tool_res = asyncio.run(server.call_tool("plan_review", {"plan_path": str(plan_file), "task": "t1"}))
     assert not tool_res.is_error
     data = json.loads(tool_res.content[0].text)
     assert "handle" in data
-    wait_data = asyncio.run(server.call_tool("plan_wait", {"handle": data["handle"], "timeout_s": 30}))
+    wait_data = asyncio.run(server.call_tool("plan_review_wait", {"handle": data["handle"], "timeout_s": 30}))
     assert not wait_data.is_error
     wdata = json.loads(wait_data.content[0].text)
     assert "lines" in wdata
     assert len(wdata["lines"]) == 1
     assert "t1" in wdata["lines"][0]
+
+
+def test_plan_review_result_survives_server_exit(env_sandbox, tmp_path):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    res = plan_review(str(plan_file))
+    assert "handle" in res
+    handle = res["handle"]
+
+    p = paths()
+    review_file = p.state_dir / "mcp" / "plan-review" / f"{handle}.json"
+    assert review_file.is_file()
+
+    # The child writes the result file directly; wait for it
+    wait_res = plan_review_wait(handle, timeout_s=30)
+    assert wait_res["state"] in ("ok", "failed")
+    assert "lines" in wait_res
+    assert len(wait_res["lines"]) == 2
+
+    # A separate/new call reads the result directly without needing any daemon thread
+    wait_res2 = plan_review_wait(handle, timeout_s=5)
+    assert wait_res2["lines"] == wait_res["lines"]
+    assert wait_res2["state"] == wait_res["state"]
+    assert "stderr_tail" in wait_res2
+
+
+def test_plan_review_handle_traversal_rejected(env_sandbox, tmp_path):
+    for bad_handle in ["../../x", "a/b", "..", "/etc/passwd", "/tmp/x"]:
+        with pytest.raises(KeyError):
+            plan_review_wait(bad_handle)
+
+    for empty_handle in ["", "   "]:
+        with pytest.raises(UsageError):
+            plan_review_wait(empty_handle)
+
+
+def test_plan_review_no_done_tasks_reason(env_sandbox, tmp_path, monkeypatch):
+    repo = make_repo(tmp_path / "repo")
+    plan_file = make_plan_file(tmp_path, repo)
+    plan_dir = plan_file.parent
+    (plan_dir / "state.json").write_text(
+        json.dumps({"tasks": {"t1": {"status": "pending"}, "t2": {"status": "pending"}}})
+    )
+
+    orig_popen = subprocess.Popen
+
+    # Ensure review subprocess is NOT spawned
+    def fail_popen(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if any("review" in str(c) for c in cmd):
+            raise AssertionError("should not spawn when no tasks are done")
+        return orig_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", fail_popen)
+
+    res = plan_review(str(plan_file))
+    assert res.get("reason") == "no done tasks to review"
+    assert "runner_pid" not in res
+    assert "handle" not in res
+
+    # Also test via MCP tool call
+    server = build_server()
+    tool_res = asyncio.run(server.call_tool("plan_review", {"plan_path": str(plan_file)}))
+    assert not tool_res.is_error
+    data = json.loads(tool_res.content[0].text)
+    assert data.get("reason") == "no done tasks to review"
+    assert "runner_pid" not in data
+    assert "handle" not in data
+
+
+def test_plan_wait_ignores_review_prefix(env_sandbox, tmp_path):
+    # plan_wait treats review-* as a plan path and does not attempt review handle resolution
+    with pytest.raises((UsageError, PlanError)):
+        plan_wait("review-nonexistent.json")
+
+    p = paths()
+    review_dir = p.state_dir / "mcp" / "plan-review"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    fake_review = review_dir / "review-fake.json"
+    fake_review.write_text(json.dumps({"status": "ok", "lines": ["fake"]}))
+
+    with pytest.raises((UsageError, PlanError)):
+        plan_wait("review-fake")
+
+
+def test_plan_review_spawn_failure_closes_files(env_sandbox, tmp_path, monkeypatch):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+
+    opened = []
+    orig_open = open
+
+    def tracking_open(*args, **kwargs):
+        f = orig_open(*args, **kwargs)
+        opened.append(f)
+        return f
+
+    orig_popen = subprocess.Popen
+
+    def fail_popen(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if any("review" in str(c) for c in cmd):
+            raise OSError("mocked spawn failure")
+        return orig_popen(*args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", tracking_open)
+    monkeypatch.setattr(subprocess, "Popen", fail_popen)
+
+    res = plan_review(str(plan_file))
+    assert "spawn failed" in res.get("error", "")
+
+    assert len(opened) > 0
+    for f in opened:
+        assert f.closed
 
 
 def test_plan_merge_tool_refuses_dirty_checkout(env_sandbox, tmp_path, monkeypatch, capsys):
