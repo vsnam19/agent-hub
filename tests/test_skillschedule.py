@@ -86,7 +86,7 @@ def test_apply_twice_is_idempotent(sched, capsys):
     assert rc == 0
     assert "already scheduled" in capsys.readouterr().out
     assert (sched.unit_dir / TIMER).read_text(encoding="utf-8") == before
-    assert calls(sched) == log_before
+    assert calls(sched)[len(log_before) :] == [f"--user is-enabled {TIMER}"]
 
 
 def test_invalid_calendar_exit_2(sched, capsys):
@@ -119,3 +119,31 @@ def test_systemctl_failure_exit_1(sched, capsys, monkeypatch):
 
     assert rc == 1
     assert "Failed to connect to bus" in capsys.readouterr().err
+
+
+def test_apply_after_failed_enable_retries(sched, capsys, monkeypatch):
+    monkeypatch.setenv("FAKE_SYSTEMCTL_FAIL", "1")
+    assert main(["skills", "schedule", "--apply"]) == 1
+    capsys.readouterr()
+    monkeypatch.delenv("FAKE_SYSTEMCTL_FAIL")
+    log_before = len(calls(sched))
+
+    rc = main(["skills", "schedule", "--apply"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "scheduled:" in out
+    assert "already scheduled" not in out
+    assert calls(sched)[log_before:] == ["--user daemon-reload", f"--user enable --now {TIMER}"]
+    assert (sched.unit_dir / TIMER).exists()
+
+
+def test_failed_enable_removes_new_units(sched, capsys, monkeypatch):
+    monkeypatch.setenv("FAKE_SYSTEMCTL_FAIL", "1")
+
+    rc = main(["skills", "schedule", "--apply"])
+
+    assert rc == 1
+    assert "Failed to connect to bus" in capsys.readouterr().err
+    assert not (sched.unit_dir / SERVICE).exists()
+    assert not (sched.unit_dir / TIMER).exists()

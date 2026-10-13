@@ -435,14 +435,26 @@ def _cmd_skills_schedule(args) -> int:
             print("dry run: nothing written; add --apply to schedule")
             return 0
 
-        if _read_unit(service_path) == service and _read_unit(timer_path) == timer_text:
+        files_match = _read_unit(service_path) == service and _read_unit(timer_path) == timer_text
+        timer_enabled = files_match and _schedule_run(["systemctl", "--user", "is-enabled", timer]).returncode == 0
+        if timer_enabled:
             print(_safe(f"already scheduled: {timer_path} ({args.at})"))
             return 0
+        before = {path: _read_unit(path) for path in (service_path, timer_path)}
         unit_dir.mkdir(parents=True, exist_ok=True)
-        service_path.write_text(service, encoding="utf-8")
-        timer_path.write_text(timer_text, encoding="utf-8")
-        _systemctl("daemon-reload")
-        _systemctl("enable", "--now", timer)
+        try:
+            service_path.write_text(service, encoding="utf-8")
+            timer_path.write_text(timer_text, encoding="utf-8")
+            _systemctl("daemon-reload")
+            _systemctl("enable", "--now", timer)
+        except (ScheduleError, OSError):
+            # all-or-nothing: put back what was there before this attempt (new files are removed)
+            for path, text in before.items():
+                if text is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_text(text, encoding="utf-8")
+            raise
         print(_safe(f"scheduled: {timer_path} ({args.at})"))
         return 0
     except (ScheduleError, OSError) as e:
