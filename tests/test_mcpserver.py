@@ -24,6 +24,7 @@ from agenthub.mcpserver import (
     ready,
     run_job,
     show_job_data,
+    validate_run_args,
     wait_job,
 )
 from tests.gitrepo import make_repo
@@ -893,3 +894,81 @@ def test_spawn_early_exit_reported(env_sandbox, repo):
     assert "early error" in res1["error"]
     assert "log" in res1
     assert Path(res1["log"]).is_file()
+
+
+def test_clamp_rejects_nan_inf_bool():
+    for bad in [True, False, float("nan"), float("inf"), float("-inf"), "nan", "inf", "-inf"]:
+        with pytest.raises(UsageError):
+            clamp_timeout(bad)
+        with pytest.raises(UsageError):
+            wait_job("20260101-000000-implement-0001", timeout_s=bad)
+
+
+def test_spawn_child_stdin_is_devnull(env_sandbox, repo, tmp_path):
+    p = paths()
+    fake_id = "20260101-000000-gate-9999"
+    out_file = tmp_path / "stdin_check.json"
+
+    # Set up a pipe on parent's fd 0 so that if child inherits stdin, fd 0 is a pipe and reading blocks
+    r_fd, w_fd = os.pipe()
+    real_dup_stdin = os.dup(0)
+    os.dup2(r_fd, 0)
+    os.close(r_fd)
+
+    script = (
+        "import os, sys, pathlib, json; "
+        "idx = sys.argv.index('--announce'); "
+        "announce = pathlib.Path(sys.argv[idx + 1]); "
+        f"announce.write_text('{fake_id}\\n'); "
+        "stdin_data = sys.stdin.read(); "
+        "fd0 = os.readlink('/proc/self/fd/0') if os.path.exists('/proc/self/fd/0') else '/dev/null'; "
+        f"pathlib.Path({str(out_file)!r}).write_text(json.dumps({{'stdin_data': stdin_data, 'fd0': fd0}})); "
+    )
+    try:
+        res = _spawn_detached(
+            cmd=[sys.executable, "-c", script],
+            workdir_path=repo,
+            p=p,
+        )
+        assert res["job_id"] == fake_id
+        assert out_file.is_file()
+        data = json.loads(out_file.read_text())
+        assert data["stdin_data"] == ""
+        assert data["fd0"] == "/dev/null"
+    finally:
+        os.dup2(real_dup_stdin, 0)
+        os.close(real_dup_stdin)
+        os.close(w_fd)
+
+
+def test_brief_path_must_be_absolute_file(env_sandbox, repo, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "rel_brief.md").write_text(BRIEF)
+    (tmp_path / "-").write_text(BRIEF)
+
+    # Relative path is rejected even if it exists in cwd
+    with pytest.raises(UsageError):
+        run_job(workdir=str(repo), role="implement", brief_path="rel_brief.md")
+
+    # "-" is rejected even if a file named "-" exists in cwd
+    with pytest.raises(UsageError):
+        run_job(workdir=str(repo), role="implement", brief_path="-")
+
+    # Nonexistent absolute file is rejected
+    with pytest.raises(UsageError):
+        run_job(workdir=str(repo), role="implement", brief_path=str(tmp_path / "does_not_exist.md"))
+
+    # Directory is rejected
+    with pytest.raises(UsageError):
+        run_job(workdir=str(repo), role="implement", brief_path=str(tmp_path))
+
+    # Existing regular file given as absolute path is accepted
+    valid_brief = write_brief(tmp_path)
+    wpath, kind, text = validate_run_args(
+        workdir=str(repo),
+        role="implement",
+        brief_path=str(valid_brief),
+    )
+    assert wpath == repo.resolve()
+    assert kind == "implement"
+    assert text == BRIEF

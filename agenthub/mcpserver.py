@@ -1,3 +1,4 @@
+import math
 import os
 import subprocess
 import sys
@@ -86,15 +87,24 @@ def show_job_data(job_id: str, p: Paths | None = None) -> dict[str, Any]:
 
 
 def clamp_timeout(timeout_s: Any) -> int:
+    if isinstance(timeout_s, bool):
+        raise UsageError(f"timeout cannot be boolean: {timeout_s}")
     if isinstance(timeout_s, (int, float)):
+        if not math.isfinite(timeout_s):
+            raise UsageError(f"timeout must be finite: {timeout_s}")
         val = int(timeout_s)
     elif isinstance(timeout_s, str):
         try:
             val = int(timeout_s)
         except ValueError:
-            val = int(parse_duration(timeout_s).total_seconds())
-    else:
+            try:
+                val = int(parse_duration(timeout_s).total_seconds())
+            except (ConfigError, ValueError):
+                raise UsageError(f"invalid timeout: {timeout_s!r}") from None
+    elif timeout_s is None:
         val = 60
+    else:
+        raise UsageError(f"invalid timeout type: {type(timeout_s).__name__}")
     return max(1, min(300, val))
 
 
@@ -135,8 +145,13 @@ def validate_run_args(
             raise UsageError("--brief is required for implement")
         brief_text = ""
     else:
+        bp = Path(brief_path)
+        if not bp.is_absolute() or str(brief_path) == "-":
+            raise UsageError(f"brief_path must be an absolute path: {brief_path}")
+        if not bp.is_file():
+            raise UsageError(f"brief_path must be an existing regular file: {brief_path}")
         try:
-            brief_text = Path(brief_path).read_text()
+            brief_text = bp.read_text()
         except OSError as e:
             raise UsageError(f"cannot read brief: {e}") from None
 
@@ -225,6 +240,7 @@ def _spawn_detached(
         with open(log_file, "w") as log_fd:
             proc = subprocess.Popen(
                 full_cmd,
+                stdin=subprocess.DEVNULL,
                 stdout=log_fd,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
