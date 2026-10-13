@@ -133,7 +133,15 @@ def test_gwen_refuses_review(tmp_path, monkeypatch, server):
     _configure(tmp_path, monkeypatch, server.server_address[1])
     cl = _adapter().preflight(_req(tmp_path, role="review"))
     assert cl.outcome == Outcome.MODEL_UNAVAILABLE
-    assert cl.detail == "gwen does not review"
+    assert cl.detail == "gwen only implements (no read-only mode)"
+    assert server.auth == []
+
+
+def test_gwen_refuses_plan_role(tmp_path, monkeypatch, server):
+    _configure(tmp_path, monkeypatch, server.server_address[1])
+    cl = _adapter().preflight(_req(tmp_path, role="plan"))
+    assert cl.outcome == Outcome.MODEL_UNAVAILABLE
+    assert cl.detail == "gwen only implements (no read-only mode)"
     assert server.auth == []
 
 
