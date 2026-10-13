@@ -897,10 +897,10 @@ def _cmd_plan(args) -> int:
 def _cmd_mcp(args) -> int:
     try:
         import mcp.server.mcpserver  # noqa: F401
-
-        from agenthub.mcpserver import run_stdio
-
-        run_stdio()
-        return 0
     except (ImportError, ModuleNotFoundError):
         raise UsageError("mcp SDK not installed; install with: uv tool install 'agent-hub[mcp]'") from None
+
+    from agenthub.mcpserver import run_stdio
+
+    run_stdio()
+    return 0

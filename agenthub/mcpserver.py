@@ -193,11 +193,13 @@ def _spawn_detached(
     log_file = p.state_dir / f"{log_prefix}-{time.time_ns()}.log"
 
     full_cmd = list(cmd)
+    is_temp_announce = False
     if "--announce" in full_cmd:
         announce_file = Path(full_cmd[full_cmd.index("--announce") + 1])
     else:
         announce_file = p.state_dir / f"{log_prefix}-announce-{time.time_ns()}.txt"
         full_cmd.extend(["--announce", str(announce_file)])
+        is_temp_announce = True
 
     spawn_monotonic = time.monotonic()
 
@@ -211,7 +213,7 @@ def _spawn_detached(
                 env=env,
             )
     except OSError as e:
-        return {"error": f"spawn failed: {e}"}
+        return {"error": f"spawn failed: {e} (log: {log_file})", "log": str(log_file)}
 
     poll_deadline = spawn_monotonic + 10.0
     target_job_id = None
@@ -239,7 +241,8 @@ def _spawn_detached(
                 err_msg = ""
                 if log_file.is_file():
                     err_msg = log_file.read_text().strip()
-                return {"error": err_msg or f"process exited with returncode {proc.returncode}"}
+                msg = err_msg or f"process exited with returncode {proc.returncode}"
+                return {"error": f"{msg} (log: {log_file})", "log": str(log_file)}
             break
 
         time.sleep(0.05)
@@ -248,7 +251,27 @@ def _spawn_detached(
         err_msg = ""
         if log_file.is_file():
             err_msg = log_file.read_text().strip()
-        return {"error": err_msg or "job record did not appear within 10s"}
+        msg = err_msg or "job record did not appear within 10s"
+        return {"error": f"{msg} (log: {log_file})", "log": str(log_file)}
+
+    if is_temp_announce and announce_file.is_file():
+        try:
+            announce_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    job_dir = p.jobs_dir / target_job_id
+    if log_file.is_file():
+        try:
+            job_dir.mkdir(parents=True, exist_ok=True)
+            log_file.replace(job_dir / "spawn.log")
+        except OSError:
+            try:
+                import shutil
+
+                shutil.move(str(log_file), str(job_dir / "spawn.log"))
+            except OSError:
+                pass
 
     return {"job_id": target_job_id, "workdir": str(workdir_path)}
 

@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -108,6 +109,15 @@ def test_mcp_command_without_sdk_exit_2(monkeypatch, capsys):
     assert main(["mcp"]) == 2
     err = capsys.readouterr().err
     assert "install with: uv tool install 'agent-hub[mcp]'" in err
+
+
+def test_mcp_runtime_import_error_not_masked(monkeypatch):
+    def fake_run_stdio():
+        raise ImportError("boom")
+
+    monkeypatch.setattr("agenthub.mcpserver.run_stdio", fake_run_stdio)
+    with pytest.raises(ImportError, match="boom"):
+        main(["mcp"])
 
 
 def test_server_lists_tools(env_sandbox):
@@ -472,9 +482,40 @@ def test_spawn_uses_announced_id_not_newest_job(env_sandbox, repo, tmp_path):
     assert res_run["job_id"] != decoy_gate_other_repo.id
     assert res_run["job_id"] != res_gate["job_id"]
 
-    # Verify announce files were used under state dir
-    announce_files = list(p.state_dir.glob("*announce*"))
-    assert len(announce_files) >= 2
-    announced_ids = {f.read_text().strip() for f in announce_files}
-    assert res_gate["job_id"] in announced_ids
-    assert res_run["job_id"] in announced_ids
+    # Verify temp announce files and spawn logs were cleaned up from state dir
+    assert list(p.state_dir.glob("*announce*")) == []
+    assert list(p.state_dir.glob("mcp-*.log")) == []
+
+    # Verify spawn logs were moved into the job dirs
+    gate_job = get_job(p, res_gate["job_id"])
+    assert (gate_job.dir / "spawn.log").is_file()
+    run_job_record = get_job(p, res_run["job_id"])
+    assert (run_job_record.dir / "spawn.log").is_file()
+
+
+def test_spawn_log_moved_into_job_dir(env_sandbox, repo):
+    p = paths()
+    set_repo_gates(repo, ["true"])
+    res = gate_start(str(repo))
+    assert "job_id" in res
+    job_id = res["job_id"]
+    job = get_job(p, job_id)
+    spawn_log = job.dir / "spawn.log"
+    assert spawn_log.is_file()
+    # State dir should not retain the spawn log or temp announce file
+    assert list(p.state_dir.glob("mcp-*.log")) == []
+    assert list(p.state_dir.glob("*announce*")) == []
+
+    # Spawn that never announces keeps its log and returns error with log path
+    bad_res = _spawn_detached(
+        cmd=[sys.executable, "-c", "import sys; sys.stderr.write('fatal crash\\n'); sys.exit(1)"],
+        workdir_path=repo,
+        p=p,
+    )
+    assert "error" in bad_res
+    assert "fatal crash" in bad_res["error"]
+    assert "log" in bad_res
+    log_path = Path(bad_res["log"])
+    assert log_path.is_file()
+    assert str(log_path) in bad_res["error"]
+    assert log_path.parent == p.state_dir
