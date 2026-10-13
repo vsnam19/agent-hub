@@ -160,6 +160,28 @@ available skills, and nothing is recorded. The CLI then appends a `## Skills` se
 standing orders and before the handoff footer, asking the worker to load and follow them (for implement and review
 jobs alike). Without skills there is no section.
 
+### Learned skills
+
+`agent-hub skills weekly` turns repeated work into worker skills, once a week and local only. It mines the job records
+and Claude Code transcripts for what repeats (review findings, fix rounds, owner corrections), drafts at most 3 skills
+into the owned `learned-worker` and `learned-director` plugins with eval cases, and keeps a skill only if
+`claude plugin eval` with the skill beats the run without it. The kept skills go through review and `agent-hub ready`,
+then a local release. Nothing is pushed.
+
+- `agent-hub skills mine [--days N | --since DATE] [--json]` extracts the repeats only, redacted, and writes them to
+  `<state>/skills/<date>/` (`<state>` is `~/.local/state/agent-hub` by default).
+- `agent-hub skills weekly [--dry-run] [--max-cost-usd 3]` runs the whole pipeline. `--dry-run` prints the steps and
+  writes nothing.
+- `agent-hub skills report` prints the newest `<state>/skills/<date>/report.md`.
+- `agent-hub skills schedule` runs `weekly` every Sunday at 20:17 local time through a systemd user timer. Without a
+  flag it prints the two unit files and the `systemctl --user` commands and changes nothing. `--apply` writes
+  `agent-hub-skills-weekly.service` and `.timer` into `$XDG_CONFIG_HOME/systemd/user` (default
+  `~/.config/systemd/user`), then enables the timer. `--at "<calendar>"` changes the time; it is checked with
+  `systemd-analyze calendar` first. The service uses the PATH of the shell that ran `--apply`, so `claude`, `codex`,
+  `agy` and `uv` must be on that PATH.
+- `agent-hub skills schedule --remove` disables the timer, deletes both unit files and reloads systemd. Only these two
+  units are touched.
+
 ## Exit codes
 
 | Exit | Status | Meaning |

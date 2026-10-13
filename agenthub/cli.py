@@ -2,12 +2,13 @@ import argparse
 import json
 import math
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import time
 import unicodedata
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -29,9 +30,16 @@ WAIT_APPEAR_S = 10.0
 PLAN_WAIT_POLL_S = 1.0
 PLAN_WAIT_APPEAR_S = float(os.environ.get("AGENT_HUB_PLAN_WAIT_APPEAR_S", "10.0"))
 ALL_JOBS = 100000  # every job record, for filters that must see past any --limit
+SCHEDULE_UNIT = "agent-hub-skills-weekly"
+SCHEDULE_DEFAULT_AT = "Sun *-*-* 20:17"
+SCHEDULE_TIMEOUT_S = 30
 
 
 class UsageError(Exception):
+    pass
+
+
+class ScheduleError(Exception):
     pass
 
 
@@ -150,6 +158,17 @@ def _build_parser() -> argparse.ArgumentParser:
     plan_wait.add_argument("plan_file", metavar="<plan.json>")
     plan_wait.add_argument("--timeout", help="e.g. 9m")
     plan_wait.add_argument("--json", action="store_true")
+    plan_review = plan_sub.add_parser(
+        "review", help="gate and review each done task's HEAD (exit 0 only if every reviewed task is approved)"
+    )
+    plan_review.add_argument("plan_file", metavar="<plan.json>")
+    plan_review.add_argument("--task", metavar="NAME", help="review only this task")
+    plan_merge = plan_sub.add_parser(
+        "merge",
+        help="merge each done task that agent-hub ready accepts, in dependency order (exit 1 at the first not ready)",
+    )
+    plan_merge.add_argument("plan_file", metavar="<plan.json>")
+    plan_merge.add_argument("--into", metavar="BRANCH", help="branch to merge into (default: the plan's base)")
     plan_cancel = plan_sub.add_parser("cancel", help="stop the plan's runner and its running jobs")
     plan_cancel.add_argument("plan_file", metavar="<plan.json>")
     plan_cancel.add_argument("-d", "--dir", default=".", dest="workdir", help="repository the caller runs from")
@@ -185,6 +204,15 @@ def _build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--max-cost-usd", type=float, default=3.0, help="eval budget in USD (default 3)")
     weekly.add_argument("--transcripts", help="Claude Code projects directory (default: ~/.claude/projects)")
     skills_sub.add_parser("report", help="print the newest weekly report")
+    schedule = skills_sub.add_parser(
+        "schedule", help="run skills weekly on a systemd user timer (dry-run unless --apply)"
+    )
+    schedule_mode = schedule.add_mutually_exclusive_group()
+    schedule_mode.add_argument("--apply", action="store_true", help="write the units and enable the timer")
+    schedule_mode.add_argument("--remove", action="store_true", help="disable the timer and delete its units")
+    schedule.add_argument(
+        "--at", default=SCHEDULE_DEFAULT_AT, help='systemd calendar expression (default "Sun *-*-* 20:17")'
+    )
 
     gate = sub.add_parser("gate", help="run the gates on the committed HEAD and record them (exit 9 if one fails)")
     gate.add_argument("-d", "--dir", default=".", dest="workdir", help="clean work tree to gate")
@@ -374,6 +402,168 @@ def _cmd_skills_report() -> int:
     return 0
 
 
+def _unit_dir() -> Path:
+    config_home = os.environ.get("XDG_CONFIG_HOME") or Path(os.environ.get("HOME", "~")).expanduser() / ".config"
+    return Path(config_home) / "systemd" / "user"
+
+
+def _systemd_word(value: str, *, exec_line: bool = False) -> str:
+    """Quote a unit-file value only when it has characters systemd would split or expand.
+
+    Only ExecStart= expands $VARS, so a literal $ is doubled there and nowhere else.
+    """
+    specials = " \t\"'\\%$" if exec_line else " \t\"'\\%"
+    if not any(c in value for c in specials):
+        return value
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    if exec_line:
+        escaped = escaped.replace("$", "$$")
+    return f'"{escaped}"'
+
+
+def _unit_texts(exe: str, at: str) -> tuple[str, str]:
+    service = (
+        "[Unit]\n"
+        "Description=agent-hub learned skills, weekly\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"ExecStart={_systemd_word(exe, exec_line=True)} skills weekly\n"
+        f"Environment={_systemd_word('PATH=' + os.environ.get('PATH', ''))}\n"
+        "TimeoutStartSec=6h\n"
+        "Nice=10\n"
+    )
+    timer = (
+        "[Unit]\n"
+        "Description=Run agent-hub learned skills weekly\n"
+        "\n"
+        "[Timer]\n"
+        f"OnCalendar={at}\n"
+        "Persistent=true\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+    return service, timer
+
+
+def _schedule_run(argv: list[str]) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=SCHEDULE_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise ScheduleError(f"{argv[0]}: {e}") from None
+
+
+def _systemctl(*args: str) -> None:
+    done = _schedule_run(["systemctl", "--user", *args])
+    if done.returncode != 0:
+        raise ScheduleError((done.stderr or done.stdout).strip() or f"systemctl --user {' '.join(args)} failed")
+
+
+def _check_calendar(at: str) -> None:
+    if not at.strip() or "\n" in at:
+        raise UsageError(f"invalid --at: {at!r}")
+    # "--" keeps a value such as --version from being read as an option
+    done = _schedule_run(["systemd-analyze", "calendar", "--", at])
+    if done.returncode != 0:
+        raise UsageError(f"invalid --at {at!r}: {(done.stderr or done.stdout).strip()}")
+
+
+def _read_unit(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
+def _cmd_skills_schedule(args) -> int:
+    unit_dir = _unit_dir()
+    service_path = unit_dir / f"{SCHEDULE_UNIT}.service"
+    timer_path = unit_dir / f"{SCHEDULE_UNIT}.timer"
+    timer = timer_path.name
+    try:
+        if args.remove:
+            if not (service_path.exists() or timer_path.exists()):
+                print("nothing scheduled")
+                return 0
+            # remove the files even when disable fails, so a retry is not stuck on a half-removed timer
+            failures = []
+            try:
+                _systemctl("disable", "--now", timer)
+            except ScheduleError as e:
+                failures.append(f"disable {timer}: {e}")
+            for path in (service_path, timer_path):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as e:
+                    failures.append(f"unlink {path}: {e}")
+            try:
+                _systemctl("daemon-reload")
+            except ScheduleError as e:
+                failures.append(f"daemon-reload: {e}")
+            if failures:
+                raise ScheduleError("; ".join(failures))
+            print(_safe(f"removed: {timer_path}"))
+            return 0
+
+        _check_calendar(args.at)
+        exe = shutil.which("agent-hub")
+        if exe is None:
+            raise ScheduleError("agent-hub is not on PATH")
+        service, timer_text = _unit_texts(os.path.abspath(exe), args.at)
+        if not args.apply:
+            print(_safe(f"# {service_path}\n{service}\n# {timer_path}\n{timer_text}"), end="")
+            print(f"would run: systemctl --user daemon-reload; systemctl --user enable --now {timer}")
+            print("dry run: nothing written; add --apply to schedule")
+            return 0
+
+        before = {path: _read_unit(path) for path in (service_path, timer_path)}
+        timer_existed = before[timer_path] is not None
+        was_enabled = timer_existed and _schedule_run(["systemctl", "--user", "is-enabled", timer]).returncode == 0
+        was_active = timer_existed and _schedule_run(["systemctl", "--user", "is-active", timer]).returncode == 0
+        files_match = before[service_path] == service and before[timer_path] == timer_text
+        if files_match and was_enabled and was_active:
+            print(_safe(f"already scheduled: {timer_path} ({args.at})"))
+            return 0
+        unit_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            service_path.write_text(service, encoding="utf-8")
+            timer_path.write_text(timer_text, encoding="utf-8")
+            _systemctl("daemon-reload")
+            _systemctl("enable", "--now", timer)
+        except (ScheduleError, OSError) as orig_err:
+            # all-or-nothing: stop the timer, put back what was there before this attempt (new files are
+            # removed), then reload so systemd forgets the rolled-back units; errors here must not mask the first
+            with suppress(ScheduleError):
+                _systemctl("disable", "--now", timer)
+            restore_errors: list[str] = []
+            for path, text in before.items():
+                try:
+                    if text is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        path.write_text(text, encoding="utf-8")
+                except OSError as e:
+                    restore_errors.append(f"restore {path}: {e}")
+            with suppress(ScheduleError):
+                _systemctl("daemon-reload")
+            if was_enabled:
+                with suppress(ScheduleError):
+                    _systemctl("enable", timer)
+            if was_active:
+                with suppress(ScheduleError):
+                    _systemctl("restart", timer)
+            print(_safe(f"agent-hub: {orig_err}", sys.stderr), file=sys.stderr)
+            for msg in restore_errors:
+                print(_safe(f"agent-hub: {msg}", sys.stderr), file=sys.stderr)
+            return 1
+        print(_safe(f"scheduled: {timer_path} ({args.at})"))
+        return 0
+    except (ScheduleError, OSError) as e:
+        print(_safe(f"agent-hub: {e}", sys.stderr), file=sys.stderr)
+        return 1
+
+
 def _cmd_skills(args) -> int:
     from agenthub import skillmine
 
@@ -381,6 +571,8 @@ def _cmd_skills(args) -> int:
         return _cmd_skills_weekly(args)
     if args.skills_command == "report":
         return _cmd_skills_report()
+    if args.skills_command == "schedule":
+        return _cmd_skills_schedule(args)
     state_dir = paths().state_dir
     now = _now()
     since = _mine_window(args, state_dir, now)
@@ -859,6 +1051,72 @@ def _cmd_plan(args) -> int:
                     if parsed:
                         line += f" handoff={parsed['status']} · {parsed['verification']}"
             print(_safe(line))
+        return 0
+
+    elif args.plan_command == "review":
+        from agenthub.planrun import review_task
+        from agenthub.planstate import load_or_init
+
+        if not state_file.is_file():
+            raise UsageError("state.json not found")
+        state = load_or_init(plan)
+        tasks = [t for t in plan.tasks if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"]
+        if args.task is not None:
+            tasks = [t for t in tasks if t.name == args.task]
+            if not tasks:
+                raise UsageError(f"no done implement task named {args.task}")
+        if not tasks:
+            print("no done tasks to review", file=sys.stderr)
+            return 1
+
+        all_approved = True
+        for task in tasks:
+            result = review_task(plan, task, state.task(task.name), _now)
+            if result.get("up_to_date"):
+                print(_safe(f"{task.name} up to date (review job={result['job']})"))
+                continue
+            all_approved = all_approved and result["review"] == "approve"
+            print(_safe(f"{task.name} gate={result['gate']} review={result['review']} job={result['job']}"))
+            if result["reason"]:
+                print(_safe(result["reason"]), file=sys.stderr)
+        return 0 if all_approved else 1
+
+    elif args.plan_command == "merge":
+        from agenthub.planrun import merge_order, merge_target_problem, merge_task
+        from agenthub.planstate import load_or_init
+
+        if not state_file.is_file():
+            raise UsageError("state.json not found")
+        state = load_or_init(plan)
+        target = args.into or plan.base
+        tasks = [
+            t for t in merge_order(plan) if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"
+        ]
+        if not tasks:
+            print("no done tasks to merge", file=sys.stderr)
+            return 1
+        try:
+            problem = merge_target_problem(plan.repo, target)
+        except guards.GuardError as e:
+            raise UsageError(str(e)) from None
+        if problem:
+            print(_safe(f"agent-hub: {problem}", sys.stderr), file=sys.stderr)
+            return 3
+
+        jobs = list_jobs(paths(), ALL_JOBS)
+        for task in tasks:
+            result = merge_task(plan, task, state.task(task.name), target, jobs)
+            if result["status"] == "merged":
+                print(_safe(f"{task.name} merged into {target} at {result['sha']}"))
+            elif result["status"] == "already-merged":
+                print(_safe(f"{task.name} already merged"))
+            elif result["status"] == "not-ready":
+                for problem in result["problems"]:
+                    print(_safe(f"{task.name} not ready: {problem}"))
+                return 1
+            else:
+                print(_safe(f"{task.name} merge failed: {result['reason']}", sys.stderr), file=sys.stderr)
+                return 1
         return 0
 
     elif args.plan_command == "wait":
