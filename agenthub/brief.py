@@ -104,9 +104,9 @@ def validate(kind: str, text: str) -> None:
 
 def plan_text(brief: str) -> str:
     preamble = (
-        "You are planning work in the current directory. Read the files you need with your file-reading tools.\n"
-        "Do not modify any file. You have no shell: do not run commands. Write the plan in your final message;\n"
-        "that message is the whole answer."
+        "You are planning work in the current directory. Read the files you need. This is a read-only job:\n"
+        "do not modify, create or delete files, do not run commands, and do not fetch URLs.\n"
+        "Write the plan in your final message; that message is the whole answer."
     )
     return f"{preamble}\n\n{brief}"
 
