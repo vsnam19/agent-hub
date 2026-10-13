@@ -184,6 +184,32 @@ def test_plan_task_skills_must_be_strings(tmp_path):
         assert "task core: skills must be a list of strings" in str(exc.value)
 
 
+def test_plan_rejects_plan_kind_role(monkeypatch, tmp_path):
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    (conf / "pool.toml").write_text('[roles.drafter]\nkind = "plan"\nchain = ["claude:haiku"]\n')
+    monkeypatch.setenv("AGENT_HUB_CONFIG", str(conf))
+    repo_dir = make_repo(tmp_path / "repo")
+    plan_dir = tmp_path / "plan"
+    plan_dir.mkdir()
+    plan_file = plan_dir / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "goal": "plan kind",
+                "repo": str(repo_dir),
+                "base": "master",
+                "slug": "plan-kind",
+                "tasks": [{"name": "draft", "role": "drafter"}],
+            }
+        )
+    )
+
+    with pytest.raises(PlanError) as exc:
+        load(plan_file)
+    assert "task draft: role drafter is a plan role; plan tasks must be implement or review" in str(exc.value)
+
+
 def test_plan_task_custom_role(monkeypatch, tmp_path):
     conf = tmp_path / "conf"
     conf.mkdir()

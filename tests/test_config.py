@@ -171,4 +171,51 @@ def test_default_pool_roles(monkeypatch, tmp_path):
         ("implement", "implement", "implement-hard"),
         ("implement-hard", "implement", None),
         ("review", "review", None),
+        ("techlead", "plan", None),
     }
+
+
+def test_plan_kind_accepted(monkeypatch, tmp_path):
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    (conf / "pool.toml").write_text('[roles.planner]\nkind = "plan"\nchain = ["claude:sonnet"]\n')
+    monkeypatch.setenv("AGENT_HUB_CONFIG", str(conf))
+
+    pool = load_pool(paths())
+
+    assert pool.roles["planner"].kind == "plan"
+    assert role_kind(pool, "planner") == "plan"
+    assert pool.timeouts["planner"] == timedelta(minutes=20)
+
+
+def test_unknown_kind_error_lists_three_kinds(monkeypatch, tmp_path):
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    (conf / "pool.toml").write_text('[roles.fast]\nkind = "chat"\nchain = ["claude:haiku"]\n')
+    monkeypatch.setenv("AGENT_HUB_CONFIG", str(conf))
+
+    with pytest.raises(ConfigError, match='"implement", "review" or "plan"'):
+        load_pool(paths())
+
+
+def test_plan_role_cannot_escalate(monkeypatch, tmp_path):
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    (conf / "pool.toml").write_text(
+        '[roles.planner]\nkind = "plan"\nescalate = "implement"\nchain = ["claude:sonnet"]\n'
+    )
+    monkeypatch.setenv("AGENT_HUB_CONFIG", str(conf))
+
+    with pytest.raises(ConfigError, match="plan role 'planner' cannot escalate"):
+        load_pool(paths())
+
+
+def test_default_pool_has_techlead(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_HUB_CONFIG", str(tmp_path / "conf"))
+    pool = load_pool(paths())
+
+    assert pool.roles["techlead"].kind == "plan"
+    assert pool.roles["techlead"].chain == ["claude:sonnet"]
+    assert pool.roles["techlead"].escalate is None
+    assert pool.timeouts["plan"] == timedelta(minutes=20)
+    assert pool.timeouts["techlead"] == timedelta(minutes=20)

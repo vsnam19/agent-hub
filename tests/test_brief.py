@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from agenthub.brief import BriefError, order_table, review_text, standing_orders, validate
+from agenthub.brief import BriefError, order_table, plan_text, review_text, standing_orders, validate
 
 
 def test_implement_brief_ok():
@@ -101,3 +101,12 @@ def test_orders_mixed_lines_all_sent(tmp_path):
 
     orders = order_table(config, repo)
     assert [(o.number, o.enforced_by) for o in orders] == [(1, "gate"), (2, None), (3, None)]
+
+
+def test_plan_preamble_states_read_only_rule():
+    text = plan_text("## Input\nbody")
+    assert "read-only" in text
+    assert "do not modify, create or delete files" in text
+    assert "do not fetch URLs" in text
+    assert "final message" in text
+    assert "no shell" not in text

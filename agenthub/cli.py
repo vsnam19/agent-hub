@@ -152,6 +152,7 @@ def _build_parser() -> argparse.ArgumentParser:
     weekly = skills_sub.add_parser("weekly", help="mine, draft, eval, review and release learned skills (local only)")
     weekly.add_argument("--dry-run", action="store_true", help="print the steps; run nothing, write nothing")
     weekly.add_argument("--max-cost-usd", type=float, default=3.0, help="eval budget in USD (default 3)")
+    weekly.add_argument("--transcripts", help="Claude Code projects directory (default: ~/.claude/projects)")
     skills_sub.add_parser("report", help="print the newest weekly report")
     schedule = skills_sub.add_parser(
         "schedule", help="run skills weekly on a systemd user timer (dry-run unless --apply)"
@@ -319,10 +320,12 @@ def _cmd_skills_weekly(args) -> int:
     if not math.isfinite(args.max_cost_usd) or args.max_cost_usd <= 0:
         raise UsageError("--max-cost-usd must be a finite positive number")
     p = paths()
+    default_transcripts = Path(os.environ.get("HOME", "~")).expanduser() / ".claude" / "projects"
+    transcripts = Path(args.transcripts) if args.transcripts else default_transcripts
     cfg = skillweekly.Config(
         state_dir=p.state_dir,
         skills_repo=_skills_repo(p.config_dir),
-        transcripts=Path(os.environ.get("HOME", "~")).expanduser() / ".claude" / "projects",
+        transcripts=transcripts,
         max_cost_usd=args.max_cost_usd,
     )
     report = skillweekly.weekly(cfg, _now(), skillweekly.run_command, args.dry_run)

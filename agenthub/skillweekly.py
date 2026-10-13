@@ -191,6 +191,28 @@ class _Run:
         self.wt = self.repo / ".worktrees" / f"learned-{self.date}"
         self.spent = 0.0
         self.bumped: set[str] = set()
+        self._default_branch: str | None = None
+
+    @property
+    def default_branch(self) -> str:
+        """The skills repo's default branch, resolved once and cached for the run.
+
+        Mirrors the logic in ``guards.inspect``: prefer ``refs/remotes/origin/HEAD``,
+        then probe ``main``, then ``master``.
+        """
+        if self._default_branch is not None:
+            return self._default_branch
+        origin = self.git("symbolic-ref", "refs/remotes/origin/HEAD", check=False)
+        if origin.rc == 0 and origin.stdout.strip():
+            self._default_branch = origin.stdout.strip().replace("refs/remotes/origin/", "")
+            return self._default_branch
+        if self.git("rev-parse", "--verify", "main", check=False).rc == 0:
+            self._default_branch = "main"
+        elif self.git("rev-parse", "--verify", "master", check=False).rc == 0:
+            self._default_branch = "master"
+        else:
+            raise Stop("cannot determine the skills repo's default branch")
+        return self._default_branch
 
     # -- helpers -----------------------------------------------------------------------------------------------
 
@@ -239,12 +261,18 @@ class _Run:
         if len(extract.findings) < MIN_FINDINGS and not extract.corrections_total:
             add(Step("stop", "would", "nothing to learn; advance last-run"))
             return
-        add(Step("worktree", "would", f"{self.wt} on new branch {self.branch} from master"))
+        add(Step("worktree", "would", f"{self.wt} on new branch {self.branch} from <default branch>"))
         add(Step("draft", "would", f"write the drafting brief; agent-hub run --role {DRAFT_ROLE}"))
         add(Step("version", "would", "bump the patch version of each changed plugin in 3 manifests; commit"))
         add(Step("eval", "would", f"claude plugin eval per skill, ablation with-without, max ${self.cfg.max_cost_usd}"))
         add(Step("review", "would", f"gate, review, up to {FIX_ROUNDS} fix rounds, then ready"))
-        add(Step("merge", "would", "git merge --no-ff into master (clean main checkout), hub install --apply"))
+        add(
+            Step(
+                "merge",
+                "would",
+                "git merge --no-ff into <default branch> (clean main checkout), hub install --apply",
+            )
+        )
         add(Step("report", "would", f"write {self.out / 'report.md'}; advance last-run; notify-send"))
 
     # -- the run -----------------------------------------------------------------------------------------------
@@ -296,7 +324,7 @@ class _Run:
             raise Stop(f"branch {self.branch} already exists")
         if self.wt.exists():
             raise Stop(f"worktree {self.wt} already exists")
-        self.git("worktree", "add", "-b", self.branch, str(self.wt), "master")
+        self.git("worktree", "add", "-b", self.branch, str(self.wt), self.default_branch)
         self.exclude_extract()
         learned = self.wt / ".agent-hub" / "learned"
         learned.mkdir(parents=True, exist_ok=True)
@@ -346,7 +374,7 @@ class _Run:
         self.report.proposals = [
             line.strip("-* ").strip() for line in self.reply(result).splitlines() if "MCP proposal:" in line
         ]
-        changed = self.changed("master")
+        changed = self.changed(self.default_branch)
         if not [p for p in changed if _plugin_of(p) in PLUGINS]:
             self.git("worktree", "remove", "--force", str(self.wt))
             self.git("branch", "-D", self.branch)
@@ -362,7 +390,7 @@ class _Run:
 
     def learned_only(self) -> None:
         """Stop when a job changed any path outside the learned plugins, committed or not."""
-        for path in self.changed("master"):
+        for path in self.changed(self.default_branch):
             if not path.startswith(LEARNED_DIRS):
                 raise Stop(f"job changed {path} outside the learned plugins")
 
@@ -404,7 +432,7 @@ class _Run:
             raise Stop(f"files outside the learned plugins changed: {left.splitlines()[0][3:]}")
 
     def commit_draft(self) -> list[tuple[str, str]]:
-        changed = self.changed("master")
+        changed = self.changed(self.default_branch)
         skills = self.skills_of(changed)
         if not skills:
             raise Stop("the draft changed no skill (only eval cases or other files)")
@@ -491,7 +519,15 @@ class _Run:
             if gate.rc != 0:
                 raise Stop(f"gate failed: {(gate.stdout or gate.stderr).strip()[-300:]}")
             proc = self.hub(
-                "run", "--role", "review", "-d", str(self.wt), "--base", "master", "--json", timeout=JOB_TIMEOUT
+                "run",
+                "--role",
+                "review",
+                "-d",
+                str(self.wt),
+                "--base",
+                self.default_branch,
+                "--json",
+                timeout=JOB_TIMEOUT,
             )
             result = self.job("review", proc)
             verdict = result.get("verdict")
@@ -532,7 +568,7 @@ class _Run:
         changed = self.changed(before)
         if not changed:
             raise Stop(f"fix round {round_no} changed nothing")
-        released = self.bump_touched(self.changed("master"))
+        released = self.bump_touched(self.changed(self.default_branch))
         if released:
             self.step("version", "; ".join(released))
         self.commit(f"learned: {self.date} — review round {round_no} fixes")
@@ -542,8 +578,8 @@ class _Run:
 
     def release(self) -> None:
         head = self.git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-        if head != "master":
-            raise Stop(f"main checkout is on {head}, not master")
+        if head != self.default_branch:
+            raise Stop(f"main checkout is on {head}, not {self.default_branch}")
         if self.git("status", "--porcelain").stdout.strip():
             raise Stop("main checkout is not clean")
         director = any(item.startswith("learned-director ") for item in self.report.released)
@@ -552,7 +588,7 @@ class _Run:
         if merged.rc != 0:
             self.git("merge", "--abort", check=False)
             raise Stop(f"merge failed: {(merged.stderr or merged.stdout).strip()[:300]}")
-        self.step("merge", f"{self.branch} into master")
+        self.step("merge", f"{self.branch} into {self.default_branch}")
         # The merge is already on master, so an install failure must not stop the run before cleanup and last-run.
         failure = self.install(marketplace)
         self.cleanup()
