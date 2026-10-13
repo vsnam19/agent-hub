@@ -115,6 +115,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     plan_review.add_argument("plan_file", metavar="<plan.json>")
     plan_review.add_argument("--task", metavar="NAME", help="review only this task")
+    plan_merge = plan_sub.add_parser(
+        "merge",
+        help="merge each done task that agent-hub ready accepts, in dependency order (exit 1 at the first not ready)",
+    )
+    plan_merge.add_argument("plan_file", metavar="<plan.json>")
+    plan_merge.add_argument("--into", metavar="BRANCH", help="branch to merge into (default: the plan's base)")
     plan_cancel = plan_sub.add_parser("cancel", help="stop the plan's runner and its running jobs")
     plan_cancel.add_argument("plan_file", metavar="<plan.json>")
     plan_cancel.add_argument("-d", "--dir", default=".", dest="workdir", help="repository the caller runs from")
@@ -844,6 +850,44 @@ def _cmd_plan(args) -> int:
             if result["reason"]:
                 print(_safe(result["reason"]), file=sys.stderr)
         return 0 if all_approved else 1
+
+    elif args.plan_command == "merge":
+        from agenthub.planrun import merge_order, merge_target_problem, merge_task
+        from agenthub.planstate import load_or_init
+
+        if not state_file.is_file():
+            raise UsageError("state.json not found")
+        state = load_or_init(plan)
+        target = args.into or plan.base
+        tasks = [
+            t for t in merge_order(plan) if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"
+        ]
+        if not tasks:
+            print("no done tasks to merge", file=sys.stderr)
+            return 1
+        try:
+            problem = merge_target_problem(plan.repo, target)
+        except guards.GuardError as e:
+            raise UsageError(str(e)) from None
+        if problem:
+            print(_safe(f"agent-hub: {problem}", sys.stderr), file=sys.stderr)
+            return 3
+
+        jobs = list_jobs(paths(), ALL_JOBS)
+        for task in tasks:
+            result = merge_task(plan, task, state.task(task.name), target, jobs)
+            if result["status"] == "merged":
+                print(_safe(f"{task.name} merged into {target} at {result['sha']}"))
+            elif result["status"] == "already-merged":
+                print(_safe(f"{task.name} already merged"))
+            elif result["status"] == "not-ready":
+                for problem in result["problems"]:
+                    print(_safe(f"{task.name} not ready: {problem}"))
+                return 1
+            else:
+                print(_safe(f"{task.name} merge failed: {result['reason']}", sys.stderr), file=sys.stderr)
+                return 1
+        return 0
 
     elif args.plan_command == "wait":
         import argparse

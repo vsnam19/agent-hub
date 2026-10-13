@@ -13,7 +13,7 @@ from agenthub import guards
 from agenthub.config import ConfigError, load_pool, paths
 from agenthub.guards import _git_argv
 from agenthub.jobs import list_jobs
-from agenthub.orchestrate import RunArgs, run_gate_job, run_job
+from agenthub.orchestrate import RunArgs, readiness, run_gate_job, run_job
 from agenthub.plan import Plan, Task
 from agenthub.planstate import AttemptState, State, TaskState
 from agenthub.pool import parse_link
@@ -617,3 +617,123 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
     if verdict not in ("approve", "request-changes"):
         verdict = "failed"
     return {"gate": "ok", "review": verdict, "job": review["id"], "reason": review.get("error", "")}
+
+
+def merge_order(plan: Plan) -> list[Task]:
+    """The plan's tasks with every dependency before its dependents; ties keep the plan's order."""
+    by_name = {t.name: t for t in plan.tasks}
+    ordered: list[Task] = []
+    seen: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in seen:
+            return
+        seen.add(name)
+        for dep in by_name[name].depends_on:
+            visit(dep)
+        ordered.append(by_name[name])
+
+    for t in plan.tasks:
+        visit(t.name)
+    return ordered
+
+
+def merge_target_problem(repo_dir: Path, target: str) -> str | None:
+    """Why the main checkout cannot take a merge into `target`, or None when it is clean and on `target`."""
+    repo = guards.inspect(repo_dir)
+    if repo.branch != target:
+        return f"main checkout is on {repo.branch or 'a detached HEAD'}, not {target}"
+    if guards._run_git(repo.root, "status", "--porcelain"):
+        return "main checkout is not clean"
+    return None
+
+
+def _merge_reviewer(jobs: list[dict], workdir: Path, head: str) -> str:
+    """agent:model of the newest approving review of `head` by a reviewer other than the implementers; "?" if none."""
+
+    def who(j: dict) -> str:
+        return f"{j.get('agent')}:{j.get('model')}"
+
+    mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == workdir.resolve()]
+    implementers = {who(j) for j in mine if j.get("kind") == "implement" and j.get("status") in ("ok", "gate-failed")}
+    for j in mine:
+        if (
+            j.get("kind") == "review"
+            and j.get("status") == "ok"
+            and j.get("verdict") == "approve"
+            and j.get("head") == head
+            and who(j) not in implementers
+        ):
+            return who(j)
+    return "?"
+
+
+def _remove_merged(plan: Plan, worktree: Path, branch: str) -> str | None:
+    """Remove a merged branch's work tree (when it still exists) and the branch; the failure detail, or None."""
+    argvs = [_git_argv("branch", "-d", branch)]
+    if worktree.is_dir():
+        argvs.insert(0, _git_argv("worktree", "remove", str(worktree)))
+    for argv in argvs:
+        res = subprocess.run(argv, cwd=plan.repo, capture_output=True, text=True)
+        if res.returncode != 0:
+            return (res.stderr or res.stdout).strip()
+    return None
+
+
+def merge_task(plan: Plan, task: Task, tstate: TaskState, target: str, jobs: list[dict]) -> dict:
+    """Merge one done task's branch into `target` in the plan's main checkout if `agent-hub ready` accepts its HEAD,
+    then remove its work tree and branch. Returns {"status", "problems", "reason"}, where status is merged,
+    already-merged, not-ready or failed."""
+    if not tstate.worktree or not tstate.branch:
+        return {"status": "failed", "problems": [], "reason": "no work tree or branch recorded"}
+    branch = tstate.branch
+    worktree = Path(tstate.worktree)
+
+    exists = subprocess.run(
+        _git_argv("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"), cwd=plan.repo, capture_output=True
+    )
+    if exists.returncode != 0:
+        return {"status": "already-merged", "problems": [], "reason": ""}
+    ancestor = subprocess.run(
+        _git_argv("merge-base", "--is-ancestor", branch, target), cwd=plan.repo, capture_output=True
+    )
+    if ancestor.returncode == 0:
+        # Its commits are already in target (an earlier merge brought them): only the leftovers go
+        cleanup = _remove_merged(plan, worktree, branch)
+        if cleanup:
+            return {"status": "failed", "problems": [], "reason": cleanup}
+        return {"status": "already-merged", "problems": [], "reason": ""}
+
+    if not worktree.is_dir():
+        return {"status": "not-ready", "problems": [f"work tree missing: {worktree}"], "reason": ""}
+    try:
+        repo = guards.inspect(worktree)
+    except guards.GuardError as e:
+        return {"status": "not-ready", "problems": [str(e)], "reason": ""}
+
+    head = guards.head(repo)
+    problems = readiness(jobs, repo.root, head)
+    if not problems and guards._run_git(repo.root, "status", "--porcelain"):
+        problems = ["work tree is not clean; only the committed HEAD is merged"]
+    if problems:
+        return {"status": "not-ready", "problems": problems, "reason": ""}
+
+    reviewer = _merge_reviewer(jobs, repo.root, head)
+    message = f"Merge {branch} — merged through agent-hub ready (approve, {reviewer})"
+    merge = subprocess.run(
+        _git_argv("-c", "commit.gpgsign=false", "merge", "--no-ff", "-m", message, branch),
+        cwd=plan.repo,
+        capture_output=True,
+        text=True,
+    )
+    if merge.returncode != 0:
+        subprocess.run(_git_argv("merge", "--abort"), cwd=plan.repo, capture_output=True)
+        detail = (merge.stderr or merge.stdout).strip()
+        return {"status": "failed", "problems": [], "reason": f"merge of {branch} failed: {detail}"}
+
+    cleanup = _remove_merged(plan, repo.root, branch)
+    if cleanup:
+        return {"status": "failed", "problems": [], "reason": f"merged {branch} but cleanup failed: {cleanup}"}
+
+    sha = guards._run_git(plan.repo, "rev-parse", "--short", "HEAD")
+    return {"status": "merged", "problems": [], "reason": "", "sha": sha}
