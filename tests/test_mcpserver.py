@@ -275,6 +275,74 @@ def test_wait_job_errors(env_sandbox, repo):
         wait_job(workdir=str(repo / "nonexistent-dir"), timeout_s=1)
 
 
+def test_wait_job_running_before_result(env_sandbox, repo):
+    p = paths()
+    now = datetime.now(timezone.utc)
+    job = new_job(p, "implement", now)
+    assert job.dir.is_dir()
+    assert not (job.dir / "result.json").is_file()
+
+    # Returns running state on timeout while result.json is absent
+    res = wait_job(job_id=job.id, timeout_s=1)
+    assert res == {"state": "running"}
+
+    # Unknown job id raises KeyError
+    with pytest.raises(KeyError):
+        wait_job(job_id="20260101-000000-implement-ffff", timeout_s=1)
+
+    # When result.json appears before timeout, wait_job returns the completed result
+    record = {
+        "id": job.id,
+        "status": "ok",
+        "exit_code": 0,
+        "workdir": str(repo),
+        "role": "implement",
+    }
+    job.write_json("result.json", record)
+    res_done = wait_job(job_id=job.id, timeout_s=2)
+    assert res_done["status"] == "ok"
+    assert res_done["job_id"] == job.id
+    assert res_done["state"] == "ok"
+
+
+def test_wait_workdir_sees_running_gate(env_sandbox, repo):
+    p = paths()
+    past = datetime.now(timezone.utc) - timedelta(minutes=5)
+    old_job = new_job(p, "implement", past)
+    old_job.write_json("request.json", {"role": "implement", "workdir": str(repo.resolve())})
+    old_job.write_json(
+        "result.json",
+        {"id": old_job.id, "status": "ok", "role": "implement", "workdir": str(repo.resolve())},
+    )
+
+    now = datetime.now(timezone.utc)
+    gate_job = new_job(p, "gate", now)
+    # The gate job has an early record with workdir, but no completed result.json
+    gate_job.write_json("request.json", {"role": "gate", "workdir": str(repo.resolve())})
+    assert not (gate_job.dir / "result.json").is_file()
+
+    # wait_job(workdir) must see the newest running gate job rather than returning the old completed job
+    res = wait_job(workdir=str(repo), timeout_s=1)
+    assert res == {"state": "running"}
+
+    # When gate finishes, wait_job returns the gate result
+    gate_job.write_json(
+        "result.json",
+        {
+            "id": gate_job.id,
+            "status": "ok",
+            "role": "gate",
+            "kind": "gate",
+            "workdir": str(repo.resolve()),
+            "gate": [{"cmd": "true", "rc": 0}],
+        },
+    )
+    res_done = wait_job(workdir=str(repo), timeout_s=2)
+    assert res_done["status"] == "ok"
+    assert res_done["job_id"] == gate_job.id
+    assert res_done["gate_summary"] == "passed (1)"
+
+
 def git_head(repo):
     res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True)
     return res.stdout.strip()
@@ -519,3 +587,27 @@ def test_spawn_log_moved_into_job_dir(env_sandbox, repo):
     assert log_path.is_file()
     assert str(log_path) in bad_res["error"]
     assert log_path.parent == p.state_dir
+
+
+def test_spawn_log_stays_if_job_dir_missing(env_sandbox, repo):
+    p = paths()
+    fake_id = "20260101-000000-gate-9999"
+    # Announce an id, but do not create the job directory
+    script = (
+        "import sys, pathlib; "
+        "idx = sys.argv.index('--announce'); "
+        "announce = pathlib.Path(sys.argv[idx + 1]); "
+        f"announce.write_text('{fake_id}\\n')"
+    )
+    res = _spawn_detached(
+        cmd=[sys.executable, "-c", script],
+        workdir_path=repo,
+        p=p,
+    )
+    assert res["job_id"] == fake_id
+    assert "log" in res
+    log_path = Path(res["log"])
+    assert log_path.is_file()
+    assert log_path.parent == p.state_dir
+    # Job directory was NOT created by _spawn_detached
+    assert not (p.jobs_dir / fake_id).exists()

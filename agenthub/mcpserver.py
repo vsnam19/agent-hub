@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -11,7 +12,7 @@ from agenthub import guards
 from agenthub.agents import registry
 from agenthub.cli import ALL_JOBS, WAIT_APPEAR_S, UsageError, _job_repo, _repo_of
 from agenthub.config import ConfigError, Paths, parse_duration, paths, role_kind
-from agenthub.jobs import get_job, list_jobs
+from agenthub.jobs import JOB_ID_RE, Job, get_job, list_jobs
 from agenthub.orchestrate import readiness, skills_hint
 from agenthub.pool import Cooldowns, load_pool, parse_link
 from agenthub.workers import available_skills
@@ -177,7 +178,7 @@ def run_job(
         cmd.extend(["--skill", s])
     cmd.append("--json")
 
-    return _spawn_detached(cmd=cmd, workdir_path=workdir_path, p=p, log_prefix="mcp-run", role=_kind)
+    return _spawn_detached(cmd=cmd, workdir_path=workdir_path, p=p, log_prefix="mcp-run")
 
 
 def _spawn_detached(
@@ -185,7 +186,6 @@ def _spawn_detached(
     workdir_path: Path,
     p: Paths,
     log_prefix: str = "mcp-run",
-    role: str | None = None,
 ) -> dict[str, Any]:
     env = os.environ.copy()
 
@@ -260,20 +260,23 @@ def _spawn_detached(
         except OSError:
             pass
 
+    res: dict[str, Any] = {"job_id": target_job_id, "workdir": str(workdir_path)}
     job_dir = p.jobs_dir / target_job_id
     if log_file.is_file():
-        try:
-            job_dir.mkdir(parents=True, exist_ok=True)
-            log_file.replace(job_dir / "spawn.log")
-        except OSError:
+        if job_dir.is_dir():
             try:
-                import shutil
-
-                shutil.move(str(log_file), str(job_dir / "spawn.log"))
+                log_file.replace(job_dir / "spawn.log")
             except OSError:
-                pass
+                try:
+                    import shutil
 
-    return {"job_id": target_job_id, "workdir": str(workdir_path)}
+                    shutil.move(str(log_file), str(job_dir / "spawn.log"))
+                except OSError:
+                    pass
+        else:
+            res["log"] = str(log_file)
+
+    return res
 
 
 def validate_gate_args(workdir: str) -> Path:
@@ -303,7 +306,7 @@ def gate_start(
         cmd.extend(["--gate", g])
     cmd.append("--json")
 
-    return _spawn_detached(cmd=cmd, workdir_path=workdir_path, p=p, log_prefix="mcp-gate", role="gate")
+    return _spawn_detached(cmd=cmd, workdir_path=workdir_path, p=p, log_prefix="mcp-gate")
 
 
 def ready(workdir: str, p: Paths | None = None) -> dict[str, Any]:
@@ -349,6 +352,38 @@ def _format_wait_result(result: dict[str, Any]) -> dict[str, Any]:
     return res
 
 
+def _job_dir_workdir(job_dir: Path) -> str | None:
+    for name in ("request.json", "result.json", "gate.json", "record.json"):
+        f = job_dir / name
+        if f.is_file():
+            try:
+                with open(f) as fp:
+                    data = json.load(fp)
+                if isinstance(data, dict):
+                    w = data.get("workdir")
+                    if w:
+                        return str(w)
+            except Exception:
+                pass
+    return None
+
+
+def _find_job_for_workdir(p: Paths, resolved_workdir: Path) -> Job | None:
+    if not p.jobs_dir.is_dir():
+        return None
+    entries = []
+    for entry in os.scandir(p.jobs_dir):
+        if entry.is_dir() and JOB_ID_RE.match(entry.name):
+            entries.append(entry)
+    entries.sort(key=lambda e: e.name, reverse=True)
+    for entry in entries:
+        dir_path = Path(entry.path)
+        job_workdir = _job_dir_workdir(dir_path)
+        if job_workdir and Path(job_workdir).expanduser().resolve() == resolved_workdir:
+            return get_job(p, entry.name)
+    return None
+
+
 def wait_job(
     job_id: str | None = None,
     workdir: str | None = None,
@@ -372,11 +407,7 @@ def wait_job(
                 pass
         elif workdir is not None:
             resolved_workdir = Path(workdir).expanduser().resolve()
-            for r in list_jobs(p, 100):
-                job_workdir = r.get("workdir")
-                if job_workdir and Path(job_workdir).expanduser().resolve() == resolved_workdir:
-                    target_job = get_job(p, r["id"])
-                    break
+            target_job = _find_job_for_workdir(p, resolved_workdir)
             if target_job is not None:
                 break
         time.sleep(0.05)
