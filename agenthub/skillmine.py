@@ -18,7 +18,10 @@ _PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIV
 _JWT = re.compile(r"\beyJ[\w-]+\.[\w-]+\.[\w-]+")
 _BEARER = re.compile(r"(?i)\bBearer\s+[\w.~+/=-]+")
 _BASIC = re.compile(r"\bBasic\s+([A-Za-z0-9+/_-]{8,}={0,2})(?![\w+/])")
-_URL_CREDS = re.compile(r"(\b[a-z][\w+.-]*://[^\s/:@]*):\S+@", re.I)
+# `scheme://user:` prefix; the scheme is capped at 32 chars so every start position scans a bounded window. The password
+# is found by `_redact_url_passwords`, which is not limited in length
+_URL_PREFIX = re.compile(r"(?<![a-z])[a-z][\w+.-]{0,31}://[^\s/:@]*:", re.I)
+_NON_SPACE = re.compile(r"\S*")
 _PREFIXED = re.compile(r"\b(?:sk-[\w-]{16,}|ghp_\w{20,}|xox[a-z]-[\w-]{10,}|AKIA[0-9A-Z]{16})")
 # a secret name contains one of `_LONG_WORDS` (`PGPASSWORD`, `SECRETKEY`, `api_key`), or a part (split on `_`, `-` or a
 # camelCase hump) equals or ends with one of `_PART_WORDS` (`DB_PASS`, `apiKey`, `adminpass`). A `key` ending needs four
@@ -38,7 +41,7 @@ _KV = re.compile(rf"(?i)(?<![\w-])({_NAME})(\s*[=:]\s*){_VALUE}")
 _KV_SPACE = re.compile(rf"(?i)(?<![\w-])({_NAME})(\s+)(?!-|<redacted>){_VALUE}")
 _KV_JSON = re.compile(rf"(?i)(\"{_NAME}\"\s*:\s*)\"[^\"]*\"")
 _BARE_SECRET_WORDS = {"password", "passwd", "pwd", "passphrase"}
-_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _HOME = re.compile(r"(?:^|(?<=[\s\"'`(=:/\[]))(?:/home/[^/\s]+|/Users/[^/\s]+|/root(?![\w.-]))")
 
 # Token rule. Text is split on whitespace, quotes, backticks and `=:,;()<>[]{}?&`; each token is then split on
@@ -105,12 +108,37 @@ def _is_word(text: str) -> bool:
     )
 
 
+def _redact_url_passwords(text: str) -> str:
+    """Redact `scheme://user:password@` up to the last `@` of the non-space run, however long the password is.
+
+    The end of each run and its last `@` are computed once per run, so a long run of `scheme://` prefixes stays linear.
+    """
+    out = []
+    done = 0  # text before `done` is already in `out`
+    run_end = run_at = -1  # end of the current non-space run, and the last `@` before it
+    match = _URL_PREFIX.search(text)
+    while match:
+        start = match.end()
+        if start >= run_end:
+            run_end = _NON_SPACE.match(text, start).end()
+            run_at = text.rfind("@", start, run_end)
+        if run_at > start:
+            out.append(text[done:start])
+            out.append("<redacted>@")
+            done = run_at + 1
+            match = _URL_PREFIX.search(text, done)
+        else:
+            match = _URL_PREFIX.search(text, start)
+    out.append(text[done:])
+    return "".join(out)
+
+
 def redact(text: str) -> str:
     text = _PEM.sub("<redacted-key>", text)
     text = _JWT.sub("<redacted>", text)
     text = _BEARER.sub("Bearer <redacted>", text)
     text = _BASIC.sub(lambda m: m.group(0) if _is_word(m.group(1)) else "Basic <redacted>", text)
-    text = _URL_CREDS.sub(r"\1:<redacted>@", text)
+    text = _redact_url_passwords(text)
     text = _PREFIXED.sub("<redacted>", text)
     text = _KV.sub(r"\1\2<redacted>", text)
     text = _KV_SPACE.sub(_redact_space_value, text)
