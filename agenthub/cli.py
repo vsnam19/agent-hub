@@ -456,32 +456,46 @@ def _cmd_skills_schedule(args) -> int:
             print("dry run: nothing written; add --apply to schedule")
             return 0
 
-        files_match = _read_unit(service_path) == service and _read_unit(timer_path) == timer_text
-        timer_enabled = files_match and _schedule_run(["systemctl", "--user", "is-enabled", timer]).returncode == 0
-        timer_running = timer_enabled and _schedule_run(["systemctl", "--user", "is-active", timer]).returncode == 0
-        if timer_running:
+        before = {path: _read_unit(path) for path in (service_path, timer_path)}
+        timer_existed = before[timer_path] is not None
+        was_enabled = timer_existed and _schedule_run(["systemctl", "--user", "is-enabled", timer]).returncode == 0
+        was_active = timer_existed and _schedule_run(["systemctl", "--user", "is-active", timer]).returncode == 0
+        files_match = before[service_path] == service and before[timer_path] == timer_text
+        if files_match and was_enabled and was_active:
             print(_safe(f"already scheduled: {timer_path} ({args.at})"))
             return 0
-        before = {path: _read_unit(path) for path in (service_path, timer_path)}
         unit_dir.mkdir(parents=True, exist_ok=True)
         try:
             service_path.write_text(service, encoding="utf-8")
             timer_path.write_text(timer_text, encoding="utf-8")
             _systemctl("daemon-reload")
             _systemctl("enable", "--now", timer)
-        except (ScheduleError, OSError):
+        except (ScheduleError, OSError) as orig_err:
             # all-or-nothing: stop the timer, put back what was there before this attempt (new files are
             # removed), then reload so systemd forgets the rolled-back units; errors here must not mask the first
             with suppress(ScheduleError):
                 _systemctl("disable", "--now", timer)
+            restore_errors: list[str] = []
             for path, text in before.items():
-                if text is None:
-                    path.unlink(missing_ok=True)
-                else:
-                    path.write_text(text, encoding="utf-8")
+                try:
+                    if text is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        path.write_text(text, encoding="utf-8")
+                except OSError as e:
+                    restore_errors.append(f"restore {path}: {e}")
             with suppress(ScheduleError):
                 _systemctl("daemon-reload")
-            raise
+            if was_enabled:
+                with suppress(ScheduleError):
+                    _systemctl("enable", timer)
+            if was_active:
+                with suppress(ScheduleError):
+                    _systemctl("restart", timer)
+            print(_safe(f"agent-hub: {orig_err}", sys.stderr), file=sys.stderr)
+            for msg in restore_errors:
+                print(_safe(f"agent-hub: {msg}", sys.stderr), file=sys.stderr)
+            return 1
         print(_safe(f"scheduled: {timer_path} ({args.at})"))
         return 0
     except (ScheduleError, OSError) as e:

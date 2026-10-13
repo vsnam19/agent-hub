@@ -258,3 +258,52 @@ def test_rollback_disables_and_reloads(sched, capsys, monkeypatch):
     ]
     assert not (sched.unit_dir / SERVICE).exists()
     assert not (sched.unit_dir / TIMER).exists()
+
+
+def test_failed_reschedule_restores_working_timer(sched, capsys, monkeypatch):
+    assert main(["skills", "schedule", "--apply"]) == 0
+    capsys.readouterr()
+    before_service = (sched.unit_dir / SERVICE).read_text(encoding="utf-8")
+    before_timer = (sched.unit_dir / TIMER).read_text(encoding="utf-8")
+
+    monkeypatch.setenv("FAKE_SYSTEMCTL_FAIL_ON", "enable --now")
+    log_before = len(calls(sched))
+
+    rc = main(["skills", "schedule", "--apply", "--at", "Mon *-*-* 09:00"])
+
+    assert rc == 1
+    assert "Failed to connect to bus" in capsys.readouterr().err
+    assert (sched.unit_dir / SERVICE).read_text(encoding="utf-8") == before_service
+    assert (sched.unit_dir / TIMER).read_text(encoding="utf-8") == before_timer
+    assert calls(sched)[log_before:] == [
+        f"--user is-enabled {TIMER}",
+        f"--user is-active {TIMER}",
+        "--user daemon-reload",
+        f"--user enable --now {TIMER}",
+        f"--user disable --now {TIMER}",
+        "--user daemon-reload",
+        f"--user enable {TIMER}",
+        f"--user restart {TIMER}",
+    ]
+
+
+def test_restore_error_keeps_original_error(sched, capsys, monkeypatch):
+    monkeypatch.setenv("FAKE_SYSTEMCTL_FAIL_ON", "enable --now")
+
+    orig_unlink = Path.unlink
+
+    def fake_unlink(self, *args, **kwargs):
+        if self.name == TIMER:
+            raise OSError("permission denied during restore")
+        return orig_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fake_unlink)
+
+    rc = main(["skills", "schedule", "--apply"])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    lines = [line for line in err.splitlines() if line.strip()]
+    assert lines[0] == "agent-hub: Failed to connect to bus"
+    assert any("permission denied during restore" in line for line in lines[1:])
+    assert err.index("Failed to connect to bus") < err.index("permission denied during restore")
