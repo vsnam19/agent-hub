@@ -60,6 +60,23 @@ def test_plugin_version_matches_pyproject():
     assert manifest["version"] == pyproject["project"]["version"]
 
 
+def test_plugin_declares_mcp_server():
+    mcp_path = REPO_ROOT / ".mcp.json"
+    assert mcp_path.is_file(), ".mcp.json must exist at repo root"
+    with open(mcp_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    expected = {
+        "mcpServers": {
+            "agent-hub": {
+                "command": "agent-hub",
+                "args": ["mcp"],
+            }
+        }
+    }
+    assert data == expected
+
+
 def test_bin_wrapper_is_executable_and_shellchecked():
     bin_path = REPO_ROOT / "bin" / "agent-hub"
     st = os.stat(bin_path)

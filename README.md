@@ -182,9 +182,49 @@ then a local release. Nothing is pushed.
 - `agent-hub skills schedule --remove` disables the timer, deletes both unit files and reloads systemd. Only these two
   units are touched.
 
+## MCP server
+
+agent-hub ships an MCP server (`agent-hub mcp`) that exposes typed tools for Claude Code, Cursor, Codex, and other MCP clients. Claude Code sessions with the agent-hub plugin get the server automatically via `.mcp.json`.
+
+Install with the optional `mcp` extra:
+
+```sh
+uv tool install --editable '<repo>[mcp]'
+```
+
+### Tools
+
+- `pool`: Show roles, chains, and cooldowns (same data as `agent-hub pool --json`).
+- `jobs`: List recent jobs of a repository or all repositories.
+- `show_job`: Show a job's result by id.
+- `run_job`: Run a job detached, returning its job id immediately.
+- `wait_job`: Wait for a job to finish, bounded by `timeout_s` (at most 300s).
+- `gate_start`: Gate a work tree's committed HEAD detached, returning the gate job id.
+- `ready`: Check readiness of a work tree's committed HEAD to merge.
+- `plan_run`: Start a plan run detached, returning the plan slug and runner pid immediately.
+- `plan_status`: Show per-task status of a plan, optionally with decision trail.
+- `plan_wait`: Wait for a plan or review to finish, bounded by `timeout_s` (at most 300s).
+- `plan_review`: Review done tasks of a plan detached, returning a review handle.
+- `plan_merge`: Merge ready tasks of a plan in dependency order.
+
+### Async pattern
+
+Long jobs are asynchronous: tool calls never block indefinitely. Starting a job returns an identifier immediately (`start → id → bounded wait`):
+- `run_job` returns `{"job_id": "<id>"}`; wait with `wait_job(job_id=..., timeout_s=...)`.
+- `gate_start` returns `{"job_id": "<id>"}`; wait with `wait_job(job_id=..., timeout_s=...)`.
+- `plan_run` returns `{"plan": "<slug>", "runner_pid": ...}`; wait with `plan_wait(plan_path=..., timeout_s=...)`.
+- `plan_review` returns `{"handle": "<handle>", ...}`; wait with `plan_wait(handle=..., timeout_s=...)`.
+
+While running, `wait_job` and `plan_wait` return status `"running"` when `timeout_s` (at most 300s) elapses; call wait again until the job finishes.
+
+### Destructive tools
+
+Only `plan_merge` is destructive (`destructiveHint=True`) because it modifies git branches and checkouts by merging ready tasks. All other tools are read-only (`readOnlyHint=True`) or start detached background jobs.
+
 ## Exit codes
 
 | Exit | Status | Meaning |
+
 |---|---|---|
 | 0 | `ok` | An agent finished and returned a non-empty reply. |
 | 1 | `failed` | The agent failed for a reason that is not quota, auth or model. |
