@@ -151,6 +151,8 @@ def _build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--gate", action="append", dest="gates", help="gate command to run after the repo gates")
     gate.add_argument("--json", action="store_true")
 
+    sub.add_parser("mcp", help="run the MCP server over stdio")
+
     return parser
 
 
@@ -171,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
             "gate": _cmd_gate,
             "hub": _cmd_hub,
             "skills": _cmd_skills,
+            "mcp": _cmd_mcp,
         }[args.command]
         return handler(args)
     except SystemExit as e:  # --help
@@ -850,3 +853,15 @@ def _cmd_plan(args) -> int:
 
         print(_safe(f"still running: {plan.slug}"))
         return 124
+
+
+def _cmd_mcp(args) -> int:
+    try:
+        import mcp.server.mcpserver  # noqa: F401
+
+        from agenthub.mcpserver import run_stdio
+
+        run_stdio()
+        return 0
+    except (ImportError, ModuleNotFoundError):
+        raise UsageError("mcp SDK not installed; install with: uv tool install 'agent-hub[mcp]'") from None
