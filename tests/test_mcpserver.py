@@ -20,6 +20,9 @@ from agenthub.mcpserver import (
     clamp_timeout,
     gate_start,
     jobs_data,
+    plan_run,
+    plan_status,
+    plan_wait,
     pool_data,
     ready,
     run_job,
@@ -28,7 +31,9 @@ from agenthub.mcpserver import (
     wait_job,
     wait_job_async,
 )
+from agenthub.plan import PlanError
 from tests.gitrepo import make_repo
+from tests.test_plan_cli import make_plan_file, run_cli_plan
 
 BRIEF = "## Input\n\nfoo\n\n## Expected output\n\nbar\n"
 
@@ -126,13 +131,25 @@ def test_server_lists_tools(env_sandbox):
     server = build_server()
     tools = asyncio.run(server.list_tools())
     tool_map = {t.name: t for t in tools}
-    assert set(tool_map.keys()) == {"pool", "jobs", "show_job", "run_job", "wait_job", "gate_start", "ready"}
-    for name in ["pool", "jobs", "show_job", "wait_job", "ready"]:
+    assert set(tool_map.keys()) == {
+        "pool",
+        "jobs",
+        "show_job",
+        "run_job",
+        "wait_job",
+        "gate_start",
+        "ready",
+        "plan_run",
+        "plan_status",
+        "plan_wait",
+    }
+    for name in ["pool", "jobs", "show_job", "wait_job", "ready", "plan_status", "plan_wait"]:
         tool = tool_map[name]
         assert tool.annotations is not None
         assert tool.annotations.read_only_hint is True
     assert tool_map["run_job"].annotations is None or tool_map["run_job"].annotations.read_only_hint is not True
     assert tool_map["gate_start"].annotations is None or tool_map["gate_start"].annotations.read_only_hint is not True
+    assert tool_map["plan_run"].annotations is None or tool_map["plan_run"].annotations.read_only_hint is not True
 
     pool_res = asyncio.run(server.call_tool("pool", {}))
     assert not pool_res.is_error
@@ -1137,3 +1154,169 @@ def test_wait_job_tool_does_not_block_event_loop(env_sandbox, repo):
             await hb_task
 
     asyncio.run(run_test())
+
+
+def test_plan_run_returns_at_once(env_sandbox, repo, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "slow")
+    monkeypatch.setenv("FAKE_AGY_SCENARIO", "slow")
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "slow")
+    monkeypatch.setenv("AGENT_HUB_PLAN_POLL_S", "0.1")
+
+    # Invalid plan fails validation like CLI
+    bad_plan = tmp_path / "bad_plan.json"
+    bad_plan.write_text("{}")
+    with pytest.raises(PlanError):
+        plan_run(str(bad_plan))
+
+    plan_file = make_plan_file(tmp_path, repo)
+    res = plan_run(str(plan_file))
+    assert "plan" in res
+    assert res["plan"] == "plan-1"
+    assert "runner_pid" in res
+    assert isinstance(res["runner_pid"], int)
+    assert res["runner_pid"] > 0
+
+    runner_pid = res["runner_pid"]
+    try:
+        os.kill(runner_pid, 0)
+    except OSError:
+        pytest.fail(f"runner process {runner_pid} is not running")
+    finally:
+        main(["plan", "cancel", str(plan_file), "-d", str(repo)])
+        try:
+            os.kill(runner_pid, 9)
+        except OSError:
+            pass
+
+
+def test_plan_status_matches_cli(env_sandbox, repo, tmp_path):
+    plan_file = make_plan_file(tmp_path, repo)
+
+    # Before run, state.json not found
+    with pytest.raises(UsageError, match="state.json not found"):
+        plan_status(str(plan_file))
+
+    env = {"FAKE_CLAUDE_SCENARIO": "handoff", "FAKE_AGY_SCENARIO": "handoff", "FAKE_CODEX_SCENARIO": "handoff"}
+    res_run = run_cli_plan(env_sandbox, plan_file, "run", extra_env=env)
+    assert res_run.returncode == 0
+
+    # CLI status output
+    res_cli = run_cli_plan(env_sandbox, plan_file, "status")
+    assert res_cli.returncode == 0
+
+    res_status = plan_status(str(plan_file))
+    assert res_status["plan"] == "plan-1"
+    assert "tasks" in res_status
+    assert len(res_status["tasks"]) == 2
+
+    # Verify per-task {name, status, attempts, branch, handoff}
+    tasks_by_name = {t["name"]: t for t in res_status["tasks"]}
+    for name in ["t1", "t2"]:
+        assert name in tasks_by_name
+        t = tasks_by_name[name]
+        assert t["name"] == name
+        assert t["status"] == "done"
+        assert isinstance(t["attempts"], list)
+        assert len(t["attempts"]) >= 1
+        assert t["branch"] == f"orch/plan-1/{name}"
+        assert t["handoff"] == f"handoffs/{name}.md"
+        assert f"{name}: done" in res_cli.stdout
+        assert f"branch=orch/plan-1/{name}" in res_cli.stdout
+
+    # With trail=True
+    res_trail = plan_status(str(plan_file), trail=True)
+    assert "trail" in res_trail
+    assert len(res_trail["trail"]) > 0
+    first_row = res_trail["trail"][0]
+    for field in ["time", "task", "phase", "decision", "reason", "evidence", "result"]:
+        assert field in first_row
+    assert any(r["decision"] == "task started" for r in res_trail["trail"])
+
+    # Trail matches CLI trail output
+    res_cli_trail = run_cli_plan(env_sandbox, plan_file, "status", extra_args=["--trail"])
+    assert res_cli_trail.returncode == 0
+    assert "task started" in res_cli_trail.stdout
+
+
+def test_plan_wait_bounded(env_sandbox, repo, tmp_path, monkeypatch):
+    assert clamp_timeout(0) == 1
+    assert clamp_timeout(-10) == 1
+    assert clamp_timeout(50) == 50
+    assert clamp_timeout(300) == 300
+    assert clamp_timeout(500) == 300
+
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "slow")
+    monkeypatch.setenv("FAKE_AGY_SCENARIO", "slow")
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "slow")
+    monkeypatch.setenv("AGENT_HUB_PLAN_POLL_S", "0.1")
+
+    plan_file = make_plan_file(tmp_path, repo)
+    run_res = plan_run(str(plan_file))
+    runner_pid = run_res["runner_pid"]
+
+    try:
+        # Bounded wait while running returns {"state": "running"}
+        wait_res = plan_wait(str(plan_file), timeout_s=1)
+        assert wait_res == {"state": "running"}
+    finally:
+        main(["plan", "cancel", str(plan_file), "-d", str(repo)])
+        try:
+            os.kill(runner_pid, 9)
+        except OSError:
+            pass
+
+    # Now run to completion and test plan_wait returns final per-task statuses
+    completed_dir = tmp_path / "completed"
+    completed_dir.mkdir(parents=True, exist_ok=True)
+    plan_file2 = make_plan_file(completed_dir, repo)
+    env = {"FAKE_CLAUDE_SCENARIO": "handoff", "FAKE_AGY_SCENARIO": "handoff", "FAKE_CODEX_SCENARIO": "handoff"}
+    res_run = run_cli_plan(env_sandbox, plan_file2, "run", extra_env=env)
+    assert res_run.returncode == 0
+
+    wait_done = plan_wait(str(plan_file2), timeout_s=10)
+    assert wait_done["plan"] == "plan-1"
+    assert "tasks" in wait_done
+    assert all(t["status"] == "done" for t in wait_done["tasks"])
+
+
+def test_plan_wait_tool_does_not_block_event_loop(env_sandbox, repo, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "slow")
+    monkeypatch.setenv("FAKE_AGY_SCENARIO", "slow")
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "slow")
+    monkeypatch.setenv("AGENT_HUB_PLAN_POLL_S", "0.1")
+
+    plan_file = make_plan_file(tmp_path, repo)
+    run_res = plan_run(str(plan_file))
+    runner_pid = run_res["runner_pid"]
+
+    server = build_server()
+
+    async def run_test():
+        ticks = 0
+        stop = False
+
+        async def heartbeat():
+            nonlocal ticks
+            while not stop:
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        hb_task = asyncio.create_task(heartbeat())
+        try:
+            tool_res = await server.call_tool("plan_wait", {"plan_path": str(plan_file), "timeout_s": 1})
+            assert not tool_res.is_error
+            data = json.loads(tool_res.content[0].text)
+            assert data.get("state") == "running"
+            assert ticks >= 5
+        finally:
+            stop = True
+            await hb_task
+
+    try:
+        asyncio.run(run_test())
+    finally:
+        main(["plan", "cancel", str(plan_file), "-d", str(repo)])
+        try:
+            os.kill(runner_pid, 9)
+        except OSError:
+            pass

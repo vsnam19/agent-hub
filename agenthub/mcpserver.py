@@ -1,4 +1,5 @@
 import asyncio
+import json
 import math
 import os
 import subprocess
@@ -16,6 +17,7 @@ from agenthub.cli import ALL_JOBS, WAIT_APPEAR_S, UsageError, _job_repo, _repo_o
 from agenthub.config import ConfigError, Paths, parse_duration, paths, role_kind
 from agenthub.jobs import get_job, list_jobs
 from agenthub.orchestrate import readiness, skills_hint
+from agenthub.plan import load as load_plan
 from agenthub.pool import Cooldowns, load_pool, parse_link
 from agenthub.workers import available_skills
 
@@ -525,6 +527,214 @@ async def wait_job_async(
     return {"state": "running"}
 
 
+class TaskList(list):
+    def __getitem__(self, item: Any) -> Any:
+        if isinstance(item, str):
+            for t in self:
+                if isinstance(t, dict) and t.get("name") == item:
+                    return t
+            raise KeyError(item)
+        return super().__getitem__(item)
+
+
+def validate_plan_args(plan_path: str, p: Paths | None = None) -> tuple[Path, Any]:
+    if not plan_path or not str(plan_path).strip():
+        raise UsageError("plan_path is required")
+    plan_file = Path(plan_path).expanduser().resolve()
+    plan = load_plan(plan_file)
+
+    p = p or paths()
+    known_skills = available_skills(p.config_dir) if any(t.skills for t in plan.tasks) else {}
+    for task in plan.tasks:
+        for skill in task.skills:
+            if skill not in known_skills:
+                raise UsageError(f"task {task.name}: unknown skill {skill}: {skills_hint(known_skills)}")
+
+    return plan_file, plan
+
+
+def plan_run(
+    plan_path: str,
+    p: Paths | None = None,
+) -> dict[str, Any]:
+    p = p or paths()
+    plan_file, plan = validate_plan_args(plan_path=plan_path, p=p)
+
+    cmd = [
+        sys.executable,
+        "-P",
+        "-m",
+        "agenthub",
+        "plan",
+        "run",
+        str(plan_file),
+    ]
+
+    env = os.environ.copy()
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    if "PYTHONPATH" in env:
+        if repo_root not in env["PYTHONPATH"].split(os.pathsep):
+            env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{env['PYTHONPATH']}"
+    else:
+        env["PYTHONPATH"] = repo_root
+
+    p.state_dir.mkdir(parents=True, exist_ok=True)
+    log_file = p.state_dir / f"mcp-plan-run-{time.time_ns()}.log"
+
+    try:
+        with open(log_file, "w") as log_fd:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=log_fd,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                env=env,
+                cwd=p.state_dir,
+            )
+    except OSError as e:
+        return {"error": f"spawn failed: {e} (log: {log_file})", "log": str(log_file)}
+
+    threading.Thread(target=proc.wait, daemon=True).start()
+
+    return {"plan": plan.slug, "runner_pid": proc.pid}
+
+
+def plan_status(
+    plan_path: str,
+    trail: bool = False,
+    p: Paths | None = None,
+) -> dict[str, Any]:
+    p = p or paths()
+    plan_file, plan = validate_plan_args(plan_path=plan_path, p=p)
+    plan_dir = plan.path.parent
+    state_file = plan_dir / "state.json"
+
+    if not state_file.is_file():
+        raise UsageError("state.json not found")
+
+    try:
+        with open(state_file, "r") as f:
+            state_data = json.load(f)
+    except (OSError, ValueError) as e:
+        raise UsageError(f"cannot read state: {e}") from None
+
+    tasks_data = state_data.get("tasks", {})
+    tasks = TaskList()
+    for t in plan.tasks:
+        ts = tasks_data.get(t.name, {})
+        tasks.append(
+            {
+                "name": t.name,
+                "status": ts.get("status", "pending"),
+                "attempts": ts.get("attempts", []),
+                "branch": ts.get("branch", ""),
+                "handoff": ts.get("handoff", ""),
+            }
+        )
+
+    res: dict[str, Any] = {"plan": plan.slug, "tasks": tasks}
+
+    if trail:
+        trail_file = plan_dir / "decisions.tsv"
+        if not trail_file.is_file():
+            raise UsageError("decisions.tsv not found")
+        lines = trail_file.read_text().splitlines()
+        trail_rows = []
+        if lines:
+            header = lines[0].split("\t")
+            for line in lines[1:]:
+                cells = line.split("\t")
+                if len(cells) < len(header):
+                    cells = cells + [""] * (len(header) - len(cells))
+                trail_rows.append(dict(zip(header, cells, strict=False)))
+        res["trail"] = trail_rows
+
+    return res
+
+
+def plan_wait(
+    plan_path: str,
+    timeout_s: Any = 60,
+    p: Paths | None = None,
+) -> dict[str, Any]:
+    p = p or paths()
+    plan_file, plan = validate_plan_args(plan_path=plan_path, p=p)
+    plan_dir = plan.path.parent
+    state_file = plan_dir / "state.json"
+
+    timeout = clamp_timeout(timeout_s)
+    start_mono = time.monotonic()
+
+    while time.monotonic() - start_mono <= min(float(timeout), WAIT_APPEAR_S):
+        if state_file.is_file():
+            break
+        time.sleep(0.05)
+    else:
+        if not state_file.is_file():
+            raise UsageError("state.json not found")
+
+    while time.monotonic() - start_mono <= timeout:
+        if not state_file.is_file():
+            time.sleep(0.05)
+            continue
+        try:
+            with open(state_file, "r") as f:
+                state_data = json.load(f)
+        except (OSError, ValueError):
+            time.sleep(0.05)
+            continue
+
+        tasks_data = state_data.get("tasks", {})
+        if tasks_data and not any(ts.get("status") in ("pending", "running") for ts in tasks_data.values()):
+            return plan_status(plan_path=str(plan_file), trail=False, p=p)
+
+        time.sleep(0.1)
+
+    return {"state": "running"}
+
+
+async def plan_wait_async(
+    plan_path: str,
+    timeout_s: Any = 60,
+    p: Paths | None = None,
+) -> dict[str, Any]:
+    p = p or paths()
+    plan_file, plan = validate_plan_args(plan_path=plan_path, p=p)
+    plan_dir = plan.path.parent
+    state_file = plan_dir / "state.json"
+
+    timeout = clamp_timeout(timeout_s)
+    start_mono = time.monotonic()
+
+    while time.monotonic() - start_mono <= min(float(timeout), WAIT_APPEAR_S):
+        if state_file.is_file():
+            break
+        await asyncio.sleep(0.05)
+    else:
+        if not state_file.is_file():
+            raise UsageError("state.json not found")
+
+    while time.monotonic() - start_mono <= timeout:
+        if not state_file.is_file():
+            await asyncio.sleep(0.05)
+            continue
+        try:
+            with open(state_file, "r") as f:
+                state_data = json.load(f)
+        except (OSError, ValueError):
+            await asyncio.sleep(0.05)
+            continue
+
+        tasks_data = state_data.get("tasks", {})
+        if tasks_data and not any(ts.get("status") in ("pending", "running") for ts in tasks_data.values()):
+            return plan_status(plan_path=str(plan_file), trail=False, p=p)
+
+        await asyncio.sleep(0.1)
+
+    return {"state": "running"}
+
+
 def build_server() -> "MCPServer":
     try:
         from mcp.server.mcpserver import MCPServer
@@ -609,6 +819,29 @@ def build_server() -> "MCPServer":
     )
     def ready_tool(workdir: str) -> dict[str, Any]:
         return ready(workdir=workdir)
+
+    @server.tool(
+        name="plan_run",
+        description="Start a plan run detached, returning the plan slug and runner pid immediately",
+    )
+    def plan_run_tool(plan_path: str) -> dict[str, Any]:
+        return plan_run(plan_path=plan_path)
+
+    @server.tool(
+        name="plan_status",
+        description="Show per-task status of a plan, optionally with decision trail",
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
+    def plan_status_tool(plan_path: str, trail: bool = False) -> dict[str, Any]:
+        return plan_status(plan_path=plan_path, trail=trail)
+
+    @server.tool(
+        name="plan_wait",
+        description="Wait for a plan to finish, bounded by timeout_s (at most 300s)",
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
+    async def plan_wait_tool(plan_path: str, timeout_s: int = 60) -> dict[str, Any]:
+        return await plan_wait_async(plan_path=plan_path, timeout_s=timeout_s)
 
     return server
 
