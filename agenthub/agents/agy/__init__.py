@@ -39,7 +39,9 @@ class AgyAdapter(Adapter):
             ]
         )
 
-        return Invocation(argv=argv, stdin_path=None)
+        # agy uses file token storage when it sees an SSH session; blank values make it use the OS keyring login
+        ssh_env = {"SSH_CONNECTION": "", "SSH_CLIENT": "", "SSH_TTY": ""}
+        return Invocation(argv=argv, stdin_path=None, env=ssh_env)
 
     def classify(self, rc: int, attempt_dir: Path) -> Classified:
         stdout_file = attempt_dir / "stdout"
@@ -70,7 +72,19 @@ class AgyAdapter(Adapter):
                 reset_at = datetime.now(timezone.utc) + timedelta(hours=h, minutes=mn, seconds=s)
             return Classified(Outcome.QUOTA, reply=reply, reset_at=reset_at, detail=diag)
 
-        if any(x in diag for x in ["unauthenticated", "unauthorized", "sign in", "please authenticate", "reauth"]):
+        if any(
+            x in diag
+            for x in [
+                "unauthenticated",
+                "unauthorized",
+                "sign in",
+                "please authenticate",
+                "reauth",
+                "authentication failed or timed out",
+                "authentication timed out",
+                "not logged into antigravity",
+            ]
+        ):
             return Classified(Outcome.AUTH, reply=reply, detail=diag)
 
         if any(x in diag for x in ["not a known model", "is not recognized as a known model", "invalid --model"]):

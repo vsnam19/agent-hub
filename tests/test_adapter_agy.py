@@ -103,6 +103,29 @@ def test_agy_build_review_argv(tmp_path):
     assert (attempt / "brief.md").read_text() == "hello"
 
 
+def test_build_blanks_ssh_session_vars(tmp_path):
+    adapter = AgyAdapter()
+    adapter.config = type("C", (), {"binary": "agy"})()
+
+    brief = tmp_path / "b.md"
+    brief.write_text("hello")
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+
+    req = Request(
+        role="implement",
+        model="m",
+        workdir=tmp_path,
+        brief_path=brief,
+        attempt_dir=attempt,
+        git_common_dir=tmp_path,
+    )
+
+    inv = adapter.build(req)
+    assert inv.env == {"SSH_CONNECTION": "", "SSH_CLIENT": "", "SSH_TTY": ""}
+    assert "SSH_AUTH_SOCK" not in inv.env
+
+
 def run_fake(env_sandbox, adapter, scenario, req):
     os.environ["FAKE_AGY_SCENARIO"] = scenario
     inv = adapter.build(req)
@@ -160,6 +183,19 @@ def test_agy_quota_reset_time_parsed(env_sandbox, adapter_agy, req_agy):
 
 def test_agy_classify_auth(env_sandbox, adapter_agy, req_agy):
     c = run_fake(env_sandbox, adapter_agy, "auth", req_agy)
+    assert c.outcome == Outcome.AUTH
+
+
+def test_classify_auth_timeout_is_auth(adapter_agy, tmp_path):
+    attempt = tmp_path / "auth-timeout"
+    attempt.mkdir()
+    (attempt / "stdout").write_text("")
+    (attempt / "stderr").write_text(
+        "Waiting for authentication (timeout 60s)...\n"
+        "Error: authentication timed out.\n"
+        "error: authentication failed or timed out\n"
+    )
+    c = adapter_agy.classify(1, attempt)
     assert c.outcome == Outcome.AUTH
 
 
