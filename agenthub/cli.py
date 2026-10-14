@@ -954,7 +954,13 @@ def _print_trail(trail_file: Path) -> int:
 
 def _claim_runner(state, plan_dir: Path) -> None:
     """Record this process as the plan's runner with its start time, so `plan cancel` can verify it.
+    Refuses if another verified runner process is still running.
     The pid also goes to `runner.pid`, which still names the runner when state.json cannot be read."""
+    runner = state.runner or {}
+    pid = runner.get("pid")
+    recorded = runner.get("start_time")
+    if isinstance(pid, int) and recorded is not None and pid != os.getpid() and start_time(pid) == recorded:
+        raise UsageError(f"plan runner {pid} is still running; wait or cancel it first")
     pid = os.getpid()
     state.runner = {"pid": pid, "start_time": start_time(pid)}
     state.save()
@@ -1164,15 +1170,27 @@ def _cmd_plan(args) -> int:
         if not state_file.is_file():
             raise UsageError("state.json not found")
         state = load_or_init(plan)
+        _claim_runner(state, plan_dir)
         tasks = [t for t in plan.tasks if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"]
-        jobs = list_jobs(paths(), 100000)
+        jobs = list_jobs(paths(), ALL_JOBS)
         triaged_count = 0
+        skipped_count = 0
         any_blocked = False
         for task in tasks:
             tstate = state.task(task.name)
             if not tstate.worktree:
                 continue
-            head = _head_of(tstate)
+            wt_path = Path(tstate.worktree)
+            if not wt_path.is_dir():
+                print(_safe(f"{task.name} skipped: work tree missing: {tstate.worktree}"))
+                skipped_count += 1
+                continue
+            try:
+                head = guards._run_git(wt_path, "rev-parse", "HEAD")
+            except (subprocess.CalledProcessError, OSError):
+                print(_safe(f"{task.name} skipped: cannot read HEAD: {tstate.worktree}"))
+                skipped_count += 1
+                continue
             result = triagerun.triage_task(plan, task, tstate, jobs, head, _now)
             if result is None:
                 continue
@@ -1188,6 +1206,9 @@ def _cmd_plan(args) -> int:
                 blocked = counts.get("blocked", 0)
                 brief_part = f" brief={result['fix_path']}" if result.get("fix_path") else ""
                 print(_safe(f"{task.name} fix={fix} reject={reject} blocked={blocked}{brief_part}"))
+        if skipped_count > 0:
+            print(_safe(f"skipped {skipped_count} task(s)"))
+            return 1
         if triaged_count == 0:
             print(_safe("nothing to triage"))
             return 0
