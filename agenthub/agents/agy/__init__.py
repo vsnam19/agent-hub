@@ -1,10 +1,24 @@
 import json
+import os
 import re
 import shutil
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from agenthub.agents import Adapter, Classified, Invocation, Outcome, Request, common_stderr_text
+
+
+def _keyring_env(environ: Mapping[str, str]) -> dict[str, str] | None:
+    """agy uses file token storage under SSH; blank SSH vars send it to the keyring, reachable over the session bus."""
+    forced = environ.get("AGENTHUB_AGY_KEYRING")
+    if forced == "1":
+        return {"SSH_CONNECTION": "", "SSH_CLIENT": "", "SSH_TTY": ""}
+    if forced == "0":
+        return None
+    if environ.get("SSH_CONNECTION") and environ.get("DBUS_SESSION_BUS_ADDRESS"):
+        return {"SSH_CONNECTION": "", "SSH_CLIENT": "", "SSH_TTY": ""}
+    return None
 
 
 class AgyAdapter(Adapter):
@@ -39,9 +53,7 @@ class AgyAdapter(Adapter):
             ]
         )
 
-        # agy uses file token storage when it sees an SSH session; blank values make it use the OS keyring login
-        ssh_env = {"SSH_CONNECTION": "", "SSH_CLIENT": "", "SSH_TTY": ""}
-        return Invocation(argv=argv, stdin_path=None, env=ssh_env)
+        return Invocation(argv=argv, stdin_path=None, env=_keyring_env(os.environ))
 
     def classify(self, rc: int, attempt_dir: Path) -> Classified:
         stdout_file = attempt_dir / "stdout"

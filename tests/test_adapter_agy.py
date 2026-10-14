@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from agenthub.agents import Outcome, Request
-from agenthub.agents.agy import AgyAdapter
+from agenthub.agents.agy import AgyAdapter, _keyring_env
 from agenthub.process import run
 
 
@@ -103,9 +103,39 @@ def test_agy_build_review_argv(tmp_path):
     assert (attempt / "brief.md").read_text() == "hello"
 
 
-def test_build_blanks_ssh_session_vars(tmp_path):
+BLANK_SSH = {"SSH_CONNECTION": "", "SSH_CLIENT": "", "SSH_TTY": ""}
+SSH_DBUS = {"SSH_CONNECTION": "10.0.0.2 22 10.0.0.1 5000", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}
+
+
+def test_keyring_env_blanks_under_ssh_with_dbus():
+    assert _keyring_env(SSH_DBUS) == BLANK_SSH
+
+
+def test_keyring_env_none_without_dbus():
+    assert _keyring_env({"SSH_CONNECTION": "10.0.0.2 22 10.0.0.1 5000"}) is None
+    assert _keyring_env({"SSH_CONNECTION": "10.0.0.2 22 10.0.0.1 5000", "DBUS_SESSION_BUS_ADDRESS": ""}) is None
+
+
+def test_keyring_env_none_without_ssh():
+    assert _keyring_env({"DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}) is None
+    assert _keyring_env({}) is None
+
+
+def test_keyring_env_forced_on():
+    assert _keyring_env({"AGENTHUB_AGY_KEYRING": "1"}) == BLANK_SSH
+
+
+def test_keyring_env_forced_off():
+    assert _keyring_env({"AGENTHUB_AGY_KEYRING": "0", **SSH_DBUS}) is None
+
+
+def test_build_passes_keyring_env(tmp_path, monkeypatch):
     adapter = AgyAdapter()
     adapter.config = type("C", (), {"binary": "agy"})()
+
+    monkeypatch.delenv("AGENTHUB_AGY_KEYRING", raising=False)
+    for key, value in SSH_DBUS.items():
+        monkeypatch.setenv(key, value)
 
     brief = tmp_path / "b.md"
     brief.write_text("hello")
@@ -122,8 +152,8 @@ def test_build_blanks_ssh_session_vars(tmp_path):
     )
 
     inv = adapter.build(req)
-    assert inv.env == {"SSH_CONNECTION": "", "SSH_CLIENT": "", "SSH_TTY": ""}
-    assert "SSH_AUTH_SOCK" not in inv.env
+    assert inv.env == _keyring_env(os.environ)
+    assert inv.env == BLANK_SSH
 
 
 def run_fake(env_sandbox, adapter, scenario, req):
