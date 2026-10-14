@@ -462,7 +462,7 @@ def run_plan(
 
 def apply_retry(tstate: TaskState, task: Task, job_status: str, job_result: dict):
     # retries logic (3.4)
-    attempts_so_far = len(tstate.attempts)
+    attempts_so_far = len(tstate.attempts) - tstate.attempts_base
 
     can_retry = False
     note = ""
