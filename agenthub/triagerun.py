@@ -94,6 +94,9 @@ def triage_task(
     except (triage.TriageError, OSError) as e:
         return _blocked(task, tstate, f"triage reply invalid: {e}")
 
+    if inputs.review_job == "" and not parsed.fix_brief.strip():
+        return _blocked(task, tstate, "gate failed and the triage wrote no fix brief")
+
     resolution = triage.resolve(
         parsed,
         inputs.findings,

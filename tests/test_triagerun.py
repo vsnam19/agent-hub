@@ -165,3 +165,63 @@ def test_rejected_context_in_round_order(tmp_path):
     assert pos_a != -1
     assert pos_z != -1
     assert pos2 < pos10 < pos_a < pos_z
+
+
+def test_gate_failure_without_fix_brief_blocks(tmp_path):
+    plan, task, tstate, _ = _setup(tmp_path)
+    wt = Path(tstate.worktree)
+    jobs = [
+        {
+            "id": "jg",
+            "kind": "gate",
+            "status": "failed",
+            "head": "H",
+            "workdir": str(wt),
+            "gate": [{"cmd": "just lint", "rc": 1, "tail": "lint failed"}],
+        },
+        {"id": "ji", "kind": "implement", "status": "ok", "agent": "claude", "model": "haiku", "workdir": str(wt)},
+    ]
+    for empty in ("", "   \n  "):
+        res = triage_task(plan, task, tstate, jobs, "H", NOW, run=_fake(tmp_path, _reply(findings=[], fix_brief=empty)))
+        assert res is not None
+        assert res["status"] == "blocked"
+        assert res["task"] == "t"
+        assert res["reason"] == "gate failed and the triage wrote no fix brief"
+        assert tstate.status == "blocked"
+        assert tstate.reason == "gate failed and the triage wrote no fix brief"
+        assert res["counts"] == {"fix": 0, "reject": 0, "blocked": 0}
+        assert not (plan.path.parent / "triage.jsonl").exists()
+
+
+def test_gate_failure_with_fix_brief_starts_round(tmp_path):
+    plan, task, tstate, _ = _setup(tmp_path)
+    wt = Path(tstate.worktree)
+    jobs = [
+        {
+            "id": "jg",
+            "kind": "gate",
+            "status": "failed",
+            "head": "H",
+            "workdir": str(wt),
+            "gate": [{"cmd": "just lint", "rc": 1, "tail": "lint failed"}],
+        },
+        {"id": "ji", "kind": "implement", "status": "ok", "agent": "claude", "model": "haiku", "workdir": str(wt)},
+    ]
+    fix = "\n\n".join(
+        [
+            "## Goal\nfix lint",
+            "## Input\nx",
+            "## Expected output\n1. `a.py`",
+            "## Constraints\nnone",
+            "## Gate\n`just lint`",
+        ]
+    )
+    res = triage_task(plan, task, tstate, jobs, "H", NOW, run=_fake(tmp_path, _reply(findings=[], fix_brief=fix)))
+    assert res is not None
+    assert res["status"] == "fix"
+    assert res["task"] == "t"
+    assert tstate.status == "pending"
+    assert tstate.fix_rounds == 1
+    assert (plan.path.parent / "fixes" / "t-1.md").is_file()
+    assert (plan.path.parent / "fixes" / "t-1.md").read_text(encoding="utf-8") == fix
+    assert (plan.path.parent / "triage.jsonl").is_file()
