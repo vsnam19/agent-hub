@@ -58,7 +58,7 @@ request-changes
     assert inputs.gate_tail == ""
     assert inputs.diff_path == str(job_dir / "diff.patch")
     assert inputs.implementers == ["agy:sonnet"]
-    assert inputs.job_ids == {"job-rev-1", "job-impl-1"}
+    assert inputs.job_ids == {"job-impl-1"}
 
 
 def test_approve_gives_none(tmp_path: Path):
@@ -352,6 +352,105 @@ def test_collects_implementers(tmp_path: Path):
         "j-impl-3",
         "j-impl-4",
         "j-impl-5",
-        "j-impl-6",
         "j-rev",
     }
+
+
+def test_job_ids_only_this_worktree(tmp_path: Path):
+    my_wt = tmp_path / "my_wt"
+    my_wt.mkdir()
+    other_wt = tmp_path / "other_wt"
+    other_wt.mkdir()
+    head = "sha-worktree-test"
+
+    jobs = [
+        {
+            "id": "job-gate-my",
+            "kind": "gate",
+            "status": "gate-failed",
+            "workdir": str(my_wt),
+            "head": head,
+            "gate": [{"cmd": "false", "rc": 1, "tail": "failed"}],
+        },
+        {
+            "id": "job-impl-my",
+            "kind": "implement",
+            "status": "ok",
+            "workdir": str(my_wt),
+            "head": head,
+        },
+        {
+            "id": "job-impl-other",
+            "kind": "implement",
+            "status": "ok",
+            "workdir": str(other_wt),
+            "head": head,
+        },
+        {
+            "id": "job-rev-other",
+            "kind": "review",
+            "status": "ok",
+            "verdict": "request-changes",
+            "workdir": str(other_wt),
+            "head": head,
+        },
+    ]
+
+    inputs = collect(jobs, my_wt, head)
+    assert inputs is not None
+    assert "job-impl-other" not in inputs.job_ids
+    assert "job-rev-other" not in inputs.job_ids
+    assert inputs.job_ids == {"job-gate-my", "job-impl-my"}
+
+
+def test_job_ids_exclude_triaged_review(tmp_path: Path):
+    workdir = tmp_path / "wt"
+    workdir.mkdir()
+    head = "sha-exclude-rev"
+
+    job_dir = tmp_path / "jobs" / "job-rev-triaged"
+    attempt_dir = job_dir / "attempts" / "1-agy-m"
+    attempt_dir.mkdir(parents=True)
+    reply_file = attempt_dir / "reply.md"
+    reply_file.write_text("## Findings\n- high — a.py:1 — err\n\n## Verdict\nrequest-changes\n")
+
+    jobs = [
+        {
+            "id": "job-rev-triaged",
+            "kind": "review",
+            "status": "ok",
+            "verdict": "request-changes",
+            "reply_path": str(reply_file),
+            "workdir": str(workdir),
+            "head": head,
+        },
+        {
+            "id": "job-impl-1",
+            "kind": "implement",
+            "status": "ok",
+            "workdir": str(workdir),
+            "head": head,
+        },
+        {
+            "id": "job-impl-2",
+            "kind": "implement",
+            "status": "ok",
+            "workdir": str(workdir),
+            "head": head,
+        },
+        {
+            "id": "job-rev-older",
+            "kind": "review",
+            "status": "ok",
+            "verdict": "approve",
+            "workdir": str(workdir),
+            "head": "sha-old",
+        },
+    ]
+
+    inputs = collect(jobs, workdir, head)
+    assert inputs is not None
+    assert inputs.review_job == "job-rev-triaged"
+    assert "job-rev-triaged" not in inputs.job_ids
+    assert "job-rev-older" in inputs.job_ids
+    assert inputs.job_ids == {"job-impl-1", "job-impl-2", "job-rev-older"}
