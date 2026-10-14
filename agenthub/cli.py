@@ -190,6 +190,10 @@ def _build_parser() -> argparse.ArgumentParser:
     plan_review.add_argument("plan_file", metavar="<plan.json>")
     plan_review.add_argument("--task", metavar="NAME", help="review only this task")
     plan_review.add_argument("--result", metavar="FILE", help=argparse.SUPPRESS)
+    plan_triage = plan_sub.add_parser(
+        "triage", help="triage every task that needs it, once (exit 1 when any task is blocked)"
+    )
+    plan_triage.add_argument("plan_file", metavar="<plan.json>")
     plan_merge = plan_sub.add_parser(
         "merge",
         help="merge each done task that agent-hub ready accepts, in dependency order (exit 1 at the first not ready)",
@@ -1010,6 +1014,11 @@ def _cmd_plan_cancel(args, plan_file: Path) -> int:
     return code
 
 
+def _head_of(tstate) -> str:
+    """The HEAD commit sha of a task state's work tree."""
+    return guards.head(guards.inspect(Path(tstate.worktree)))
+
+
 def _cmd_plan(args) -> int:
     plan_file = Path(args.plan_file).resolve()
     if args.plan_command == "cancel":
@@ -1141,6 +1150,42 @@ def _cmd_plan(args) -> int:
                     "stderr_tail": stderr_tail,
                 }
                 _atomic_write(result_path, json.dumps(record, indent=2) + "\n")
+
+    elif args.plan_command == "triage":
+        from agenthub import triagerun
+        from agenthub.planstate import load_or_init
+
+        if not state_file.is_file():
+            raise UsageError("state.json not found")
+        state = load_or_init(plan)
+        tasks = [t for t in plan.tasks if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"]
+        jobs = list_jobs(paths(), 100000)
+        triaged_count = 0
+        any_blocked = False
+        for task in tasks:
+            tstate = state.task(task.name)
+            if not tstate.worktree:
+                continue
+            head = _head_of(tstate)
+            result = triagerun.triage_task(plan, task, tstate, jobs, head, _now)
+            if result is None:
+                continue
+            triaged_count += 1
+            state.save()
+            if result.get("status") == "blocked":
+                any_blocked = True
+                print(_safe(f"{task.name} blocked: {result.get('reason', '')}"))
+            else:
+                counts = result.get("counts") or {}
+                fix = counts.get("fix", 0)
+                reject = counts.get("reject", 0)
+                blocked = counts.get("blocked", 0)
+                brief_part = f" brief={result['fix_path']}" if result.get("fix_path") else ""
+                print(_safe(f"{task.name} fix={fix} reject={reject} blocked={blocked}{brief_part}"))
+        if triaged_count == 0:
+            print(_safe("nothing to triage"))
+            return 0
+        return 1 if any_blocked else 0
 
     elif args.plan_command == "merge":
         from agenthub.planrun import merge_order, merge_target_problem, merge_task
