@@ -49,9 +49,16 @@ def write_report(plan: Plan, state: State, reviews: dict[str, dict], rounds: int
             if not isinstance(entry, dict):
                 skipped += 1
                 continue
+            findings = entry.get("findings")
+            if not isinstance(findings, list):
+                skipped += 1
+                continue
             task_name = entry.get("task", "")
             round_num = entry.get("round", "")
-            for f in entry.get("findings", []):
+            for f in findings:
+                if not isinstance(f, dict):
+                    skipped += 1
+                    continue
                 fid = f.get("id", "")
                 sev = f.get("severity", "")
                 decision = f.get("decision", "")
