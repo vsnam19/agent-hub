@@ -200,6 +200,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     plan_merge.add_argument("plan_file", metavar="<plan.json>")
     plan_merge.add_argument("--into", metavar="BRANCH", help="branch to merge into (default: the plan's base)")
+    plan_close = plan_sub.add_parser(
+        "close",
+        help="close a plan by running, reviewing, and triaging until ready or blocked, then write a report",
+    )
+    plan_close.add_argument("plan_file", metavar="<plan.json>")
+    plan_close.add_argument("--rounds", type=int, default=3, help="max triage fix rounds per task (default: 3)")
     plan_cancel = plan_sub.add_parser("cancel", help="stop the plan's runner and its running jobs")
     plan_cancel.add_argument("plan_file", metavar="<plan.json>")
     plan_cancel.add_argument("-d", "--dir", default=".", dest="workdir", help="repository the caller runs from")
@@ -1224,6 +1230,48 @@ def _cmd_plan(args) -> int:
                 print(_safe(f"{task.name} merge failed: {result['reason']}", sys.stderr), file=sys.stderr)
                 return 1
         return 0
+
+    elif args.plan_command == "close":
+        if args.rounds < 1:
+            raise UsageError("--rounds must be >= 1")
+
+        from agenthub import triagerun
+        from agenthub.planclose import close
+        from agenthub.planrun import review_task
+        from agenthub.planstate import load_or_init
+
+        state = load_or_init(plan)
+        _claim_runner(state, plan_dir)
+
+        def spawn(argv: list[str], log: Path) -> subprocess.Popen:
+            f = open(log, "wb")
+            return subprocess.Popen(argv, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+
+        def run():
+            return run_plan(plan, state, spawn)
+
+        def review(task):
+            return review_task(plan, task, state.task(task.name), _now)
+
+        def triage(task):
+            tstate = state.task(task.name)
+            return triagerun.triage_task(plan, task, tstate, list_jobs(paths(), 100000), _head_of(tstate), _now)
+
+        def ready(task):
+            tstate = state.task(task.name)
+            return readiness(list_jobs(paths(), 100000), Path(tstate.worktree), _head_of(tstate))
+
+        result = close(
+            plan,
+            state,
+            run=run,
+            review=review,
+            triage=triage,
+            ready=ready,
+            max_rounds=args.rounds,
+        )
+        print(_safe(str(result.report)))
+        return 0 if result.ok else 1
 
     elif args.plan_command == "wait":
         import argparse
