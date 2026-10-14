@@ -11,7 +11,6 @@ read the pool at run time. Placeholders below look like `<agent>:<model>`.
 
 Prefer the `agent-hub` MCP tools when present in your session; use CLI commands otherwise.
 
-
 ## Non-negotiables
 
 Each trigger maps to one action. The Principles below ground them; read a leaf skill in full before you rely on it.
@@ -100,7 +99,6 @@ When a goal has several tasks, write a plan file. Prefer the MCP tools when pres
 repository's lint and tests. Read `handoffs/` first, the full reply only when needed, and use `plan status` (or `plan_status` MCP tool). Merge
 verified `orch/<slug>/*` branches with `plan_merge` or yourself.
 
-
 - **Escalation.** When an implement task ends `gate-failed`, `failed`, `timeout`, `empty` or `interrupted` after its
   retries and its role names an `escalate` target, the runner resets the task's tree to its start point and runs it
   once at that role, with the failing gate output appended to the brief. At most one step per escalation; the chain
@@ -125,7 +123,6 @@ Prefer the MCP tools when present in your session; fall back to the CLI commands
 | Plan mode | `plan_run`, `plan_status`, `plan_wait`, `plan_review`, `plan_merge` | `agent-hub plan run/status/wait/review/merge` |
 
 ## Claude Code agents
-
 
 The plugin ships role agents for Claude Code's Agent tool. Use them for work that needs no job record:
 

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -8,6 +9,8 @@ import tomllib
 from pathlib import Path
 
 import pytest
+
+from agenthub.mcpserver import build_server
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 AGENTS_DIR = REPO_ROOT / "agents"
@@ -69,12 +72,31 @@ def test_plugin_declares_mcp_server():
     expected = {
         "mcpServers": {
             "agent-hub": {
-                "command": "agent-hub",
+                "command": "${CLAUDE_PLUGIN_ROOT}/bin/agent-hub",
                 "args": ["mcp"],
             }
         }
     }
     assert data == expected
+
+
+def test_readme_mcp_tools_match_server():
+    server = build_server()
+    server_tools = {t.name for t in asyncio.run(server.list_tools())}
+
+    readme_path = REPO_ROOT / "README.md"
+    readme_text = readme_path.read_text(encoding="utf-8")
+    tools_section = re.search(r"### Tools\n\n(.*?)(?:\n\n###|\Z)", readme_text, re.DOTALL)
+    assert tools_section, "README must have a '### Tools' section"
+    readme_tools = re.findall(r"^- `([^`]+)`:", tools_section.group(1), re.MULTILINE)
+
+    assert len(readme_tools) == len(set(readme_tools)), "Duplicate tools in README"
+    assert set(readme_tools) == server_tools
+
+
+def test_readme_exit_codes_table():
+    readme_text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "\n| Exit | Status | Meaning |\n|---|---|---|\n" in readme_text
 
 
 def test_bin_wrapper_is_executable_and_shellchecked():

@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "agent-hub": {
-      "command": "agent-hub",
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/agent-hub",
       "args": ["mcp"]
     }
   }

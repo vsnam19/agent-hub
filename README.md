@@ -203,8 +203,9 @@ uv tool install --editable '<repo>[mcp]'
 - `ready`: Check readiness of a work tree's committed HEAD to merge.
 - `plan_run`: Start a plan run detached, returning the plan slug and runner pid immediately.
 - `plan_status`: Show per-task status of a plan, optionally with decision trail.
-- `plan_wait`: Wait for a plan or review to finish, bounded by `timeout_s` (at most 300s).
+- `plan_wait`: Wait for a plan to finish, bounded by `timeout_s` (at most 300s).
 - `plan_review`: Review done tasks of a plan detached, returning a review handle.
+- `plan_review_wait`: Wait for a plan review to finish, bounded by `timeout_s` (at most 300s).
 - `plan_merge`: Merge ready tasks of a plan in dependency order.
 
 ### Async pattern
@@ -213,9 +214,9 @@ Long jobs are asynchronous: tool calls never block indefinitely. Starting a job 
 - `run_job` returns `{"job_id": "<id>"}`; wait with `wait_job(job_id=..., timeout_s=...)`.
 - `gate_start` returns `{"job_id": "<id>"}`; wait with `wait_job(job_id=..., timeout_s=...)`.
 - `plan_run` returns `{"plan": "<slug>", "runner_pid": ...}`; wait with `plan_wait(plan_path=..., timeout_s=...)`.
-- `plan_review` returns `{"handle": "<handle>", ...}`; wait with `plan_wait(handle=..., timeout_s=...)`.
+- `plan_review` returns `{"handle": "<handle>", ...}`; wait with `plan_review_wait(handle=..., timeout_s=...)`.
 
-While running, `wait_job` and `plan_wait` return status `"running"` when `timeout_s` (at most 300s) elapses; call wait again until the job finishes.
+While running, `wait_job`, `plan_wait` and `plan_review_wait` return status `"running"` when `timeout_s` (at most 300s) elapses; call wait again until the job finishes.
 
 ### Destructive tools
 
@@ -224,7 +225,6 @@ Only `plan_merge` is destructive (`destructiveHint=True`) because it modifies gi
 ## Exit codes
 
 | Exit | Status | Meaning |
-
 |---|---|---|
 | 0 | `ok` | An agent finished and returned a non-empty reply. |
 | 1 | `failed` | The agent failed for a reason that is not quota, auth or model. |
