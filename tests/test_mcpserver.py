@@ -20,6 +20,13 @@ from agenthub.mcpserver import (
     clamp_timeout,
     gate_start,
     jobs_data,
+    plan_merge,
+    plan_review,
+    plan_review_wait,
+    plan_review_wait_async,
+    plan_run,
+    plan_status,
+    plan_wait,
     pool_data,
     ready,
     run_job,
@@ -28,7 +35,9 @@ from agenthub.mcpserver import (
     wait_job,
     wait_job_async,
 )
+from agenthub.plan import PlanError
 from tests.gitrepo import make_repo
+from tests.test_plan_cli import fake_review, make_gated_plan_run, make_plan_file, run_cli_plan
 
 BRIEF = "## Input\n\nfoo\n\n## Expected output\n\nbar\n"
 
@@ -126,13 +135,31 @@ def test_server_lists_tools(env_sandbox):
     server = build_server()
     tools = asyncio.run(server.list_tools())
     tool_map = {t.name: t for t in tools}
-    assert set(tool_map.keys()) == {"pool", "jobs", "show_job", "run_job", "wait_job", "gate_start", "ready"}
-    for name in ["pool", "jobs", "show_job", "wait_job", "ready"]:
+    assert set(tool_map.keys()) == {
+        "pool",
+        "jobs",
+        "show_job",
+        "run_job",
+        "wait_job",
+        "gate_start",
+        "ready",
+        "plan_run",
+        "plan_status",
+        "plan_wait",
+        "plan_review",
+        "plan_review_wait",
+        "plan_merge",
+    }
+    for name in ["pool", "jobs", "show_job", "wait_job", "ready", "plan_status", "plan_wait", "plan_review_wait"]:
         tool = tool_map[name]
         assert tool.annotations is not None
         assert tool.annotations.read_only_hint is True
     assert tool_map["run_job"].annotations is None or tool_map["run_job"].annotations.read_only_hint is not True
     assert tool_map["gate_start"].annotations is None or tool_map["gate_start"].annotations.read_only_hint is not True
+    assert tool_map["plan_run"].annotations is None or tool_map["plan_run"].annotations.read_only_hint is not True
+    assert tool_map["plan_review"].annotations is None or tool_map["plan_review"].annotations.read_only_hint is not True
+    assert tool_map["plan_merge"].annotations is not None
+    assert tool_map["plan_merge"].annotations.destructive_hint is True
 
     pool_res = asyncio.run(server.call_tool("pool", {}))
     assert not pool_res.is_error
@@ -1137,3 +1164,417 @@ def test_wait_job_tool_does_not_block_event_loop(env_sandbox, repo):
             await hb_task
 
     asyncio.run(run_test())
+
+
+def test_plan_run_returns_at_once(env_sandbox, repo, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "slow")
+    monkeypatch.setenv("FAKE_AGY_SCENARIO", "slow")
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "slow")
+    monkeypatch.setenv("AGENT_HUB_PLAN_POLL_S", "0.1")
+
+    # Invalid plan fails validation like CLI
+    bad_plan = tmp_path / "bad_plan.json"
+    bad_plan.write_text("{}")
+    with pytest.raises(PlanError):
+        plan_run(str(bad_plan))
+
+    plan_file = make_plan_file(tmp_path, repo)
+    res = plan_run(str(plan_file))
+    assert "plan" in res
+    assert res["plan"] == "plan-1"
+    assert "runner_pid" in res
+    assert isinstance(res["runner_pid"], int)
+    assert res["runner_pid"] > 0
+
+    runner_pid = res["runner_pid"]
+    try:
+        os.kill(runner_pid, 0)
+    except OSError:
+        pytest.fail(f"runner process {runner_pid} is not running")
+    finally:
+        main(["plan", "cancel", str(plan_file), "-d", str(repo)])
+        try:
+            os.kill(runner_pid, 9)
+        except OSError:
+            pass
+
+
+def test_plan_status_matches_cli(env_sandbox, repo, tmp_path):
+    plan_file = make_plan_file(tmp_path, repo)
+
+    # Before run, state.json not found
+    with pytest.raises(UsageError, match="state.json not found"):
+        plan_status(str(plan_file))
+
+    env = {"FAKE_CLAUDE_SCENARIO": "handoff", "FAKE_AGY_SCENARIO": "handoff", "FAKE_CODEX_SCENARIO": "handoff"}
+    res_run = run_cli_plan(env_sandbox, plan_file, "run", extra_env=env)
+    assert res_run.returncode == 0
+
+    # CLI status output
+    res_cli = run_cli_plan(env_sandbox, plan_file, "status")
+    assert res_cli.returncode == 0
+
+    res_status = plan_status(str(plan_file))
+    assert res_status["plan"] == "plan-1"
+    assert "tasks" in res_status
+    assert len(res_status["tasks"]) == 2
+
+    # Verify per-task {name, status, attempts, branch, handoff}
+    tasks_by_name = {t["name"]: t for t in res_status["tasks"]}
+    for name in ["t1", "t2"]:
+        assert name in tasks_by_name
+        t = tasks_by_name[name]
+        assert t["name"] == name
+        assert t["status"] == "done"
+        assert isinstance(t["attempts"], list)
+        assert len(t["attempts"]) >= 1
+        assert t["branch"] == f"orch/plan-1/{name}"
+        assert t["handoff"] == f"handoffs/{name}.md"
+        assert f"{name}: done" in res_cli.stdout
+        assert f"branch=orch/plan-1/{name}" in res_cli.stdout
+
+    # With trail=True
+    res_trail = plan_status(str(plan_file), trail=True)
+    assert "trail" in res_trail
+    assert len(res_trail["trail"]) > 0
+    first_row = res_trail["trail"][0]
+    for field in ["time", "task", "phase", "decision", "reason", "evidence", "result"]:
+        assert field in first_row
+    assert any(r["decision"] == "task started" for r in res_trail["trail"])
+
+    # Trail matches CLI trail output
+    res_cli_trail = run_cli_plan(env_sandbox, plan_file, "status", extra_args=["--trail"])
+    assert res_cli_trail.returncode == 0
+    assert "task started" in res_cli_trail.stdout
+
+
+def test_plan_wait_bounded(env_sandbox, repo, tmp_path, monkeypatch):
+    assert clamp_timeout(0) == 1
+    assert clamp_timeout(-10) == 1
+    assert clamp_timeout(50) == 50
+    assert clamp_timeout(300) == 300
+    assert clamp_timeout(500) == 300
+
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "slow")
+    monkeypatch.setenv("FAKE_AGY_SCENARIO", "slow")
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "slow")
+    monkeypatch.setenv("AGENT_HUB_PLAN_POLL_S", "0.1")
+
+    plan_file = make_plan_file(tmp_path, repo)
+    run_res = plan_run(str(plan_file))
+    runner_pid = run_res["runner_pid"]
+
+    try:
+        # Bounded wait while running returns {"state": "running"}
+        wait_res = plan_wait(str(plan_file), timeout_s=1)
+        assert wait_res == {"state": "running"}
+    finally:
+        main(["plan", "cancel", str(plan_file), "-d", str(repo)])
+        try:
+            os.kill(runner_pid, 9)
+        except OSError:
+            pass
+
+    # Now run to completion and test plan_wait returns final per-task statuses
+    completed_dir = tmp_path / "completed"
+    completed_dir.mkdir(parents=True, exist_ok=True)
+    plan_file2 = make_plan_file(completed_dir, repo)
+    env = {"FAKE_CLAUDE_SCENARIO": "handoff", "FAKE_AGY_SCENARIO": "handoff", "FAKE_CODEX_SCENARIO": "handoff"}
+    res_run = run_cli_plan(env_sandbox, plan_file2, "run", extra_env=env)
+    assert res_run.returncode == 0
+
+    wait_done = plan_wait(str(plan_file2), timeout_s=10)
+    assert wait_done["plan"] == "plan-1"
+    assert "tasks" in wait_done
+    assert all(t["status"] == "done" for t in wait_done["tasks"])
+
+
+def test_plan_wait_tool_does_not_block_event_loop(env_sandbox, repo, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "slow")
+    monkeypatch.setenv("FAKE_AGY_SCENARIO", "slow")
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "slow")
+    monkeypatch.setenv("AGENT_HUB_PLAN_POLL_S", "0.1")
+
+    plan_file = make_plan_file(tmp_path, repo)
+    run_res = plan_run(str(plan_file))
+    runner_pid = run_res["runner_pid"]
+
+    server = build_server()
+
+    async def run_test():
+        ticks = 0
+        stop = False
+
+        async def heartbeat():
+            nonlocal ticks
+            while not stop:
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        hb_task = asyncio.create_task(heartbeat())
+        try:
+            tool_res = await server.call_tool("plan_wait", {"plan_path": str(plan_file), "timeout_s": 1})
+            assert not tool_res.is_error
+            data = json.loads(tool_res.content[0].text)
+            assert data.get("state") == "running"
+            assert ticks >= 5
+        finally:
+            stop = True
+            await hb_task
+
+    try:
+        asyncio.run(run_test())
+    finally:
+        main(["plan", "cancel", str(plan_file), "-d", str(repo)])
+        try:
+            os.kill(runner_pid, 9)
+        except OSError:
+            pass
+
+
+def test_plan_review_cli_result_file(env_sandbox, tmp_path):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    result_file = tmp_path / "review-result.json"
+    rc = main(["plan", "review", str(plan_file), "--result", str(result_file)])
+    assert result_file.is_file()
+    data = json.loads(result_file.read_text())
+    assert data["exit_code"] == rc
+    assert data["status"] == ("ok" if rc == 0 else "failed")
+    assert isinstance(data["lines"], list)
+    assert len(data["lines"]) == 2
+    assert "stderr_tail" in data
+    assert isinstance(data["stderr_tail"], str)
+
+    # Test error exit (e.g. no done task named nope)
+    err_result = tmp_path / "err-result.json"
+    err_rc = main(["plan", "review", str(plan_file), "--task", "nope", "--result", str(err_result)])
+    assert err_rc == 2
+    assert err_result.is_file()
+    err_data = json.loads(err_result.read_text())
+    assert err_data["exit_code"] == 2
+    assert err_data["status"] == "failed"
+    assert "no done implement task named nope" in err_data["stderr_tail"]
+
+
+def test_plan_review_tool_returns_handle(env_sandbox, tmp_path):
+    with pytest.raises(UsageError):
+        plan_review("")
+
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+
+    with pytest.raises(UsageError, match="no done implement task named nope"):
+        plan_review(str(plan_file), task="nope")
+
+    res = plan_review(str(plan_file))
+    assert "handle" in res
+    handle = res["handle"]
+    assert isinstance(handle, str)
+    assert len(handle) > 0
+    assert "plan" in res
+    assert res["plan"] == "plan-1"
+
+    wait_res = plan_review_wait(handle, timeout_s=30)
+    assert "lines" in wait_res
+    assert len(wait_res["lines"]) == 2
+    for line in wait_res["lines"]:
+        assert "gate=" in line and "review=" in line and "job=" in line
+
+    wait_res_async = asyncio.run(plan_review_wait_async(handle, timeout_s=30))
+    assert wait_res_async["lines"] == wait_res["lines"]
+    assert wait_res_async["state"] == wait_res["state"]
+
+    server = build_server()
+    tool_res = asyncio.run(server.call_tool("plan_review", {"plan_path": str(plan_file), "task": "t1"}))
+    assert not tool_res.is_error
+    data = json.loads(tool_res.content[0].text)
+    assert "handle" in data
+    wait_data = asyncio.run(server.call_tool("plan_review_wait", {"handle": data["handle"], "timeout_s": 30}))
+    assert not wait_data.is_error
+    wdata = json.loads(wait_data.content[0].text)
+    assert "lines" in wdata
+    assert len(wdata["lines"]) == 1
+    assert "t1" in wdata["lines"][0]
+
+
+def test_plan_review_result_survives_server_exit(env_sandbox, tmp_path):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    res = plan_review(str(plan_file))
+    assert "handle" in res
+    handle = res["handle"]
+
+    p = paths()
+    review_file = p.state_dir / "mcp" / "plan-review" / f"{handle}.json"
+    assert review_file.is_file()
+
+    # The child writes the result file directly; wait for it
+    wait_res = plan_review_wait(handle, timeout_s=30)
+    assert wait_res["state"] in ("ok", "failed")
+    assert "lines" in wait_res
+    assert len(wait_res["lines"]) == 2
+
+    # A separate/new call reads the result directly without needing any daemon thread
+    wait_res2 = plan_review_wait(handle, timeout_s=5)
+    assert wait_res2["lines"] == wait_res["lines"]
+    assert wait_res2["state"] == wait_res["state"]
+    assert "stderr_tail" in wait_res2
+
+
+def test_plan_review_handle_traversal_rejected(env_sandbox, tmp_path):
+    for bad_handle in ["../../x", "a/b", "..", "/etc/passwd", "/tmp/x"]:
+        with pytest.raises(KeyError):
+            plan_review_wait(bad_handle)
+
+    for empty_handle in ["", "   "]:
+        with pytest.raises(UsageError):
+            plan_review_wait(empty_handle)
+
+
+def test_plan_review_no_done_tasks_reason(env_sandbox, tmp_path, monkeypatch):
+    repo = make_repo(tmp_path / "repo")
+    plan_file = make_plan_file(tmp_path, repo)
+    plan_dir = plan_file.parent
+    (plan_dir / "state.json").write_text(
+        json.dumps({"tasks": {"t1": {"status": "pending"}, "t2": {"status": "pending"}}})
+    )
+
+    orig_popen = subprocess.Popen
+
+    # Ensure review subprocess is NOT spawned
+    def fail_popen(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if any("review" in str(c) for c in cmd):
+            raise AssertionError("should not spawn when no tasks are done")
+        return orig_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", fail_popen)
+
+    res = plan_review(str(plan_file))
+    assert res.get("reason") == "no done tasks to review"
+    assert "runner_pid" not in res
+    assert "handle" not in res
+
+    # Also test via MCP tool call
+    server = build_server()
+    tool_res = asyncio.run(server.call_tool("plan_review", {"plan_path": str(plan_file)}))
+    assert not tool_res.is_error
+    data = json.loads(tool_res.content[0].text)
+    assert data.get("reason") == "no done tasks to review"
+    assert "runner_pid" not in data
+    assert "handle" not in data
+
+
+def test_plan_wait_ignores_review_prefix(env_sandbox, tmp_path):
+    # plan_wait treats review-* as a plan path and does not attempt review handle resolution
+    with pytest.raises((UsageError, PlanError)):
+        plan_wait("review-nonexistent.json")
+
+    p = paths()
+    review_dir = p.state_dir / "mcp" / "plan-review"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    fake_review = review_dir / "review-fake.json"
+    fake_review.write_text(json.dumps({"status": "ok", "lines": ["fake"]}))
+
+    with pytest.raises((UsageError, PlanError)):
+        plan_wait("review-fake")
+
+
+def test_plan_review_spawn_failure_closes_files(env_sandbox, tmp_path, monkeypatch):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+
+    opened = []
+    orig_open = open
+
+    def tracking_open(*args, **kwargs):
+        f = orig_open(*args, **kwargs)
+        opened.append(f)
+        return f
+
+    orig_popen = subprocess.Popen
+
+    def fail_popen(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if any("review" in str(c) for c in cmd):
+            raise OSError("mocked spawn failure")
+        return orig_popen(*args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", tracking_open)
+    monkeypatch.setattr(subprocess, "Popen", fail_popen)
+
+    res = plan_review(str(plan_file))
+    assert "spawn failed" in res.get("error", "")
+
+    assert len(opened) > 0
+    for f in opened:
+        assert f.closed
+
+
+def test_plan_merge_tool_refuses_dirty_checkout(env_sandbox, tmp_path, monkeypatch, capsys):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    fake_review(monkeypatch, "approve")
+    assert main(["plan", "review", str(plan_file)]) == 0
+    capsys.readouterr()
+    repo = tmp_path / "repo"
+    head_before = subprocess.run(
+        ["git", "rev-parse", "master"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    (repo / "stray.txt").write_text("uncommitted\n")
+
+    with pytest.raises(UsageError, match="main checkout is not clean"):
+        plan_merge(str(plan_file))
+
+    head_after = subprocess.run(
+        ["git", "rev-parse", "master"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert head_before == head_after
+
+
+def test_plan_merge_tool_is_destructive_and_merges_ready(env_sandbox, tmp_path, monkeypatch, capsys):
+    server = build_server()
+    tools = asyncio.run(server.list_tools())
+    tool_map = {t.name: t for t in tools}
+    assert tool_map["plan_merge"].annotations is not None
+    assert tool_map["plan_merge"].annotations.destructive_hint is True
+
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    t2_file = Path(state["tasks"]["t2"]["worktree"]) / "t2.txt"
+    t2_file.write_text("t2 work\n")
+    subprocess.run(["git", "add", "t2.txt"], cwd=t2_file.parent, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "t2 work"], cwd=t2_file.parent, check=True)
+    fake_review(monkeypatch, "approve")
+    assert main(["plan", "review", str(plan_file)]) == 0
+    capsys.readouterr()
+    repo = tmp_path / "repo"
+
+    res = plan_merge(str(plan_file))
+    assert res["merged"] == ["t1", "t2"]
+    assert res["stopped_at"] is None
+
+    log_res = subprocess.run(
+        ["git", "log", "--format=%s", "-n", "2"], cwd=repo, capture_output=True, text=True, check=True
+    )
+    subjects = log_res.stdout.splitlines()
+    assert len(subjects) == 2
+    assert "Merge orch/plan-1/t2" in subjects[0]
+    assert "Merge orch/plan-1/t1" in subjects[1]
+    assert (repo / "agent_wrote.txt").is_file()
+    assert (repo / "t2.txt").is_file()
+
+    for name in ("t1", "t2"):
+        assert not Path(state["tasks"][name]["worktree"]).exists()
+        assert subprocess.run(["git", "show-ref", f"refs/heads/orch/plan-1/{name}"], cwd=repo).returncode != 0
+
+    p2 = tmp_path / "p2"
+    p2.mkdir()
+    plan_file2, state2 = make_gated_plan_run(env_sandbox, p2)
+    fake_review(monkeypatch, "approve")
+    assert main(["plan", "review", str(plan_file2)]) == 0
+    capsys.readouterr()
+    t1_worktree = state2["tasks"]["t1"]["worktree"]
+    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "after review"], cwd=t1_worktree, check=True)
+
+    res2 = plan_merge(str(plan_file2))
+    assert res2["merged"] == []
+    assert res2["stopped_at"] is not None
+    assert res2["stopped_at"]["task"] == "t1"
+    assert res2["stopped_at"]["status"] == "not-ready"
+    assert len(res2["stopped_at"]["problems"]) > 0

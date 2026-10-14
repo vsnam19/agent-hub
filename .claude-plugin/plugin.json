@@ -12,5 +12,13 @@
     "delegation",
     "codex",
     "agy"
-  ]
+  ],
+  "mcpServers": {
+    "agent-hub": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/agent-hub",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
 }

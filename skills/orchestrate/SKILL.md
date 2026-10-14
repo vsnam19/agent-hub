@@ -9,6 +9,8 @@ You are the director. `agent-hub` runs a job on the first agent in a role's chai
 record you can verify. You decompose, brief, verify and merge; the pool writes the code. This skill names no agent:
 read the pool at run time. Placeholders below look like `<agent>:<model>`.
 
+Prefer the `agent-hub` MCP tools when present in your session; use CLI commands otherwise.
+
 ## Non-negotiables
 
 Each trigger maps to one action. The Principles below ground them; read a leaf skill in full before you rely on it.
@@ -56,7 +58,7 @@ Read the leaf skill in full for any principle you apply.
 ## The loop
 
 1. **Decide what to delegate.** Implementation and second-opinion review go to the pool. Design, planning, research, and verification stay with you.
-2. **Look at the pool.** Run `agent-hub pool`, then pick the tier from Routing. Run `agent-hub profile <agent>` to shape the brief to an agent's weaknesses.
+2. **Look at the pool.** Run `agent-hub pool` (or call `pool` MCP tool), then pick the tier from Routing. Run `agent-hub profile <agent>` to shape the brief to an agent's weaknesses.
 3. **Write the brief** from `brief-template.md` (Goal / Input / Expected output / Constraints / Gate).
    Input names the files, the current behaviour and the interfaces. Expected output names the files to change,
    the exact test names that must pass, and the exact commands with their expected result. The Gate always
@@ -66,37 +68,36 @@ Read the leaf skill in full for any principle you apply.
    `## Standing orders`, so do not restate them by hand; the text sent is recorded in the job's `brief.md`.
    Name the worker skills the task needs with `--skill` (e.g. `debug-playbook` for a bug of unknown cause).
 4. **Prepare a worktree** on a feature branch. The CLI refuses the default branch or detached HEAD.
-5. **Run the job, then wait for it.** Start it with the Bash tool's `run_in_background`:
+5. **Run the job, then wait for it.** Prefer MCP tools when present: call `run_job` (detached, returns `job_id`), then call `wait_job(job_id, timeout_s)` in a bounded loop until finished. Otherwise, start it with the Bash tool's `run_in_background`:
    `agent-hub run --role <tier> --brief brief.md -d <worktree> --json`
    Then call `agent-hub wait -d <worktree> --timeout 9m`. Exit 124 means it is running: do independent work, then call `wait` again. Any other exit is the
    job's own exit code and `wait` has printed its result. Steps 6–7 happen before your final reply; never end
    your turn while a job you started is still running, because nothing wakes you after your turn ends.
 6. **Read the result** and act on its `status` (table below). Never re-run blindly on a dirty tree. A single `run`
-   never escalates by itself: after a failure, re-run at the role's `escalate` target (see `agent-hub pool`).
+   never escalates by itself: after a failure, re-run at the role's `escalate` target (see `agent-hub pool` or `pool` MCP tool).
 7. **Verify yourself** in the worktree: run the gate, read the whole diff, and scan every new test for missing
    assertions. Check the diff for edits to the gate itself (tests, justfile, lint config) and pass the repository's
    lint and tests as `--gate`. The agent's claims are not evidence. Read every `gate_touched` hunk; gate-touched findings
    are judged by the reviewer, never by you. Once verified, commit the work yourself if the agent did not (some agents cannot commit by design).
-   After committing, run `agent-hub gate -d <worktree>`, then review, then `agent-hub ready`.
-8. **Review every change you merge:** start it the same way (background + `wait`):
+   After committing, run `agent-hub gate -d <worktree>` (or `gate_start` + `wait_job`), then review, then `agent-hub ready` (or `ready` MCP tool).
+8. **Review every change you merge:** start it the same way (MCP `run_job` + `wait_job`, or background CLI + `wait`):
    `agent-hub run --role review -d <worktree> --base <default branch>`.
    The CLI computes `git diff <base>...HEAD` into the job's `diff.patch` and the reviewer reads that file; the
    reviewer never gets a shell. A change touching security, concurrency, data or a public interface gets a second
    review from a different vendor with a different lens (for example `--agent <other vendor>` and the brief line
    "Lens: does it actually run and do what it claims — check error paths and inputs that break it").
    `--exclude <agent>:<model>` skips the link that wrote the change. Treat findings as input to your own judgement,
-   not as a verdict. Before merging, run `agent-hub ready -d <worktree>`: it exits 1 unless the current `HEAD` passed
+   not as a verdict. Before merging, run `agent-hub ready -d <worktree>` (or `ready` MCP tool): it exits 1 (or returns `ready: false`) unless the current `HEAD` passed
    its gates and a different model approved that same commit.
 9. **Force a link** with `--agent <agent>:<model>` when one model's output is poor or you need a specific one.
    It replaces the chain with that single link.
 
 ## Plan mode
 
-When a goal has several tasks, write a plan file and use `agent-hub plan run` (background) +
-`agent-hub plan wait` until it stops returning 124. Plan file fields: `goal`, `repo`, `base`, `slug`, `tasks`
+When a goal has several tasks, write a plan file. Prefer the MCP tools when present (`plan_run`, `plan_wait`, `plan_status`, `plan_review`, `plan_review_wait`, `plan_merge`); otherwise use `agent-hub plan run` (background) + `agent-hub plan wait` until it stops returning 124. Plan file fields: `goal`, `repo`, `base`, `slug`, `tasks`
 (with `name`, `role`, `brief` or `verifies`, `depends_on`; `role` is any pool role). Use `"gate"` to pass the
-repository's lint and tests. Read `handoffs/` first, the full reply only when needed, and use `plan status`. Merge
-verified `orch/<slug>/*` branches yourself.
+repository's lint and tests. Read `handoffs/` first, the full reply only when needed, and use `plan status` (or `plan_status` MCP tool). Merge
+verified `orch/<slug>/*` branches with `plan_merge` or yourself.
 
 - **Escalation.** When an implement task ends `gate-failed`, `failed`, `timeout`, `empty` or `interrupted` after its
   retries and its role names an `escalate` target, the runner resets the task's tree to its start point and runs it
@@ -107,6 +108,19 @@ verified `orch/<slug>/*` branches yourself.
   branch so dependent tasks start from it. A task you chain from needs no commit by the agent.
 - **Review other-model.** A `verifies` task skips the link that implemented the task it checks; if no other
   reviewer exists the task is blocked with a reason instead of a self-review.
+
+## MCP tools vs CLI
+
+Prefer the MCP tools when present in your session; fall back to the CLI commands otherwise:
+
+| Action | MCP tool (prefer) | CLI command (fallback) |
+|---|---|---|
+| Read pool | `pool()` | `agent-hub pool` |
+| List / show jobs | `jobs(repo_dir)`, `show_job(job_id)` | `agent-hub jobs`, `agent-hub show <id>` |
+| Run job & wait | `run_job(...)` → `wait_job(job_id, timeout_s)` | `agent-hub run ...` (background) → `agent-hub wait` |
+| Gate committed HEAD | `gate_start(workdir)` → `wait_job(job_id, timeout_s)` | `agent-hub gate -d <worktree>` |
+| Readiness check | `ready(workdir)` | `agent-hub ready -d <worktree>` |
+| Plan mode | `plan_run`, `plan_status`, `plan_wait`, `plan_review`, `plan_review_wait`, `plan_merge` | `agent-hub plan run/status/wait/review/merge` |
 
 ## Claude Code agents
 

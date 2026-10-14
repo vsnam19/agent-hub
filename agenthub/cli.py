@@ -65,6 +65,32 @@ def _atomic_write(path: Path, content: str) -> None:
         raise
 
 
+class _TeeStream:
+    def __init__(self, target):
+        self._target = target
+        self._buf = []
+
+    def write(self, s: str):
+        self._buf.append(s)
+        return self._target.write(s)
+
+    def flush(self):
+        return self._target.flush()
+
+    def isatty(self):
+        return getattr(self._target, "isatty", lambda: False)()
+
+    def fileno(self):
+        return self._target.fileno()
+
+    @property
+    def encoding(self):
+        return getattr(self._target, "encoding", "utf-8")
+
+    def get_text(self) -> str:
+        return "".join(self._buf)
+
+
 @contextmanager
 def _announcing(announce_path: str | None):
     if not announce_path:
@@ -163,6 +189,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     plan_review.add_argument("plan_file", metavar="<plan.json>")
     plan_review.add_argument("--task", metavar="NAME", help="review only this task")
+    plan_review.add_argument("--result", metavar="FILE", help=argparse.SUPPRESS)
     plan_merge = plan_sub.add_parser(
         "merge",
         help="merge each done task that agent-hub ready accepts, in dependency order (exit 1 at the first not ready)",
@@ -1054,32 +1081,66 @@ def _cmd_plan(args) -> int:
         return 0
 
     elif args.plan_command == "review":
-        from agenthub.planrun import review_task
-        from agenthub.planstate import load_or_init
+        result_path = Path(args.result) if getattr(args, "result", None) else None
+        orig_stdout, orig_stderr = sys.stdout, sys.stderr
+        tee_out, tee_err = None, None
+        if result_path is not None:
+            tee_out = _TeeStream(orig_stdout)
+            tee_err = _TeeStream(orig_stderr)
+            sys.stdout, sys.stderr = tee_out, tee_err
 
-        if not state_file.is_file():
-            raise UsageError("state.json not found")
-        state = load_or_init(plan)
-        tasks = [t for t in plan.tasks if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"]
-        if args.task is not None:
-            tasks = [t for t in tasks if t.name == args.task]
+        ret_code = 1
+        err_thrown = None
+        try:
+            from agenthub.planrun import review_task
+            from agenthub.planstate import load_or_init
+
+            if not state_file.is_file():
+                raise UsageError("state.json not found")
+            state = load_or_init(plan)
+            tasks = [t for t in plan.tasks if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"]
+            if args.task is not None:
+                tasks = [t for t in tasks if t.name == args.task]
+                if not tasks:
+                    raise UsageError(f"no done implement task named {args.task}")
             if not tasks:
-                raise UsageError(f"no done implement task named {args.task}")
-        if not tasks:
-            print("no done tasks to review", file=sys.stderr)
-            return 1
+                print("no done tasks to review", file=sys.stderr)
+                ret_code = 1
+                return ret_code
 
-        all_approved = True
-        for task in tasks:
-            result = review_task(plan, task, state.task(task.name), _now)
-            if result.get("up_to_date"):
-                print(_safe(f"{task.name} up to date (review job={result['job']})"))
-                continue
-            all_approved = all_approved and result["review"] == "approve"
-            print(_safe(f"{task.name} gate={result['gate']} review={result['review']} job={result['job']}"))
-            if result["reason"]:
-                print(_safe(result["reason"]), file=sys.stderr)
-        return 0 if all_approved else 1
+            all_approved = True
+            for task in tasks:
+                result = review_task(plan, task, state.task(task.name), _now)
+                if result.get("up_to_date"):
+                    print(_safe(f"{task.name} up to date (review job={result['job']})"))
+                    continue
+                all_approved = all_approved and result["review"] == "approve"
+                print(_safe(f"{task.name} gate={result['gate']} review={result['review']} job={result['job']}"))
+                if result["reason"]:
+                    print(_safe(result["reason"]), file=sys.stderr)
+            ret_code = 0 if all_approved else 1
+            return ret_code
+        except BaseException as e:
+            err_thrown = e
+            ret_code = 2 if isinstance(e, (UsageError, ConfigError, BriefError, PlanError)) else 1
+            raise
+        finally:
+            if result_path is not None:
+                sys.stdout, sys.stderr = orig_stdout, orig_stderr
+                out_text = tee_out.get_text() if tee_out else ""
+                err_text = tee_err.get_text() if tee_err else ""
+                lines = [line.strip() for line in out_text.splitlines() if line.strip()]
+                if not err_text and err_thrown is not None:
+                    err_text = str(err_thrown)
+                err_lines = err_text.splitlines()
+                stderr_tail = "\n".join(err_lines[-40:]).strip()
+                record = {
+                    "status": "ok" if ret_code == 0 else "failed",
+                    "exit_code": ret_code,
+                    "lines": lines,
+                    "stderr_tail": stderr_tail,
+                }
+                _atomic_write(result_path, json.dumps(record, indent=2) + "\n")
 
     elif args.plan_command == "merge":
         from agenthub.planrun import merge_order, merge_target_problem, merge_task
