@@ -554,8 +554,10 @@ def validate_plan_args(plan_path: str, p: Paths | None = None) -> tuple[Path, An
     return plan_file, plan
 
 
-def plan_run(
+def _spawn_plan_cli(
+    subcommand: str,
     plan_path: str,
+    extra_args: list[str] | None = None,
     p: Paths | None = None,
 ) -> dict[str, Any]:
     p = p or paths()
@@ -567,9 +569,11 @@ def plan_run(
         "-m",
         "agenthub",
         "plan",
-        "run",
+        subcommand,
         str(plan_file),
     ]
+    if extra_args:
+        cmd.extend(extra_args)
 
     env = os.environ.copy()
     repo_root = str(Path(__file__).resolve().parent.parent)
@@ -580,7 +584,7 @@ def plan_run(
         env["PYTHONPATH"] = repo_root
 
     p.state_dir.mkdir(parents=True, exist_ok=True)
-    log_file = p.state_dir / f"mcp-plan-run-{time.time_ns()}.log"
+    log_file = p.state_dir / f"mcp-plan-{subcommand}-{time.time_ns()}.log"
 
     try:
         with open(log_file, "w") as log_fd:
@@ -599,6 +603,30 @@ def plan_run(
     threading.Thread(target=proc.wait, daemon=True).start()
 
     return {"plan": plan.slug, "runner_pid": proc.pid}
+
+
+def plan_run(
+    plan_path: str,
+    p: Paths | None = None,
+) -> dict[str, Any]:
+    return _spawn_plan_cli("run", plan_path=plan_path, p=p)
+
+
+def plan_triage(
+    plan_path: str,
+    p: Paths | None = None,
+) -> dict[str, Any]:
+    return _spawn_plan_cli("triage", plan_path=plan_path, p=p)
+
+
+def plan_close(
+    plan_path: str,
+    rounds: int = 3,
+    p: Paths | None = None,
+) -> dict[str, Any]:
+    if isinstance(rounds, bool) or not isinstance(rounds, int) or rounds < 1:
+        raise UsageError(f"rounds must be an integer >= 1: {rounds!r}")
+    return _spawn_plan_cli("close", plan_path=plan_path, extra_args=["--rounds", str(rounds)], p=p)
 
 
 def plan_status(
@@ -1189,6 +1217,20 @@ def build_server() -> "MCPServer":
     )
     def plan_merge_tool(plan_path: str, into: str | None = None) -> dict[str, Any]:
         return plan_merge(plan_path=plan_path, into=into)
+
+    @server.tool(
+        name="plan_triage",
+        description="Start a plan triage detached, returning the plan slug and runner pid immediately",
+    )
+    def plan_triage_tool(plan_path: str) -> dict[str, Any]:
+        return plan_triage(plan_path=plan_path)
+
+    @server.tool(
+        name="plan_close",
+        description="Start a plan close loop detached, returning the plan slug and runner pid immediately",
+    )
+    def plan_close_tool(plan_path: str, rounds: int = 3) -> dict[str, Any]:
+        return plan_close(plan_path=plan_path, rounds=rounds)
 
     return server
 

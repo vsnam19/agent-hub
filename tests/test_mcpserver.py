@@ -20,12 +20,14 @@ from agenthub.mcpserver import (
     clamp_timeout,
     gate_start,
     jobs_data,
+    plan_close,
     plan_merge,
     plan_review,
     plan_review_wait,
     plan_review_wait_async,
     plan_run,
     plan_status,
+    plan_triage,
     plan_wait,
     pool_data,
     ready,
@@ -149,6 +151,8 @@ def test_server_lists_tools(env_sandbox):
         "plan_review",
         "plan_review_wait",
         "plan_merge",
+        "plan_triage",
+        "plan_close",
     }
     for name in ["pool", "jobs", "show_job", "wait_job", "ready", "plan_status", "plan_wait", "plan_review_wait"]:
         tool = tool_map[name]
@@ -1578,3 +1582,157 @@ def test_plan_merge_tool_is_destructive_and_merges_ready(env_sandbox, tmp_path, 
     assert res2["stopped_at"]["task"] == "t1"
     assert res2["stopped_at"]["status"] == "not-ready"
     assert len(res2["stopped_at"]["problems"]) > 0
+
+
+def test_plan_triage_spawns_cli_detached(env_sandbox, repo, tmp_path, monkeypatch):
+    plan_file = make_plan_file(tmp_path, repo)
+
+    calls = []
+    orig_popen = subprocess.Popen
+
+    class DummyProc:
+        def __init__(self, pid=42424):
+            self.pid = pid
+
+        def wait(self):
+            return 0
+
+    def fake_popen(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if any("triage" in str(c) for c in cmd):
+            calls.append({"cmd": cmd, "kwargs": kwargs})
+            return DummyProc()
+        return orig_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    bad_plan = tmp_path / "bad_plan.json"
+    bad_plan.write_text("{}")
+    with pytest.raises(PlanError):
+        plan_triage(str(bad_plan))
+
+    res = plan_triage(str(plan_file))
+    assert res == {"plan": "plan-1", "runner_pid": 42424}
+    assert len(calls) == 1
+    call = calls[0]
+    expected_cmd = [
+        sys.executable,
+        "-P",
+        "-m",
+        "agenthub",
+        "plan",
+        "triage",
+        str(plan_file),
+    ]
+    assert call["cmd"] == expected_cmd
+    assert call["kwargs"]["start_new_session"] is True
+    assert call["kwargs"]["stdin"] == subprocess.DEVNULL
+    assert call["kwargs"]["stderr"] == subprocess.STDOUT
+    assert "PYTHONPATH" in call["kwargs"]["env"]
+
+    def fail_popen(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if any("triage" in str(c) for c in cmd):
+            raise OSError("failed to exec")
+        return orig_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", fail_popen)
+    err_res = plan_triage(str(plan_file))
+    assert "error" in err_res
+    assert "spawn failed: failed to exec" in err_res["error"]
+    assert "log" in err_res
+
+
+def test_plan_close_passes_rounds(env_sandbox, repo, tmp_path, monkeypatch):
+    plan_file = make_plan_file(tmp_path, repo)
+
+    calls = []
+    orig_popen = subprocess.Popen
+
+    class DummyProc:
+        def __init__(self, pid=42425):
+            self.pid = pid
+
+        def wait(self):
+            return 0
+
+    def fake_popen(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if any("close" in str(c) for c in cmd):
+            calls.append({"cmd": cmd, "kwargs": kwargs})
+            return DummyProc()
+        return orig_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    bad_plan = tmp_path / "bad_plan.json"
+    bad_plan.write_text("{}")
+    with pytest.raises(PlanError):
+        plan_close(str(bad_plan))
+
+    res = plan_close(str(plan_file))
+    assert res == {"plan": "plan-1", "runner_pid": 42425}
+    assert len(calls) == 1
+    assert calls[0]["cmd"] == [
+        sys.executable,
+        "-P",
+        "-m",
+        "agenthub",
+        "plan",
+        "close",
+        str(plan_file),
+        "--rounds",
+        "3",
+    ]
+    assert calls[0]["kwargs"]["start_new_session"] is True
+
+    res2 = plan_close(str(plan_file), rounds=5)
+    assert res2 == {"plan": "plan-1", "runner_pid": 42425}
+    assert len(calls) == 2
+    assert calls[1]["cmd"] == [
+        sys.executable,
+        "-P",
+        "-m",
+        "agenthub",
+        "plan",
+        "close",
+        str(plan_file),
+        "--rounds",
+        "5",
+    ]
+    assert calls[1]["kwargs"]["start_new_session"] is True
+
+    def fail_popen(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if any("close" in str(c) for c in cmd):
+            raise OSError("exec format error")
+        return orig_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", fail_popen)
+    err_res = plan_close(str(plan_file))
+    assert "error" in err_res
+    assert "spawn failed: exec format error" in err_res["error"]
+    assert "log" in err_res
+
+
+def test_plan_close_rejects_bad_rounds(env_sandbox, repo, tmp_path):
+    plan_file = make_plan_file(tmp_path, repo)
+
+    for bad in [0, -1, -5, "3", "bad", True, False, None, 2.5]:
+        with pytest.raises(UsageError):
+            plan_close(str(plan_file), rounds=bad)
+
+
+def test_new_tools_are_registered_and_not_read_only(env_sandbox):
+    server = build_server()
+    tools = asyncio.run(server.list_tools())
+    tool_map = {t.name: t for t in tools}
+
+    assert "plan_triage" in tool_map
+    assert "plan_close" in tool_map
+
+    triage_tool = tool_map["plan_triage"]
+    assert triage_tool.annotations is None or triage_tool.annotations.read_only_hint is not True
+
+    close_tool = tool_map["plan_close"]
+    assert close_tool.annotations is None or close_tool.annotations.read_only_hint is not True

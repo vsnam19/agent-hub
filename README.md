@@ -208,6 +208,8 @@ agent-hub mcp
 - `plan_review`: Review done tasks of a plan detached, returning a review handle.
 - `plan_review_wait`: Wait for a plan review to finish, bounded by `timeout_s` (at most 300s).
 - `plan_merge`: Merge ready tasks of a plan in dependency order.
+- `plan_triage`: Start a plan triage detached, returning the plan slug and runner pid immediately.
+- `plan_close`: Start a plan close loop detached, returning the plan slug and runner pid immediately.
 
 ### Async pattern
 
