@@ -26,7 +26,7 @@ def collect(jobs: list[dict], workdir: Path, head: str) -> TriageInputs | None:
             if j.get("kind") == "implement" and j.get("status") in ("ok", "gate-failed")
         }
     )
-    job_ids = {str(j["id"]) for j in jobs if j.get("id")}
+    job_ids = {str(j["id"]) for j in mine if j.get("id")}
 
     matching = [j for j in mine if j.get("kind") in ("review", "gate") and j.get("head") == head]
     if not matching:
@@ -59,7 +59,7 @@ def collect(jobs: list[dict], workdir: Path, head: str) -> TriageInputs | None:
             gate_tail="",
             diff_path=diff_path,
             implementers=implementers,
-            job_ids=job_ids,
+            job_ids=job_ids - {review_job},
         )
 
     if kind == "gate" and status != "ok":
