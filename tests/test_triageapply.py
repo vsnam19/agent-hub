@@ -17,7 +17,7 @@ def test_fix_sets_pending_and_counts_round(tmp_path: Path):
     assert result["status"] == "fix"
     assert tstate.status == "pending"
     assert tstate.fix_rounds == 1
-    assert tstate.reason == "## Goal\nFix it"
+    assert tstate.reason == "## Goal\nFix it\n\n## Review findings to fix\n- F1 (high): (text not recorded)"
 
 
 def test_fix_brief_file_named_by_round(tmp_path: Path):
@@ -31,7 +31,10 @@ def test_fix_brief_file_named_by_round(tmp_path: Path):
 
     expected_path = plan_dir / "fixes" / "task-b-3.md"
     assert expected_path.is_file()
-    assert expected_path.read_text() == "## Goal\nFix round 3"
+    assert (
+        expected_path.read_text()
+        == "## Goal\nFix round 3\n\n## Review findings to fix\n- F1 (high): (text not recorded)"
+    )
     assert result["fix_path"] == str(expected_path)
 
 
@@ -183,7 +186,7 @@ def test_fix_with_rejects_writes_both_files(tmp_path: Path):
 
     fix_file = plan_dir / "fixes" / "task-g-1.md"
     assert fix_file.is_file()
-    assert fix_file.read_text() == "## Goal\nFix both"
+    assert fix_file.read_text() == "## Goal\nFix both\n\n## Review findings to fix\n- F1 (high): (text not recorded)"
     assert result["fix_path"] == str(fix_file)
 
     rej_file = plan_dir / "fixes" / "task-g-1-rejected.md"
@@ -332,3 +335,92 @@ def test_gate_failure_fix_brief_starts_round(tmp_path: Path):
     assert tstate.reason == "## Goal\nFix gate failure"
     assert tstate.fix_rounds == 1
     assert tstate.attempts_base == 1
+
+
+def test_fix_brief_lists_fix_findings(tmp_path: Path):
+    plan_dir = tmp_path / "plan"
+    plan_dir.mkdir()
+    tstate = TaskState(status="running", fix_rounds=0)
+    findings = [
+        TriageFinding(id="F1", severity="high", decision="fix", evidence="foo.py:1"),
+        TriageFinding(id="F2", severity="medium", decision="fix", evidence="bar.py:2"),
+        TriageFinding(id="F3", severity="low", decision="reject", evidence="baz.py:3"),
+    ]
+    resolution = Resolution(
+        findings=findings,
+        fix_brief="## Goal\nFix issues",
+        blocked_reason="",
+        review_text={
+            "F1": "high — foo.py:1 bug",
+            "F3": "low — baz.py:3 style",
+        },
+    )
+
+    result = apply(plan_dir, "task-fix-list", tstate, resolution, "job-fix-1")
+
+    assert result["status"] == "fix"
+    expected_content = (
+        "## Goal\n"
+        "Fix issues\n"
+        "\n"
+        "## Review findings to fix\n"
+        "- F1 (high): high — foo.py:1 bug\n"
+        "- F2 (medium): (text not recorded)"
+    )
+    fix_file = plan_dir / "fixes" / "task-fix-list-1.md"
+    assert fix_file.is_file()
+    assert fix_file.read_text() == expected_content
+    assert tstate.reason == expected_content
+    assert result["fix_path"] == str(fix_file)
+
+
+def test_brief_with_only_rejects_starts_round(tmp_path: Path):
+    plan_dir = tmp_path / "plan"
+    plan_dir.mkdir()
+    tstate = TaskState(status="running", fix_rounds=0)
+    findings = [
+        TriageFinding(id="F1", severity="high", decision="reject", evidence="foo.py:1"),
+    ]
+    resolution = Resolution(
+        findings=findings,
+        fix_brief="## Goal\nFix downgraded finding",
+        blocked_reason="",
+        review_text={"F1": "high — foo.py:1 error"},
+    )
+
+    result = apply(plan_dir, "task-rej-only", tstate, resolution, "job-rej-1")
+
+    assert result["status"] == "fix"
+    assert result["counts"] == {"fix": 0, "reject": 1, "blocked": 0}
+    assert tstate.status == "pending"
+    assert tstate.fix_rounds == 1
+    assert tstate.reason == "## Goal\nFix downgraded finding"
+
+    fix_file = plan_dir / "fixes" / "task-rej-only-1.md"
+    assert fix_file.is_file()
+    assert fix_file.read_text() == "## Goal\nFix downgraded finding"
+    assert result["fix_path"] == str(fix_file)
+
+    rej_file = plan_dir / "fixes" / "task-rej-only-1-rejected.md"
+    assert rej_file.is_file()
+    assert result["rejected_path"] == str(rej_file)
+
+
+def test_gate_failure_brief_unchanged(tmp_path: Path):
+    plan_dir = tmp_path / "plan"
+    plan_dir.mkdir()
+    tstate = TaskState(status="running", fix_rounds=0)
+    resolution = Resolution(
+        findings=[],
+        fix_brief="## Goal\nFix gate failure without findings",
+        blocked_reason="",
+    )
+
+    result = apply(plan_dir, "task-gate-unchanged", tstate, resolution, "job-gate-1")
+
+    assert result["status"] == "fix"
+    assert result["counts"] == {"fix": 0, "reject": 0, "blocked": 0}
+    fix_file = plan_dir / "fixes" / "task-gate-unchanged-1.md"
+    assert fix_file.is_file()
+    assert fix_file.read_text() == "## Goal\nFix gate failure without findings"
+    assert tstate.reason == "## Goal\nFix gate failure without findings"
