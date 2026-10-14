@@ -16,6 +16,7 @@ from agenthub.config import ConfigError, Paths, paths
 from agenthub.jobs import get_job, list_jobs, new_job
 from agenthub.mcpserver import (
     _dead_runner_pid,
+    _plan_stalled,
     _reap_review,
     _spawn_detached,
     build_server,
@@ -1319,6 +1320,26 @@ def test_plan_wait_stalled_when_pid_reused(env_sandbox, repo, tmp_path):
     res = plan_wait(str(plan_file), timeout_s=5)
     assert res["state"] == "stalled"
     assert str(os.getpid()) in res["reason"]
+
+
+@pytest.mark.parametrize("runner", [{"pid": os.getpid()}, {"pid": os.getpid(), "start_time": None}])
+def test_plan_wait_running_when_start_time_missing(env_sandbox, repo, tmp_path, runner):
+    plan_file = _stalled_plan(env_sandbox, repo, tmp_path, runner)
+    assert plan_wait(str(plan_file), timeout_s=1)["state"] == "running"
+
+
+def test_plan_stalled_when_tasks_empty(env_sandbox, repo, tmp_path):
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    plan_file = make_plan_file(tmp_path, repo)
+    plan_dir = plan_file.parent
+    state_file = plan_dir / "state.json"
+    state_file.write_text(json.dumps({"tasks": {}}))
+    runner = {"pid": proc.pid, "start_time": 1}
+    (plan_dir / "runner.pid").write_text(json.dumps(runner))
+    res = _plan_stalled(plan_file, plan_dir, state_file, {"tasks": {}}, paths())
+    assert res is not None
+    assert res["state"] == "stalled"
 
 
 def test_plan_wait_bounded(env_sandbox, repo, tmp_path, monkeypatch):

@@ -1013,7 +1013,10 @@ def _dead_runner_pid(plan_dir: Path, state_data: dict[str, Any]) -> int | None:
     pid = runner.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool):
         return None
-    if not is_running(pid) or start_time(pid) != runner.get("start_time"):
+    if not is_running(pid):
+        return pid
+    recorded = runner.get("start_time")
+    if isinstance(recorded, int) and not isinstance(recorded, bool) and start_time(pid) != recorded:
         return pid
     return None
 
@@ -1031,7 +1034,7 @@ def _plan_stalled(
     except (OSError, ValueError):
         fresh = state_data
     tasks_data = fresh.get("tasks", {})
-    if not any(ts.get("status") in ("pending", "running") for ts in tasks_data.values()):
+    if tasks_data and not any(ts.get("status") in ("pending", "running") for ts in tasks_data.values()):
         return plan_status(plan_path=str(plan_file), trail=False, p=p)
     return {
         "state": "stalled",
