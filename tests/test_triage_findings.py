@@ -1,4 +1,4 @@
-from agenthub.triage import ReviewFinding, review_findings, unparsed_findings
+from agenthub.triage import ReviewFinding, review_findings, split_severity, unparsed_findings
 
 
 def test_extracts_in_order_with_ids():
@@ -466,3 +466,11 @@ def test_finding_shaped_unknown_bullet_is_unparsed():
 - normal bullet without separators
 """
     assert unparsed_findings(reply) == 3
+
+
+def test_split_severity_shapes():
+    assert split_severity("high — x") == ("high", "x")
+    assert split_severity("**medium**: x") == ("medium", "x")
+    assert split_severity("severity low — x") == ("low", "x")
+    assert split_severity("`critical` x") == ("high", "x")
+    assert split_severity("note — x") == (None, "note — x")

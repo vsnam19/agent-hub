@@ -995,3 +995,12 @@ def test_wrapped_severity_stripped():
     found, _ = skillmine._findings_of(reply)
     assert found == [("high", "a.py", "leak")]
     assert "high" not in found[0][1]
+
+
+def test_severity_prefix_word_not_a_file():
+    reply = """## Findings
+- severity low — agenthub/a.py:3 — leak
+"""
+    found, _ = skillmine._findings_of(reply)
+    assert found == [("low", "agenthub/a.py", "leak")]
+    assert found[0][1] != "low"

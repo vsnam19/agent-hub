@@ -41,17 +41,39 @@ _NONE_LIKE = re.compile(
 )
 
 
-def _extract_severity(words: list[str]) -> str | None:
+_LEADING_SEP = re.compile(r"^(?:—|–|--|-|:)\s*")
+
+
+def split_severity(line: str) -> tuple[str | None, str]:
+    """Split the severity token(s) off a finding line.
+
+    Returns the mapped severity (or None) and the rest of the line after the
+    one or two severity words and any leading —, –, --, - or : plus spaces.
+    """
+    stripped = line.strip()
+    words = stripped.split(maxsplit=2)
     if not words:
-        return None
+        return None, ""
+
     sev_match = _SEVERITY_PATTERN.match(words[0])
     if sev_match:
-        return _SEVERITY_MAP[sev_match.group(1).lower()]
+        sev = _SEVERITY_MAP[sev_match.group(1).lower()]
+        parts = stripped.split(maxsplit=1)
+        rest = parts[1] if len(parts) > 1 else ""
+        return sev, _LEADING_SEP.sub("", rest)
+
     if len(words) > 1 and _SEVERITY_PREFIX_PATTERN.match(words[0]):
         sev_match2 = _SEVERITY_PATTERN.match(words[1])
         if sev_match2:
-            return _SEVERITY_MAP[sev_match2.group(1).lower()]
-    return None
+            sev = _SEVERITY_MAP[sev_match2.group(1).lower()]
+            rest = words[2] if len(words) > 2 else ""
+            return sev, _LEADING_SEP.sub("", rest)
+
+    return None, stripped
+
+
+def _extract_severity(words: list[str]) -> str | None:
+    return split_severity(" ".join(words))[0]
 
 
 def _findings_heading_level(heading_line: str) -> int:
@@ -118,8 +140,7 @@ def review_findings(reply: str) -> list[ReviewFinding]:
         if bullet_match:
             bullet_prefix = bullet_match.group(1)
             rest = bullet_match.group(2).strip()
-            words = rest.split()
-            sev = _extract_severity(words)
+            sev, _ = split_severity(rest)
             if sev is not None:
                 current = ReviewFinding(
                     id=f"F{len(findings) + 1}",
@@ -151,8 +172,7 @@ def unparsed_findings(reply: str) -> int:
             bullet_prefix = bullet_match.group(1)
             if not bullet_prefix[0].isspace():
                 rest = bullet_match.group(2).strip()
-                words = rest.split()
-                if _extract_severity(words) is not None:
+                if split_severity(rest)[0] is not None:
                     continue
                 if _NONE_LIKE.match(rest):
                     continue
