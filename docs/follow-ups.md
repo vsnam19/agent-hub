@@ -20,3 +20,51 @@ small repository, or `implement` here (D-079).
 | 2026-10-14 | Phase F F4/F5 lows (review on `orch/phasef2-fix3/mcp-manifest`, approve): `plan_review` parent "running" write races the child's `--result` write; `plan_review` child not reaped (no wait thread, unlike `plan_run`); `plan_merge` with no done tasks returns the same shape as "nothing left" while the CLI exits 1; `plan_wait` needs non-empty tasks and does not detect a dead runner. Small tasks for E8 | Phase F review |
 - **MCP serverInfo version is empty** (2026-10-14): `initialize` returns `{"name": "agent-hub", "version": ""}`; pass the package version to `MCPServer`. Low.
 - **tasksize counts dotted module names as files** (2026-10-14): a brief line "Stdlib plus `agenthub.triage` and `agenthub.planstate`" under Expected output counted 4 files for a 2-file task (E8 draft, `triage-apply`). Count only backticked spans with a `/` or a file extension. Low.
+- **gateguard false positives** (2026-10-14, E8 review): (1) `skip-added` fires on the formatter comment `# fmt: skip`
+  (`gateguard.py:442` regex `\bskip\b`) — ignore `# fmt: skip`/`# fmt: off` comments; (2) `assert-removed` fired on
+  `test_server_lists_tools` in `tests/test_mcpserver.py` when the task only added two names to a `set(...) == {…}`
+  literal — `_weakened` should not treat a grown expected-literal as weakening. Low; both were read and judged benign.
+- **`plan_review` unreaped child hangs the director for hours — HIGH** (2026-10-14): the MCP server starts
+  `agenthub plan review` without a wait thread, so the finished runner stays a zombie until the server exits. A director
+  waiting with `while kill -0 <pid>` (zombies answer `kill -0`) never wakes. Seen at least 3 times: E8 review finished
+  13:20, session idle until /exit at 21:12 (session 4040f7e7). Fix: reap the child (wait thread as in `plan_run`) and
+  write the final `--result` from the child only; directors wait on the result file's `status`, not on the pid.
+
+## Director deadlock avoidance (2026-10-14)
+
+A director that ends its turn while waiting on something that never signals is idle until the user notices (lost ~8 h,
+three times, at E8 `plan review`). Rule: **every wait must end on success, failure, and a dead/zombie/stalled
+process**, and the director keeps a harness-tracked waiter (a `run_in_background` command that exits) before it ends
+a turn. Items:
+
+- **Fixing now (plan `deadlock`):** (1) `plan_review` reaps its child and marks a runner that died without a result
+  `failed`; `plan_review_wait` treats zombies as dead (`procinfo.is_running`). (2) `plan_wait` returns `stalled` when
+  the recorded runner (`runner.pid` + start time) is gone while tasks are still `pending`/`running`.
+- **`plan review` ignores SIGTERM/SIGINT:** the per-job signal handler (`orchestrate.py` ~231) stops the current
+  review, and the review loop moves on to the next task; `agent-hub cancel` and `kill -INT` did not stop it, only
+  SIGKILL did. The review loop should stop after a signal. Medium.
+- **Wait-tool timeout vs the Claude Code MCP client:** `plan_review_wait`/`plan_wait` accept up to 300 s, but Claude
+  Code moves an MCP call to the background after ~120 s and its later notification still says `running`. Cap the
+  default below 120 s and document "call again" in the tool description. Low.
+- **`wait_job` / `agent-hub wait` never detect a dead job (verified):** both loop on `result.json` `status ==
+  "running"` with no liveness check (`mcpserver.py` `wait_job`, `cli.py` `_cmd_wait`); a SIGKILLed job waits forever.
+  Use the job's `pid` file (pid + start time) + `is_running`; task 3 of plan `deadlock`.
+- **Orchestrate skill:** state the rule above in the Non-negotiables ("never wait on `kill -0 <pid>`; wait on the
+  result file or the wait tool, and cover dead processes"). The skill lives in `agent-plugins`.
+- **Resume notes:** a resume note must name the last review/plan result file, so a new session reads finished
+  results instead of re-running (E8 review was re-run although its result had been on disk since 13:20).
+- **agy OAuth expiry is classified `failed`, not auth (2026-10-14):** with an expired agy login every run prints an
+  OAuth URL, `Waiting for authentication (timeout 60s)...`, `Error: authentication timed out.` and is recorded as
+  `failed` — so plan tasks retry twice and escalate, and reviews end `failed` (3 E8 reviews, every `implement`
+  attempt of plan `deadlock`). Map "authentication failed or timed out" to the auth outcome (cooldown the agy links,
+  fall through the chain, no escalation). **Root cause (verified):** under SSH (`SSH_CONNECTION`/`SSH_TTY` set) agy
+  uses empty file-based token storage instead of the keyring; blanking those vars makes `agy -p` work. Fix task
+  `agy-ssh-auth` (adapter blanks them + auth markers). No re-login needed.
+- **Race in stalled detection (found in review of plan `deadlock`):** MCP `plan_run` returned before the new runner
+  wrote `runner.pid`, so `plan_wait` on a resumed plan saw the previous runner's dead pid → false `stalled`. Fix
+  task `plan-run-claims` writes `runner.pid` in `plan_run` right after spawn.
+- **agy keyring override lows (review `20261014-154835-review-85cf`, approve):** SSH vars are blanked, not removed
+  (`Invocation.env` cannot unset; works with agy 1.3.5's truthiness check — breaks if agy switches to a presence
+  check); `_secret_service_running` is cached per process (a keyring started later is missed until restart); the
+  existing `run_fake` agy tests call the real `dbus-send` when the test run itself is under SSH — patch the probe in
+  an autouse fixture. Low.

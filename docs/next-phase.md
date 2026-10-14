@@ -1,3 +1,14 @@
+> **Update 2026-10-14, night — deadlock + agy fixes merged; E8 review results on disk.** Merged on master (not
+> pushed): plan `deadlock` (`plan_review` reaps its runner, zombie-aware waits, `plan_wait` → `stalled` on a dead
+> runner) and `fix/agy-ssh-auth` (agy headless works under SSH via the keyring). **The installed plugin is still
+> 0.10.0 without these fixes** — bump/reinstall and restart Claude Code before relying on the MCP tools or agy.
+> **E8 review is done; do not re-run it.** Results:
+> `~/.local/state/agent-hub/mcp/plan-review/review-e8-1791955390390950145.json` (16 lines: 6 approve,
+> 7 request-changes, 3 failed because agy auth was broken → re-review those on agy). Next: fix E8 findings by rounds,
+> then `plan merge`. Wait rule: never `kill -0 <pid>`; wait on result files with a waiter that also exits on a
+> dead/zombie process (see `docs/follow-ups.md` "Director deadlock avoidance"). Task 3 `wait-job-dead`
+> (branch `fix/wait-job-dead`) was in progress.
+
 > **Update 2026-10-14, later — E8 implemented, not yet reviewed/merged.** Design
 > `docs/superpowers/specs/2026-10-14-e8-techlead-loop-design.md` (D-101: `plan triage` + `plan close` first, `verify`
 > kind later as E8b). The techlead job `20261014-021547-techlead-c0e9` (claude:sonnet) split it into 16 tasks; the plan
