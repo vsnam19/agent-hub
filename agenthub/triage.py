@@ -1,5 +1,5 @@
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -7,13 +7,16 @@ class ReviewFinding:
     id: str
     severity: str
     text: str
+    head: str = field(default="", compare=False, repr=False)
 
 
 _FINDINGS_HEADING = re.compile(
     r"^\s*(?:#{1,6}\s+|\*\*\s*)findings(?::\s*|\s*)(?:\([^)]*\))?(?:\s*\*\*:?)?\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
-_SECTION_END = re.compile(r"^\s*(?:#{1,6}\s+|\*\*[^*]+\*\*:?\s*$)")
+_HEADING_PREFIX = re.compile(r"^\s*(#{1,6})\s+")
+_BOLD_SECTION_END = re.compile(r"^\*\*([^*]+)\*\*:?\s*$")
+_SECTION_END_LABELS = frozenset({"verdict", "gate-touched", "notes", "summary"})
 _BULLET_PREFIX = re.compile(r"^(\s*[-*]\s+)(.*)$")
 _SEVERITY_PATTERN = re.compile(
     r"^(?:\*\*|`|\[|<)?(high|medium|low|critical|important|minor)(?::\*\*|:`|:\]|:>|\*\*|`|\]|>)?(?::)?$",
@@ -33,16 +36,55 @@ _NONE_LIKE = re.compile(
 )
 
 
+def _findings_heading_level(heading_line: str) -> int:
+    m = _HEADING_PREFIX.match(heading_line)
+    if m:
+        return len(m.group(1))
+    return 2  # a bold **Findings** heading counts as level 2
+
+
+def _is_section_end(line: str, findings_level: int) -> bool:
+    heading_match = _HEADING_PREFIX.match(line)
+    if heading_match:
+        return len(heading_match.group(1)) <= findings_level
+
+    if _FINDINGS_HEADING.match(line):
+        return 2 <= findings_level
+
+    if line.startswith("**"):
+        bold_match = _BOLD_SECTION_END.match(line)
+        if bold_match:
+            inner = bold_match.group(1).strip()
+            if inner.endswith(":"):
+                inner = inner[:-1].strip()
+            if inner.lower() in _SECTION_END_LABELS:
+                return True
+
+    return False
+
+
 def _findings_lines(reply: str) -> list[str]:
     matches = list(_FINDINGS_HEADING.finditer(reply))
     if not matches:
         return []
-    lines: list[str] = []
-    for line in reply[matches[-1].end() :].splitlines():
-        if _SECTION_END.match(line):
-            break
-        lines.append(line)
-    return lines
+
+    sections: list[list[str]] = []
+    for i, match in enumerate(matches):
+        findings_level = _findings_heading_level(match.group(0))
+        next_start = matches[i + 1].start() if i + 1 < len(matches) else len(reply)
+        section_text = reply[match.end() : next_start]
+        lines: list[str] = []
+        for line in section_text.splitlines():
+            if _is_section_end(line, findings_level):
+                break
+            lines.append(line)
+        sections.append(lines)
+
+    for lines in reversed(sections):
+        if any(_BULLET_PREFIX.match(line) for line in lines):
+            return lines
+
+    return sections[-1]
 
 
 def review_findings(reply: str) -> list[ReviewFinding]:
@@ -51,6 +93,9 @@ def review_findings(reply: str) -> list[ReviewFinding]:
     current: ReviewFinding | None = None
 
     for line in _findings_lines(reply):
+        if _HEADING_PREFIX.match(line):
+            current = None
+            continue
         bullet_match = _BULLET_PREFIX.match(line)
         if bullet_match:
             bullet_prefix = bullet_match.group(1)
@@ -64,6 +109,7 @@ def review_findings(reply: str) -> list[ReviewFinding]:
                     id=f"F{len(findings) + 1}",
                     severity=_SEVERITY_MAP[sev_word],
                     text=rest,
+                    head=rest,
                 )
                 findings.append(current)
             elif not bullet_prefix[0].isspace():

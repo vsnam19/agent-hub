@@ -298,3 +298,119 @@ request-changes
 - note — under verdict, should not count
 """
     assert unparsed_findings(reply) == 2
+
+
+def test_bold_label_does_not_end_section():
+    reply = """
+## Findings
+- high — agenthub/a.py:12 — leak
+  **Failure scenario:**
+  leaks fds on long runs.
+- low — agenthub/b.py:44 — typo
+"""
+    findings = review_findings(reply)
+    assert len(findings) == 2
+    assert findings[0].id == "F1"
+    assert findings[0].severity == "high"
+    assert findings[0].text == "high — agenthub/a.py:12 — leak **Failure scenario:** leaks fds on long runs."
+    assert findings[1].id == "F2"
+    assert findings[1].severity == "low"
+    assert findings[1].text == "low — agenthub/b.py:44 — typo"
+
+
+def test_subheadings_inside_section_keep_findings():
+    reply = """
+## Findings
+### High
+- high — agenthub/a.py:10 — severe issue
+### Low
+- low — agenthub/b.py:20 — minor issue
+
+## Verdict
+request-changes
+"""
+    findings = review_findings(reply)
+    assert len(findings) == 2
+    assert findings[0].id == "F1"
+    assert findings[0].severity == "high"
+    assert findings[0].text == "high — agenthub/a.py:10 — severe issue"
+    assert findings[1].id == "F2"
+    assert findings[1].severity == "low"
+    assert findings[1].text == "low — agenthub/b.py:20 — minor issue"
+
+
+def test_section_ends_at_verdict_bold_line():
+    reply = """
+## Findings
+- high — agenthub/a.py:10 — problem
+
+**Verdict**
+request-changes
+- high — under verdict, should be ignored
+"""
+    findings = review_findings(reply)
+    assert len(findings) == 1
+    assert findings[0].id == "F1"
+    assert findings[0].severity == "high"
+    assert findings[0].text == "high — agenthub/a.py:10 — problem"
+    assert unparsed_findings(reply) == 0
+
+    reply_colon = """
+## Findings
+- high — agenthub/a.py:10 — problem
+
+**Verdict:**
+request-changes
+- high — under verdict, should be ignored
+"""
+    findings_colon = review_findings(reply_colon)
+    assert len(findings_colon) == 1
+    assert findings_colon[0].id == "F1"
+
+
+def test_last_findings_heading_with_bullets_wins():
+    reply = """
+## Findings
+- high — agenthub/a.py:10 — real finding
+
+## Verdict
+request-changes
+
+**Findings**
+(none)
+"""
+    findings = review_findings(reply)
+    assert len(findings) == 1
+    assert findings[0].id == "F1"
+    assert findings[0].severity == "high"
+    assert findings[0].text == "high — agenthub/a.py:10 — real finding"
+
+    reply_no_bullets = """
+## Findings
+(none)
+
+**Findings**
+no findings
+"""
+    assert review_findings(reply_no_bullets) == []
+
+
+def test_head_is_first_line_only():
+    reply = """
+## Findings
+- high — agenthub/a.py:12 — leak
+  **Failure scenario:**
+  leaks fds on long runs.
+- low — agenthub/b.py:44 — typo
+"""
+    findings = review_findings(reply)
+    assert len(findings) == 2
+    assert findings[0].head == "high — agenthub/a.py:12 — leak"
+    assert findings[0].text == "high — agenthub/a.py:12 — leak **Failure scenario:** leaks fds on long runs."
+    assert findings[1].head == "low — agenthub/b.py:44 — typo"
+    assert findings[1].text == "low — agenthub/b.py:44 — typo"
+    assert findings[0] == ReviewFinding(
+        id="F1",
+        severity="high",
+        text=findings[0].text,
+    )
