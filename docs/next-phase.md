@@ -1,3 +1,19 @@
+> **Update 2026-10-14 — v0.10.0.** Phases C, D, F done; E partly. Read this block, then `docs/overview.md`,
+> `docs/decisions.md` (D-090..D-100), `docs/follow-ups.md`, and the user memory (pool, small tasks, techlead verifies).
+>
+> - **C** (D-090, D-095): C++ suite in the gwen bench; gwen 2/6 on C++ → no C++ tasks for gwen yet.
+> - **D** (D-091..D-093): `skills mine|weekly|report|schedule`; timer Sun 20:17 installed; first real run stopped
+>   correctly at eval (follow-ups: eval cases must beat the baseline, unparsed findings, report wording).
+> - **E** (D-094, D-099): done E0 effort links, E1 `tasksize`, E2 `plandraft`, E3 kind `plan` + `techlead`, E4 template.
+>   Next: **E8 techlead loop** (`verify` mode + `plan triage`) — the director must stop checking each task (owner) —
+>   then E5 `plan draft`, E6, E7 techlead bench (opus@low vs sonnet vs gemini).
+> - **F** (D-098, D-100): `agent-hub mcp` with 13 tools, shipped in the plugin's `mcpServers`; next F6 (codex/agy
+>   registration through their own `mcp` commands via `hub install`).
+> - **Loop now in the tool** (D-097): `plan run` → `plan wait` → `plan review` → `plan merge`. Do not drive work with
+>   shell loops. Pool (owner): implement = agy Sonnet → agy Gemini 3.8 Flash → haiku; implement-small = haiku → gwen;
+>   review = agy Gemini 3.8 Flash → claude:opus; local LLMs only on the Mac (D-096).
+> - Nothing pushed. Project overview PDF: `docs/agent-hub-overview.pdf` (update its status section after E8).
+
 # Next phase — resume note (2026-10-12)
 
 > **Update 2026-10-12, later:** Phase B is done (agent-hub v0.9.0, D-083..D-089). Every worker host now gets
