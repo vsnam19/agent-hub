@@ -15,6 +15,7 @@ from agenthub.cli import UsageError, main
 from agenthub.config import ConfigError, Paths, paths
 from agenthub.jobs import get_job, list_jobs, new_job
 from agenthub.mcpserver import (
+    _dead_runner_pid,
     _reap_review,
     _spawn_detached,
     build_server,
@@ -1198,6 +1199,40 @@ def test_plan_run_returns_at_once(env_sandbox, repo, tmp_path, monkeypatch):
             os.kill(runner_pid, 9)
         except OSError:
             pass
+
+
+def test_plan_run_records_runner_pid_before_return(env_sandbox, repo, tmp_path, monkeypatch):
+    from agenthub.procinfo import start_time
+
+    real_popen = subprocess.Popen
+    children = []
+
+    def fake_popen(cmd, **kwargs):
+        if "agenthub" not in cmd:
+            return real_popen(cmd, **kwargs)
+        child = real_popen([sys.executable, "-c", "import time; time.sleep(5)"], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    plan_file = make_plan_file(tmp_path, repo)
+    plan_dir = plan_file.parent
+    dead = real_popen(["true"])
+    dead.wait()
+    (plan_dir / "runner.pid").write_text(json.dumps({"pid": dead.pid, "start_time": 1}))
+    assert _dead_runner_pid(plan_dir, {}) == dead.pid
+
+    try:
+        res = plan_run(str(plan_file))
+        runner_pid = res["runner_pid"]
+        assert runner_pid == children[0].pid
+        recorded = json.loads((plan_dir / "runner.pid").read_text())
+        assert recorded == {"pid": runner_pid, "start_time": start_time(runner_pid)}
+        assert _dead_runner_pid(plan_dir, {}) is None
+    finally:
+        for child in children:
+            child.kill()
+            child.wait()
 
 
 def test_plan_status_matches_cli(env_sandbox, repo, tmp_path):

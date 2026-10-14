@@ -597,6 +597,11 @@ def plan_run(
     except OSError as e:
         return {"error": f"spawn failed: {e} (log: {log_file})", "log": str(log_file)}
 
+    # Record the new runner now: runner.pid otherwise names the previous runner until the child claims it,
+    # and plan_wait in that window would report a false stalled.
+    with contextlib.suppress(OSError):
+        (plan.path.parent / "runner.pid").write_text(json.dumps({"pid": proc.pid, "start_time": start_time(proc.pid)}))
+
     threading.Thread(target=proc.wait, daemon=True).start()
 
     return {"plan": plan.slug, "runner_pid": proc.pid}
