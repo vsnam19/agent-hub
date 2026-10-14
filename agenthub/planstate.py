@@ -29,6 +29,8 @@ class TaskState:
     role: str = ""  # effective role after escalation; empty = the task's own role
     escalated_from: str = ""
     visited_roles: list[str] = field(default_factory=list)
+    fix_rounds: int = 0  # fix rounds this task has had so far
+    attempts_base: int = 0  # len(attempts) when the last fix round started
 
 
 @dataclass
@@ -64,6 +66,8 @@ class State:
                     "role": t.role,
                     "escalated_from": t.escalated_from,
                     "visited_roles": t.visited_roles,
+                    "fix_rounds": t.fix_rounds,
+                    "attempts_base": t.attempts_base,
                 }
                 for name, t in self.tasks.items()
             },
@@ -138,6 +142,8 @@ def load_or_init(plan: Plan) -> State:
                 role=v.get("role", ""),
                 escalated_from=v.get("escalated_from", ""),
                 visited_roles=v.get("visited_roles", []),
+                fix_rounds=v.get("fix_rounds", 0),
+                attempts_base=v.get("attempts_base", 0),
             )
 
         state = State(
