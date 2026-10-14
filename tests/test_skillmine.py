@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agenthub import skillmine
+from agenthub import skillmine, triage
 from agenthub.cli import main
 
 NOW = datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc)
@@ -561,7 +561,7 @@ def test_bold_and_alternate_severity_scales(tmp_path):
 def test_unparsed_findings_counted(tmp_path):
     reply = review_reply(
         "- high — agenthub/a.py — Fine",
-        "- something odd without severity",
+        "- something odd — agenthub/x.py:1 — without a severity word",
         "- high — no separator after file",
         "not a bullet line",
     )
@@ -569,9 +569,11 @@ def test_unparsed_findings_counted(tmp_path):
 
     extract = run_mine(tmp_path)
 
-    assert len(extract.findings) == 1
-    assert extract.unparsed_findings == 2
-    assert skillmine.metrics(extract)["unparsed_findings"] == 2
+    # one parser (triage.review_findings): a severity bullet is a finding
+    assert len(extract.findings) == 2
+    assert extract.findings[1]["file"] == ""
+    assert extract.unparsed_findings == 1
+    assert skillmine.metrics(extract)["unparsed_findings"] == 1
 
 
 def test_redact_colon_and_flag_passwords():
@@ -960,3 +962,45 @@ def test_word_check_is_linear_on_long_capitals():
     for make_text in makers:
         _assert_linear(make_text)
         assert skillmine.redact(make_text(10000))
+
+
+def test_findings_match_triage_parser():
+    reply = """
+## Findings
+- **critical** — agenthub/a.py:1 — critical bug
+- `high` — agenthub/b.py:2 — high bug
+* low — agenthub/c.py:3 — low bug
+  - indented sub-bullet continuation line
+"""
+    triage_findings = triage.review_findings(reply)
+    skillmine_findings, _ = skillmine._findings_of(reply)
+
+    assert [f.severity for f in triage_findings] == ["high", "high", "low"]
+    assert [s for s, _, _ in skillmine_findings] == ["high", "high", "low"]
+
+
+def test_continuation_does_not_change_file():
+    reply = """## Findings
+- high: memory leak in parser
+  - see a.py
+"""
+    found, _ = skillmine._findings_of(reply)
+    assert found == [("high", "", "memory leak in parser")]
+
+
+def test_wrapped_severity_stripped():
+    reply = """## Findings
+- `high`: a.py:3 — leak
+"""
+    found, _ = skillmine._findings_of(reply)
+    assert found == [("high", "a.py", "leak")]
+    assert "high" not in found[0][1]
+
+
+def test_severity_prefix_word_not_a_file():
+    reply = """## Findings
+- severity low — agenthub/a.py:3 — leak
+"""
+    found, _ = skillmine._findings_of(reply)
+    assert found == [("low", "agenthub/a.py", "leak")]
+    assert found[0][1] != "low"
