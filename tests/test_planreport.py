@@ -257,3 +257,75 @@ def test_non_object_triage_line_skipped(tmp_path: Path):
     content = report_path.read_text(encoding="utf-8")
     assert "- task-a round 1 F1 (high) fix: file.py:10" in content
     assert "- triage.jsonl: 2 unreadable line(s) skipped" in content
+
+
+def test_findings_not_a_list_skipped(tmp_path: Path):
+    plan = _make_plan(tmp_path)
+    state = State(
+        slug=plan.slug,
+        started="2026-10-14T00:00:00+00:00",
+        updated="2026-10-14T00:00:00+00:00",
+        tasks={"task-a": TaskState(status="done")},
+    )
+    reviews = {"task-a": {"review": "approve", "job": "job-1"}}
+
+    triage_file = tmp_path / "triage.jsonl"
+    entry1 = {
+        "task": "task-a",
+        "round": 1,
+        "review_job": "job-rev-1",
+        "findings": [
+            {"id": "F1", "severity": "high", "decision": "fix", "evidence": "file.py:10"},
+        ],
+    }
+    entry_bad = {
+        "task": "task-b",
+        "round": 1,
+        "review_job": "job-rev-2",
+        "findings": "not-a-list",
+    }
+    triage_file.write_text(
+        json.dumps(entry1) + "\n" + json.dumps(entry_bad) + "\n",
+        encoding="utf-8",
+    )
+
+    report_path = write_report(plan, state, reviews, rounds=3)
+
+    assert report_path == tmp_path / "report.md"
+    assert report_path.is_file()
+
+    content = report_path.read_text(encoding="utf-8")
+    assert "- task-a round 1 F1 (high) fix: file.py:10" in content
+    assert "- triage.jsonl: 1 unreadable line(s) skipped" in content
+
+
+def test_non_dict_finding_item_skipped(tmp_path: Path):
+    plan = _make_plan(tmp_path)
+    state = State(
+        slug=plan.slug,
+        started="2026-10-14T00:00:00+00:00",
+        updated="2026-10-14T00:00:00+00:00",
+        tasks={"task-a": TaskState(status="done")},
+    )
+    reviews = {"task-a": {"review": "approve", "job": "job-1"}}
+
+    triage_file = tmp_path / "triage.jsonl"
+    entry1 = {
+        "task": "task-a",
+        "round": 1,
+        "review_job": "job-rev-1",
+        "findings": [
+            {"id": "F1", "severity": "high", "decision": "fix", "evidence": "file.py:10"},
+            "not a dict finding",
+        ],
+    }
+    triage_file.write_text(json.dumps(entry1) + "\n", encoding="utf-8")
+
+    report_path = write_report(plan, state, reviews, rounds=3)
+
+    assert report_path == tmp_path / "report.md"
+    assert report_path.is_file()
+
+    content = report_path.read_text(encoding="utf-8")
+    assert "- task-a round 1 F1 (high) fix: file.py:10" in content
+    assert "- triage.jsonl: 1 unreadable line(s) skipped" in content
