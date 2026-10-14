@@ -77,10 +77,7 @@ _CORRECTION = re.compile(
     r"không được|\bphải\b|\bđừng\b|\bsai\b|\bdon[’']?t\b|\bnever\b|\bwrong\b|\bmust\b",
     re.I,
 )
-_LEADING_SEVERITY = re.compile(
-    r"^\s*(?:\*\*|`|\[|<)?(?:high|medium|low|critical|important|minor)(?::\*\*|:`|:\]|:>|\*\*|`|\]|>)?(?::)?\s*(?:—|–|--|-|:)?\s*",
-    re.IGNORECASE,
-)
+_LEADING_SEP = re.compile(r"^(?:—|–|--|-|:)\s*")
 _SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
 _DASH = re.compile(r"\s+(?:—|–|--|-)\s+")
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
@@ -430,7 +427,9 @@ def _verdict_of(reply: str) -> str | None:
 def _findings_of(reply: str) -> tuple[list[tuple[str, str, str]], int]:
     found: list[tuple[str, str, str]] = []
     for item in triage.review_findings(reply):
-        remainder = _LEADING_SEVERITY.sub("", item.text)
+        head = item.head or item.text
+        words = head.split(maxsplit=1)
+        remainder = _LEADING_SEP.sub("", words[1]) if len(words) > 1 else ""
         parts = _DASH.split(remainder, maxsplit=1)
         if len(parts) == 2:
             label = parts[0].strip().strip("`*")

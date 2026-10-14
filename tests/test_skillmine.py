@@ -977,3 +977,21 @@ def test_findings_match_triage_parser():
 
     assert [f.severity for f in triage_findings] == ["high", "high", "low"]
     assert [s for s, _, _ in skillmine_findings] == ["high", "high", "low"]
+
+
+def test_continuation_does_not_change_file():
+    reply = """## Findings
+- high: memory leak in parser
+  - see a.py
+"""
+    found, _ = skillmine._findings_of(reply)
+    assert found == [("high", "", "memory leak in parser")]
+
+
+def test_wrapped_severity_stripped():
+    reply = """## Findings
+- `high`: a.py:3 — leak
+"""
+    found, _ = skillmine._findings_of(reply)
+    assert found == [("high", "a.py", "leak")]
+    assert "high" not in found[0][1]
