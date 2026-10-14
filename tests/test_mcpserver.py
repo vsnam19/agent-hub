@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1785,22 +1786,26 @@ def test_plan_review_wait_detects_zombie_runner(env_sandbox):
         proc.wait()
 
 
-def test_plan_triage_spawns_cli_detached(env_sandbox, repo, tmp_path, monkeypatch):
+def test_plan_triage_returns_handle_and_result(env_sandbox, repo, tmp_path, monkeypatch):
     plan_file = make_plan_file(tmp_path, repo)
 
     calls = []
     orig_popen = subprocess.Popen
 
+    done_event = threading.Event()
+
     class DummyProc:
         def __init__(self, pid=42424):
             self.pid = pid
+            self.returncode = 0
 
         def wait(self):
+            done_event.wait(timeout=2)
             return 0
 
     def fake_popen(*args, **kwargs):
         cmd = args[0] if args else kwargs.get("args", [])
-        if any("triage" in str(c) for c in cmd):
+        if len(cmd) > 5 and cmd[5] == "triage":
             calls.append({"cmd": cmd, "kwargs": kwargs})
             return DummyProc()
         return orig_popen(*args, **kwargs)
@@ -1813,9 +1818,14 @@ def test_plan_triage_spawns_cli_detached(env_sandbox, repo, tmp_path, monkeypatc
         plan_triage(str(bad_plan))
 
     res = plan_triage(str(plan_file))
-    assert res == {"plan": "plan-1", "runner_pid": 42424}
+    assert "handle" in res
+    handle = res["handle"]
+    assert handle.startswith("triage-plan-1-")
+    assert res == {"handle": handle, "plan": "plan-1", "pid": 42424}
+    assert not (plan_file.parent / "runner.pid").exists()
     assert len(calls) == 1
     call = calls[0]
+    expected_result_file = paths().state_dir / "mcp" / "plan-review" / f"{handle}.json"
     expected_cmd = [
         sys.executable,
         "-P",
@@ -1824,16 +1834,34 @@ def test_plan_triage_spawns_cli_detached(env_sandbox, repo, tmp_path, monkeypatc
         "plan",
         "triage",
         str(plan_file),
+        "--result",
+        str(expected_result_file),
     ]
     assert call["cmd"] == expected_cmd
     assert call["kwargs"]["start_new_session"] is True
     assert call["kwargs"]["stdin"] == subprocess.DEVNULL
-    assert call["kwargs"]["stderr"] == subprocess.STDOUT
     assert "PYTHONPATH" in call["kwargs"]["env"]
+
+    # Result wait works with the handle
+    expected_result_file.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "exit_code": 0,
+                "lines": ["t1 fix=1 reject=0 blocked=0"],
+                "stderr_tail": "",
+            }
+        )
+    )
+    done_event.set()
+    wait_res = plan_review_wait(handle, timeout_s=5)
+    assert wait_res["status"] == "ok"
+    assert wait_res["exit_code"] == 0
+    assert wait_res["lines"] == ["t1 fix=1 reject=0 blocked=0"]
 
     def fail_popen(*args, **kwargs):
         cmd = args[0] if args else kwargs.get("args", [])
-        if any("triage" in str(c) for c in cmd):
+        if len(cmd) > 5 and cmd[5] == "triage":
             raise OSError("failed to exec")
         return orig_popen(*args, **kwargs)
 
@@ -1841,25 +1869,32 @@ def test_plan_triage_spawns_cli_detached(env_sandbox, repo, tmp_path, monkeypatc
     err_res = plan_triage(str(plan_file))
     assert "error" in err_res
     assert "spawn failed: failed to exec" in err_res["error"]
-    assert "log" in err_res
+    assert "handle" in err_res
 
 
-def test_plan_close_passes_rounds(env_sandbox, repo, tmp_path, monkeypatch):
+test_plan_triage_spawns_cli_detached = test_plan_triage_returns_handle_and_result
+
+
+def test_plan_close_returns_handle(env_sandbox, repo, tmp_path, monkeypatch):
     plan_file = make_plan_file(tmp_path, repo)
 
     calls = []
     orig_popen = subprocess.Popen
 
+    done_event = threading.Event()
+
     class DummyProc:
         def __init__(self, pid=42425):
             self.pid = pid
+            self.returncode = 0
 
         def wait(self):
+            done_event.wait(timeout=2)
             return 0
 
     def fake_popen(*args, **kwargs):
         cmd = args[0] if args else kwargs.get("args", [])
-        if any("close" in str(c) for c in cmd):
+        if len(cmd) > 5 and cmd[5] == "close":
             calls.append({"cmd": cmd, "kwargs": kwargs})
             return DummyProc()
         return orig_popen(*args, **kwargs)
@@ -1872,8 +1907,13 @@ def test_plan_close_passes_rounds(env_sandbox, repo, tmp_path, monkeypatch):
         plan_close(str(bad_plan))
 
     res = plan_close(str(plan_file))
-    assert res == {"plan": "plan-1", "runner_pid": 42425}
+    assert "handle" in res
+    handle = res["handle"]
+    assert handle.startswith("close-plan-1-")
+    assert res == {"handle": handle, "plan": "plan-1", "pid": 42425}
+    assert not (plan_file.parent / "runner.pid").exists()
     assert len(calls) == 1
+    result_file = paths().state_dir / "mcp" / "plan-review" / f"{handle}.json"
     assert calls[0]["cmd"] == [
         sys.executable,
         "-P",
@@ -1884,12 +1924,18 @@ def test_plan_close_passes_rounds(env_sandbox, repo, tmp_path, monkeypatch):
         str(plan_file),
         "--rounds",
         "3",
+        "--result",
+        str(result_file),
     ]
     assert calls[0]["kwargs"]["start_new_session"] is True
 
     res2 = plan_close(str(plan_file), rounds=5)
-    assert res2 == {"plan": "plan-1", "runner_pid": 42425}
+    assert "handle" in res2
+    handle2 = res2["handle"]
+    assert handle2.startswith("close-plan-1-")
+    assert res2 == {"handle": handle2, "plan": "plan-1", "pid": 42425}
     assert len(calls) == 2
+    result_file2 = paths().state_dir / "mcp" / "plan-review" / f"{handle2}.json"
     assert calls[1]["cmd"] == [
         sys.executable,
         "-P",
@@ -1900,12 +1946,31 @@ def test_plan_close_passes_rounds(env_sandbox, repo, tmp_path, monkeypatch):
         str(plan_file),
         "--rounds",
         "5",
+        "--result",
+        str(result_file2),
     ]
     assert calls[1]["kwargs"]["start_new_session"] is True
 
+    # Result wait works with close handle
+    result_file.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "exit_code": 0,
+                "lines": ["report.md"],
+                "stderr_tail": "",
+            }
+        )
+    )
+    done_event.set()
+    wait_res = plan_review_wait(handle, timeout_s=5)
+    assert wait_res["status"] == "ok"
+    assert wait_res["exit_code"] == 0
+    assert wait_res["lines"] == ["report.md"]
+
     def fail_popen(*args, **kwargs):
         cmd = args[0] if args else kwargs.get("args", [])
-        if any("close" in str(c) for c in cmd):
+        if len(cmd) > 5 and cmd[5] == "close":
             raise OSError("exec format error")
         return orig_popen(*args, **kwargs)
 
@@ -1913,7 +1978,52 @@ def test_plan_close_passes_rounds(env_sandbox, repo, tmp_path, monkeypatch):
     err_res = plan_close(str(plan_file))
     assert "error" in err_res
     assert "spawn failed: exec format error" in err_res["error"]
-    assert "log" in err_res
+    assert "handle" in err_res
+
+
+test_plan_close_passes_rounds = test_plan_close_returns_handle
+
+
+def test_plan_run_refuses_live_runner_without_overwrite(env_sandbox, repo, tmp_path, monkeypatch):
+    from agenthub.procinfo import start_time
+
+    plan_file = make_plan_file(tmp_path, repo)
+    plan_dir = plan_file.parent
+    state_file = plan_dir / "state.json"
+
+    dummy = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
+    try:
+        pid = dummy.pid
+        st = start_time(pid)
+        state_file.write_text(
+            json.dumps(
+                {
+                    "runner": {"pid": pid, "start_time": st},
+                    "tasks": {},
+                }
+            )
+        )
+        old_runner_pid_content = json.dumps({"pid": pid, "start_time": st})
+        (plan_dir / "runner.pid").write_text(old_runner_pid_content)
+
+        spawned = []
+        orig_popen = subprocess.Popen
+
+        def fake_popen(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if len(cmd) > 5 and cmd[5] == "run":
+                spawned.append(cmd)
+            return orig_popen(*args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+        res = plan_run(str(plan_file))
+        assert res == {"error": f"plan runner {pid} is still running; wait or cancel it first"}
+        assert len(spawned) == 0
+        assert (plan_dir / "runner.pid").read_text() == old_runner_pid_content
+    finally:
+        dummy.kill()
+        dummy.wait()
 
 
 def test_plan_close_rejects_bad_rounds(env_sandbox, repo, tmp_path):

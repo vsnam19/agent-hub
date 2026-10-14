@@ -91,6 +91,42 @@ class _TeeStream:
         return "".join(self._buf)
 
 
+def _run_with_result(result_path: Path | None, fn) -> int:
+    if result_path is None:
+        return fn()
+
+    orig_stdout, orig_stderr = sys.stdout, sys.stderr
+    tee_out = _TeeStream(orig_stdout)
+    tee_err = _TeeStream(orig_stderr)
+    sys.stdout, sys.stderr = tee_out, tee_err
+
+    ret_code = 1
+    err_thrown = None
+    try:
+        ret_code = fn()
+        return ret_code
+    except BaseException as e:
+        err_thrown = e
+        ret_code = 2 if isinstance(e, (UsageError, ConfigError, BriefError, PlanError)) else 1
+        raise
+    finally:
+        sys.stdout, sys.stderr = orig_stdout, orig_stderr
+        out_text = tee_out.get_text() if tee_out else ""
+        err_text = tee_err.get_text() if tee_err else ""
+        lines = [line.strip() for line in out_text.splitlines() if line.strip()]
+        if not err_text and err_thrown is not None:
+            err_text = str(err_thrown)
+        err_lines = err_text.splitlines()
+        stderr_tail = "\n".join(err_lines[-40:]).strip()
+        record = {
+            "status": "ok" if ret_code == 0 else "failed",
+            "exit_code": ret_code,
+            "lines": lines,
+            "stderr_tail": stderr_tail,
+        }
+        _atomic_write(result_path, json.dumps(record, indent=2) + "\n")
+
+
 @contextmanager
 def _announcing(announce_path: str | None):
     if not announce_path:
@@ -194,6 +230,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "triage", help="triage every task that needs it, once (exit 1 when any task is blocked)"
     )
     plan_triage.add_argument("plan_file", metavar="<plan.json>")
+    plan_triage.add_argument("--result", metavar="FILE", help=argparse.SUPPRESS)
     plan_merge = plan_sub.add_parser(
         "merge",
         help="merge each done task that agent-hub ready accepts, in dependency order (exit 1 at the first not ready)",
@@ -206,6 +243,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     plan_close.add_argument("plan_file", metavar="<plan.json>")
     plan_close.add_argument("--rounds", type=int, default=3, help="max triage fix rounds per task (default: 3)")
+    plan_close.add_argument("--result", metavar="FILE", help=argparse.SUPPRESS)
     plan_cancel = plan_sub.add_parser("cancel", help="stop the plan's runner and its running jobs")
     plan_cancel.add_argument("plan_file", metavar="<plan.json>")
     plan_cancel.add_argument("-d", "--dir", default=".", dest="workdir", help="repository the caller runs from")
@@ -1115,16 +1153,8 @@ def _cmd_plan(args) -> int:
 
     elif args.plan_command == "review":
         result_path = Path(args.result) if getattr(args, "result", None) else None
-        orig_stdout, orig_stderr = sys.stdout, sys.stderr
-        tee_out, tee_err = None, None
-        if result_path is not None:
-            tee_out = _TeeStream(orig_stdout)
-            tee_err = _TeeStream(orig_stderr)
-            sys.stdout, sys.stderr = tee_out, tee_err
 
-        ret_code = 1
-        err_thrown = None
-        try:
+        def _do_review() -> int:
             from agenthub.planrun import review_task
             from agenthub.planstate import load_or_init
 
@@ -1138,8 +1168,7 @@ def _cmd_plan(args) -> int:
                     raise UsageError(f"no done implement task named {args.task}")
             if not tasks:
                 print("no done tasks to review", file=sys.stderr)
-                ret_code = 1
-                return ret_code
+                return 1
 
             all_approved = True
             for task in tasks:
@@ -1151,80 +1180,65 @@ def _cmd_plan(args) -> int:
                 print(_safe(f"{task.name} gate={result['gate']} review={result['review']} job={result['job']}"))
                 if result["reason"]:
                     print(_safe(result["reason"]), file=sys.stderr)
-            ret_code = 0 if all_approved else 1
-            return ret_code
-        except BaseException as e:
-            err_thrown = e
-            ret_code = 2 if isinstance(e, (UsageError, ConfigError, BriefError, PlanError)) else 1
-            raise
-        finally:
-            if result_path is not None:
-                sys.stdout, sys.stderr = orig_stdout, orig_stderr
-                out_text = tee_out.get_text() if tee_out else ""
-                err_text = tee_err.get_text() if tee_err else ""
-                lines = [line.strip() for line in out_text.splitlines() if line.strip()]
-                if not err_text and err_thrown is not None:
-                    err_text = str(err_thrown)
-                err_lines = err_text.splitlines()
-                stderr_tail = "\n".join(err_lines[-40:]).strip()
-                record = {
-                    "status": "ok" if ret_code == 0 else "failed",
-                    "exit_code": ret_code,
-                    "lines": lines,
-                    "stderr_tail": stderr_tail,
-                }
-                _atomic_write(result_path, json.dumps(record, indent=2) + "\n")
+            return 0 if all_approved else 1
+
+        return _run_with_result(result_path, _do_review)
 
     elif args.plan_command == "triage":
-        from agenthub import triagerun
-        from agenthub.planstate import load_or_init
+        result_path = Path(args.result) if getattr(args, "result", None) else None
 
-        if not state_file.is_file():
-            raise UsageError("state.json not found")
-        state = load_or_init(plan)
-        _claim_runner(state, plan_dir)
-        tasks = [t for t in plan.tasks if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"]
-        jobs = list_jobs(paths(), ALL_JOBS)
-        triaged_count = 0
-        skipped_count = 0
-        any_blocked = False
-        for task in tasks:
-            tstate = state.task(task.name)
-            if not tstate.worktree:
-                continue
-            wt_path = Path(tstate.worktree)
-            if not wt_path.is_dir():
-                print(_safe(f"{task.name} skipped: work tree missing: {tstate.worktree}"))
-                skipped_count += 1
-                continue
-            try:
-                head = guards._run_git(wt_path, "rev-parse", "HEAD")
-            except (subprocess.CalledProcessError, OSError):
-                print(_safe(f"{task.name} skipped: cannot read HEAD: {tstate.worktree}"))
-                skipped_count += 1
-                continue
-            result = triagerun.triage_task(plan, task, tstate, jobs, head, _now)
-            if result is None:
-                continue
-            triaged_count += 1
-            state.save()
-            if result.get("status") == "blocked":
-                any_blocked = True
-                print(_safe(f"{task.name} blocked: {result.get('reason', '')}"))
-            else:
-                counts = result.get("counts") or {}
-                fix = counts.get("fix", 0)
-                reject = counts.get("reject", 0)
-                blocked = counts.get("blocked", 0)
-                brief_part = f" brief={result['fix_path']}" if result.get("fix_path") else ""
-                print(_safe(f"{task.name} fix={fix} reject={reject} blocked={blocked}{brief_part}"))
-        if skipped_count > 0:
-            print(_safe(f"skipped {skipped_count} task(s)"))
-            return 1
-        if triaged_count == 0:
-            print(_safe("nothing to triage"))
-            return 0
-        return 1 if any_blocked else 0
+        def _do_triage() -> int:
+            from agenthub import triagerun
+            from agenthub.planstate import load_or_init
+
+            if not state_file.is_file():
+                raise UsageError("state.json not found")
+            state = load_or_init(plan)
+            _claim_runner(state, plan_dir)
+            tasks = [t for t in plan.tasks if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"]
+            jobs = list_jobs(paths(), ALL_JOBS)
+            triaged_count = 0
+            skipped_count = 0
+            any_blocked = False
+            for task in tasks:
+                tstate = state.task(task.name)
+                if not tstate.worktree:
+                    continue
+                wt_path = Path(tstate.worktree)
+                if not wt_path.is_dir():
+                    print(_safe(f"{task.name} skipped: work tree missing: {tstate.worktree}"))
+                    skipped_count += 1
+                    continue
+                try:
+                    head = guards._run_git(wt_path, "rev-parse", "HEAD")
+                except (subprocess.CalledProcessError, OSError):
+                    print(_safe(f"{task.name} skipped: cannot read HEAD: {tstate.worktree}"))
+                    skipped_count += 1
+                    continue
+                result = triagerun.triage_task(plan, task, tstate, jobs, head, _now)
+                if result is None:
+                    continue
+                triaged_count += 1
+                state.save()
+                if result.get("status") == "blocked":
+                    any_blocked = True
+                    print(_safe(f"{task.name} blocked: {result.get('reason', '')}"))
+                else:
+                    counts = result.get("counts") or {}
+                    fix = counts.get("fix", 0)
+                    reject = counts.get("reject", 0)
+                    blocked = counts.get("blocked", 0)
+                    brief_part = f" brief={result['fix_path']}" if result.get("fix_path") else ""
+                    print(_safe(f"{task.name} fix={fix} reject={reject} blocked={blocked}{brief_part}"))
+            if skipped_count > 0:
+                print(_safe(f"skipped {skipped_count} task(s)"))
+                return 1
+            if triaged_count == 0:
+                print(_safe("nothing to triage"))
+                return 0
+            return 1 if any_blocked else 0
+
+        return _run_with_result(result_path, _do_triage)
 
     elif args.plan_command == "merge":
         from agenthub.planrun import merge_order, merge_target_problem, merge_task
@@ -1265,46 +1279,51 @@ def _cmd_plan(args) -> int:
         return 0
 
     elif args.plan_command == "close":
-        if args.rounds < 1:
-            raise UsageError("--rounds must be >= 1")
+        result_path = Path(args.result) if getattr(args, "result", None) else None
 
-        from agenthub import triagerun
-        from agenthub.planclose import close
-        from agenthub.planrun import review_task
-        from agenthub.planstate import load_or_init
+        def _do_close() -> int:
+            if args.rounds < 1:
+                raise UsageError("--rounds must be >= 1")
 
-        state = load_or_init(plan)
-        _claim_runner(state, plan_dir)
+            from agenthub import triagerun
+            from agenthub.planclose import close
+            from agenthub.planrun import review_task
+            from agenthub.planstate import load_or_init
 
-        def spawn(argv: list[str], log: Path) -> subprocess.Popen:
-            f = open(log, "wb")
-            return subprocess.Popen(argv, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+            state = load_or_init(plan)
+            _claim_runner(state, plan_dir)
 
-        def run():
-            return run_plan(plan, state, spawn)
+            def spawn(argv: list[str], log: Path) -> subprocess.Popen:
+                f = open(log, "wb")
+                return subprocess.Popen(argv, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
 
-        def review(task):
-            return review_task(plan, task, state.task(task.name), _now)
+            def run():
+                return run_plan(plan, state, spawn)
 
-        def triage(task):
-            tstate = state.task(task.name)
-            return triagerun.triage_task(plan, task, tstate, list_jobs(paths(), 100000), _head_of(tstate), _now)
+            def review(task):
+                return review_task(plan, task, state.task(task.name), _now)
 
-        def ready(task):
-            tstate = state.task(task.name)
-            return readiness(list_jobs(paths(), 100000), Path(tstate.worktree), _head_of(tstate))
+            def triage(task):
+                tstate = state.task(task.name)
+                return triagerun.triage_task(plan, task, tstate, list_jobs(paths(), 100000), _head_of(tstate), _now)
 
-        result = close(
-            plan,
-            state,
-            run=run,
-            review=review,
-            triage=triage,
-            ready=ready,
-            max_rounds=args.rounds,
-        )
-        print(_safe(str(result.report)))
-        return 0 if result.ok else 1
+            def ready(task):
+                tstate = state.task(task.name)
+                return readiness(list_jobs(paths(), 100000), Path(tstate.worktree), _head_of(tstate))
+
+            result = close(
+                plan,
+                state,
+                run=run,
+                review=review,
+                triage=triage,
+                ready=ready,
+                max_rounds=args.rounds,
+            )
+            print(_safe(str(result.report)))
+            return 0 if result.ok else 1
+
+        return _run_with_result(result_path, _do_close)
 
     elif args.plan_command == "wait":
         import argparse

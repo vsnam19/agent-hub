@@ -94,7 +94,7 @@ Read the leaf skill in full for any principle you apply.
 
 ## Plan mode
 
-When a goal has several tasks, write a plan file. Prefer the MCP tools when present (`plan_run`, `plan_wait`, `plan_status`, `plan_review`, `plan_review_wait`, `plan_merge`, `plan_triage`, `plan_close`); otherwise use `agent-hub plan run` (background) + `agent-hub plan wait` until it stops returning 124. Plan file fields: `goal`, `repo`, `base`, `slug`, `tasks`
+When a goal has several tasks, write a plan file. Prefer the MCP tools when present (`plan_run`, `plan_wait`, `plan_status`, `plan_review`, `plan_review_wait`, `plan_merge`, `plan_triage`, `plan_close`; wait for triage/close with `plan_review_wait(handle)`); otherwise use `agent-hub plan run` (background) + `agent-hub plan wait` until it stops returning 124. Plan file fields: `goal`, `repo`, `base`, `slug`, `tasks`
 (with `name`, `role`, `brief` or `verifies`, `depends_on`; `role` is any pool role). Use `"gate"` to pass the
 repository's lint and tests. Read `handoffs/` first, the full reply only when needed, and use `plan status` (or `plan_status` MCP tool). Merge
 verified `orch/<slug>/*` branches with `plan_merge` or yourself.
@@ -120,7 +120,7 @@ Prefer the MCP tools when present in your session; fall back to the CLI commands
 | Run job & wait | `run_job(...)` → `wait_job(job_id, timeout_s)` | `agent-hub run ...` (background) → `agent-hub wait` |
 | Gate committed HEAD | `gate_start(workdir)` → `wait_job(job_id, timeout_s)` | `agent-hub gate -d <worktree>` |
 | Readiness check | `ready(workdir)` | `agent-hub ready -d <worktree>` |
-| Plan mode | `plan_run`, `plan_status`, `plan_wait`, `plan_review`, `plan_review_wait`, `plan_merge`, `plan_triage`, `plan_close` | `agent-hub plan run/status/wait/review/merge/triage/close` |
+| Plan mode | `plan_run`, `plan_status`, `plan_wait`, `plan_review`, `plan_review_wait`, `plan_merge`, `plan_triage`, `plan_close` (wait for triage/close with `plan_review_wait(handle)`) | `agent-hub plan run/status/wait/review/merge/triage/close` |
 
 ## Claude Code agents
 

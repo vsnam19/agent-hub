@@ -591,6 +591,105 @@ def validate_plan_args(plan_path: str, p: Paths | None = None) -> tuple[Path, An
     return plan_file, plan
 
 
+def _reap_review(proc: subprocess.Popen, result_file: Path, stderr_file: Path) -> None:
+    """Reap the review runner; if it died without a final result, record a failure."""
+    proc.wait()
+    info: dict[str, Any] = {}
+    try:
+        loaded = json.loads(result_file.read_text())
+        if isinstance(loaded, dict):
+            info = loaded
+    except (OSError, ValueError):
+        pass
+    if info.get("status") in ("ok", "failed"):
+        return
+    try:
+        tail = stderr_file.read_text(errors="replace")[-2000:]
+    except OSError:
+        tail = ""
+    failed = {
+        "handle": info.get("handle"),
+        "plan": info.get("plan"),
+        "status": "failed",
+        "exit_code": getattr(proc, "returncode", None) or 1,
+        "lines": [],
+        "stderr_tail": tail or "runner exited without a result",
+    }
+    result_file.write_text(json.dumps(failed))
+
+
+def _spawn_result_cli(
+    subcommand: str,
+    plan_file: Path,
+    plan: Any,
+    extra_args: list[str] | None = None,
+    p: Paths | None = None,
+) -> dict[str, Any]:
+    p = p or paths()
+    review_dir = p.state_dir / "mcp" / "plan-review"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    handle = f"{subcommand}-{plan.slug}-{time.time_ns()}"
+    result_file = review_dir / f"{handle}.json"
+    stdout_file = review_dir / f"{handle}.stdout"
+    stderr_file = review_dir / f"{handle}.stderr"
+
+    cmd = [
+        sys.executable,
+        "-P",
+        "-m",
+        "agenthub",
+        "plan",
+        subcommand,
+        str(plan_file),
+    ]
+    if extra_args:
+        cmd.extend(extra_args)
+    cmd.extend(["--result", str(result_file)])
+
+    env = os.environ.copy()
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    if "PYTHONPATH" in env:
+        if repo_root not in env["PYTHONPATH"].split(os.pathsep):
+            env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{env['PYTHONPATH']}"
+    else:
+        env["PYTHONPATH"] = repo_root
+
+    p.state_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with contextlib.ExitStack() as stack:
+            stdout_fd = stack.enter_context(open(stdout_file, "w"))
+            stderr_fd = stack.enter_context(open(stderr_file, "w"))
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_fd,
+                stderr=stderr_fd,
+                start_new_session=True,
+                env=env,
+                cwd=p.state_dir,
+            )
+    except OSError as e:
+        return {"error": f"spawn failed: {e}", "handle": handle}
+
+    info = {
+        "handle": handle,
+        "plan": plan.slug,
+        "pid": proc.pid,
+        "status": "running",
+        "stdout": str(stdout_file),
+        "stderr": str(stderr_file),
+    }
+    # The child may already have written its final result: never clobber it.
+    with contextlib.suppress(FileExistsError):
+        with open(result_file, "x") as f:
+            f.write(json.dumps(info))
+
+    threading.Thread(target=_reap_review, args=(proc, result_file, stderr_file), daemon=True).start()
+
+    return {"handle": handle, "plan": plan.slug, "pid": proc.pid}
+
+
 def _spawn_plan_cli(
     subcommand: str,
     plan_path: str,
@@ -599,6 +698,26 @@ def _spawn_plan_cli(
 ) -> dict[str, Any]:
     p = p or paths()
     plan_file, plan = validate_plan_args(plan_path=plan_path, p=p)
+
+    state_file = plan.path.parent / "state.json"
+    if state_file.is_file():
+        try:
+            state_data = json.loads(state_file.read_text())
+            if isinstance(state_data, dict):
+                runner = state_data.get("runner")
+                if isinstance(runner, dict):
+                    pid = runner.get("pid")
+                    recorded = runner.get("start_time")
+                    if (
+                        isinstance(pid, int)
+                        and not isinstance(pid, bool)
+                        and recorded is not None
+                        and is_running(pid)
+                        and start_time(pid) == recorded
+                    ):
+                        return {"error": f"plan runner {pid} is still running; wait or cancel it first"}
+        except (OSError, ValueError):
+            pass
 
     cmd = [
         sys.executable,
@@ -658,7 +777,9 @@ def plan_triage(
     plan_path: str,
     p: Paths | None = None,
 ) -> dict[str, Any]:
-    return _spawn_plan_cli("triage", plan_path=plan_path, p=p)
+    p = p or paths()
+    plan_file, plan = validate_plan_args(plan_path=plan_path, p=p)
+    return _spawn_result_cli("triage", plan_file, plan, p=p)
 
 
 def plan_close(
@@ -668,7 +789,9 @@ def plan_close(
 ) -> dict[str, Any]:
     if isinstance(rounds, bool) or not isinstance(rounds, int) or rounds < 1:
         raise UsageError(f"rounds must be an integer >= 1: {rounds!r}")
-    return _spawn_plan_cli("close", plan_path=plan_path, extra_args=["--rounds", str(rounds)], p=p)
+    p = p or paths()
+    plan_file, plan = validate_plan_args(plan_path=plan_path, p=p)
+    return _spawn_result_cli("close", plan_file, plan, extra_args=["--rounds", str(rounds)], p=p)
 
 
 def plan_status(
@@ -914,96 +1037,16 @@ def plan_review(
     if not tasks:
         return {"reason": "no done tasks to review", "error": "no done tasks to review"}
 
-    review_dir = p.state_dir / "mcp" / "plan-review"
-    review_dir.mkdir(parents=True, exist_ok=True)
-    handle = f"review-{plan.slug}-{time.time_ns()}"
-    result_file = review_dir / f"{handle}.json"
-    stdout_file = review_dir / f"{handle}.stdout"
-    stderr_file = review_dir / f"{handle}.stderr"
-
-    cmd = [
-        sys.executable,
-        "-P",
-        "-m",
-        "agenthub",
-        "plan",
+    res = _spawn_result_cli(
         "review",
-        str(plan_file),
-        "--result",
-        str(result_file),
-    ]
-    if task is not None:
-        cmd.extend(["--task", task])
-
-    env = os.environ.copy()
-    repo_root = str(Path(__file__).resolve().parent.parent)
-    if "PYTHONPATH" in env:
-        if repo_root not in env["PYTHONPATH"].split(os.pathsep):
-            env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{env['PYTHONPATH']}"
-    else:
-        env["PYTHONPATH"] = repo_root
-
-    p.state_dir.mkdir(parents=True, exist_ok=True)
-
-    try:
-        with contextlib.ExitStack() as stack:
-            stdout_fd = stack.enter_context(open(stdout_file, "w"))
-            stderr_fd = stack.enter_context(open(stderr_file, "w"))
-            proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout_fd,
-                stderr=stderr_fd,
-                start_new_session=True,
-                env=env,
-                cwd=p.state_dir,
-            )
-    except OSError as e:
-        return {"error": f"spawn failed: {e}", "handle": handle}
-
-    info = {
-        "handle": handle,
-        "plan": plan.slug,
-        "pid": proc.pid,
-        "status": "running",
-        "stdout": str(stdout_file),
-        "stderr": str(stderr_file),
-    }
-    # The child may already have written its final result: never clobber it.
-    with contextlib.suppress(FileExistsError):
-        with open(result_file, "x") as f:
-            f.write(json.dumps(info))
-
-    threading.Thread(target=_reap_review, args=(proc, result_file, stderr_file), daemon=True).start()
-
-    return {"handle": handle, "plan": plan.slug, "runner_pid": proc.pid}
-
-
-def _reap_review(proc: subprocess.Popen, result_file: Path, stderr_file: Path) -> None:
-    """Reap the review runner; if it died without a final result, record a failure."""
-    proc.wait()
-    info: dict[str, Any] = {}
-    try:
-        loaded = json.loads(result_file.read_text())
-        if isinstance(loaded, dict):
-            info = loaded
-    except (OSError, ValueError):
-        pass
-    if info.get("status") in ("ok", "failed"):
-        return
-    try:
-        tail = stderr_file.read_text(errors="replace")[-2000:]
-    except OSError:
-        tail = ""
-    failed = {
-        "handle": info.get("handle"),
-        "plan": info.get("plan"),
-        "status": "failed",
-        "exit_code": proc.returncode or 1,
-        "lines": [],
-        "stderr_tail": tail or "runner exited without a result",
-    }
-    result_file.write_text(json.dumps(failed))
+        plan_file,
+        plan,
+        extra_args=["--task", task] if task is not None else None,
+        p=p,
+    )
+    if "pid" in res:
+        res["runner_pid"] = res["pid"]
+    return res
 
 
 def plan_merge(
@@ -1343,14 +1386,18 @@ def build_server() -> "MCPServer":
 
     @server.tool(
         name="plan_triage",
-        description="Start a plan triage detached, returning the plan slug and runner pid immediately",
+        description=(
+            "Start a plan triage detached, returning a handle immediately; wait with plan_review_wait(handle)"
+        ),
     )
     def plan_triage_tool(plan_path: str) -> dict[str, Any]:
         return plan_triage(plan_path=plan_path)
 
     @server.tool(
         name="plan_close",
-        description="Start a plan close loop detached, returning the plan slug and runner pid immediately",
+        description=(
+            "Start a plan close loop detached, returning a handle immediately; wait with plan_review_wait(handle)"
+        ),
     )
     def plan_close_tool(plan_path: str, rounds: int = 3) -> dict[str, Any]:
         return plan_close(plan_path=plan_path, rounds=rounds)
