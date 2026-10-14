@@ -90,3 +90,99 @@ def test_close_rejects_zero_rounds(env_sandbox, tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert rc == 2
     assert "rounds" in err
+
+
+def test_close_ready_missing_worktree_reports_problem(env_sandbox, tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    make_repo(repo)
+    plan_file = make_plan_file(tmp_path, repo)
+    report_file = plan_file.parent / "report.md"
+
+    recorded = {}
+
+    def fake_close(plan, state, *, run, review, triage, ready, max_rounds=3):
+        recorded["plan"] = plan
+        recorded["state"] = state
+        recorded["ready"] = ready
+        return CloseResult(ok=True, report=report_file)
+
+    monkeypatch.setattr(agenthub.planclose, "close", fake_close)
+
+    rc = main(["plan", "close", str(plan_file)])
+    assert rc == 0
+
+    plan = recorded["plan"]
+    state = recorded["state"]
+    ready = recorded["ready"]
+    task = plan.tasks[0]
+    tstate = state.task(task.name)
+
+    # Missing work tree directory
+    missing_path = tmp_path / "missing-wt"
+    tstate.worktree = str(missing_path)
+    problems = ready(task)
+    assert problems == [f"work tree missing: {missing_path}"]
+
+    # Directory exists but cannot read HEAD
+    unreadable_dir = tmp_path / "unreadable-wt"
+    unreadable_dir.mkdir()
+    tstate.worktree = str(unreadable_dir)
+    problems = ready(task)
+    assert problems == [f"cannot read HEAD: {unreadable_dir}"]
+
+
+def test_close_triage_missing_worktree_blocks(env_sandbox, tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    make_repo(repo)
+    plan_file = make_plan_file(tmp_path, repo)
+    report_file = plan_file.parent / "report.md"
+
+    recorded = {}
+
+    def fake_close(plan, state, *, run, review, triage, ready, max_rounds=3):
+        recorded["plan"] = plan
+        recorded["state"] = state
+        recorded["triage"] = triage
+        return CloseResult(ok=True, report=report_file)
+
+    monkeypatch.setattr(agenthub.planclose, "close", fake_close)
+
+    rc = main(["plan", "close", str(plan_file)])
+    assert rc == 0
+
+    plan = recorded["plan"]
+    state = recorded["state"]
+    triage = recorded["triage"]
+    task = plan.tasks[0]
+    tstate = state.task(task.name)
+
+    # Missing work tree directory
+    missing_path = tmp_path / "missing-wt"
+    tstate.worktree = str(missing_path)
+    res = triage(task)
+    assert tstate.status == "blocked"
+    assert tstate.reason == f"work tree missing: {missing_path}"
+    assert res == {
+        "task": task.name,
+        "status": "blocked",
+        "counts": {"fix": 0, "reject": 0, "blocked": 0},
+        "fix_path": "",
+        "rejected_path": "",
+        "reason": f"work tree missing: {missing_path}",
+    }
+
+    # Directory exists but cannot read HEAD
+    unreadable_dir = tmp_path / "unreadable-wt"
+    unreadable_dir.mkdir()
+    tstate.worktree = str(unreadable_dir)
+    res = triage(task)
+    assert tstate.status == "blocked"
+    assert tstate.reason == f"cannot read HEAD: {unreadable_dir}"
+    assert res == {
+        "task": task.name,
+        "status": "blocked",
+        "counts": {"fix": 0, "reject": 0, "blocked": 0},
+        "fix_path": "",
+        "rejected_path": "",
+        "reason": f"cannot read HEAD: {unreadable_dir}",
+    }

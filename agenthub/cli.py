@@ -1031,6 +1031,16 @@ def _head_of(tstate) -> str:
     return guards.head(guards.inspect(Path(tstate.worktree)))
 
 
+def _task_head(tstate) -> tuple[str | None, str | None]:
+    """Read a task's HEAD without guards.inspect; returns (head, None) or (None, problem)."""
+    if not tstate.worktree or not Path(tstate.worktree).is_dir():
+        return None, f"work tree missing: {tstate.worktree}"
+    try:
+        return guards._run_git(Path(tstate.worktree), "rev-parse", "HEAD"), None
+    except (subprocess.CalledProcessError, OSError):
+        return None, f"cannot read HEAD: {tstate.worktree}"
+
+
 def _cmd_plan(args) -> int:
     plan_file = Path(args.plan_file).resolve()
     if args.plan_command == "cancel":
@@ -1276,11 +1286,26 @@ def _cmd_plan(args) -> int:
 
         def triage(task):
             tstate = state.task(task.name)
-            return triagerun.triage_task(plan, task, tstate, list_jobs(paths(), 100000), _head_of(tstate), _now)
+            head, err = _task_head(tstate)
+            if err:
+                tstate.status = "blocked"
+                tstate.reason = err
+                return {
+                    "task": task.name,
+                    "status": "blocked",
+                    "counts": {"fix": 0, "reject": 0, "blocked": 0},
+                    "fix_path": "",
+                    "rejected_path": "",
+                    "reason": err,
+                }
+            return triagerun.triage_task(plan, task, tstate, list_jobs(paths(), 100000), head, _now)
 
         def ready(task):
             tstate = state.task(task.name)
-            return readiness(list_jobs(paths(), 100000), Path(tstate.worktree), _head_of(tstate))
+            head, err = _task_head(tstate)
+            if err:
+                return [err]
+            return readiness(list_jobs(paths(), 100000), Path(tstate.worktree), head)
 
         result = close(
             plan,
