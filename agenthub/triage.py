@@ -1,5 +1,6 @@
 import json
 import re
+import string
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from agenthub.plandraft import BLOCK_RE, OPEN_RE
 
 SEVERITIES = ("high", "medium", "low")
 DECISIONS = ("fix", "reject", "blocked")
+TRIAGE_TEMPLATE = Path(__file__).parent / "templates" / "triage-brief.md"
 
 
 class TriageError(Exception):
@@ -205,4 +207,59 @@ def resolve(
         findings=resolved_findings,
         fix_brief=triage.fix_brief,
         blocked_reason=blocked_reason,
+    )
+
+
+def _join_gates(gates: list[str]) -> str:
+    """`a`, `b` and `c`: each gate backticked, joined the way the example brief joins its gates."""
+    if not gates:
+        return ""
+    names = [f"`{gate}`" for gate in gates]
+    if len(names) == 1:
+        return names[0]
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def _format_findings(findings: list[ReviewFinding]) -> str:
+    if not findings:
+        return "(none)"
+    return "\n".join(f"{f.id} ({f.severity}): {f.text}" for f in findings)
+
+
+def _format_gate_tail(gate_tail: str) -> str:
+    if not gate_tail or not gate_tail.strip():
+        return ""
+    return f"\n### Gate failure tail\n\n```\n{gate_tail.strip()}\n```\n"
+
+
+def _format_answered(answered: str) -> str:
+    if not answered or not answered.strip():
+        return ""
+    return f"\n### Already-answered rejected findings\n\n{answered.strip()}\n"
+
+
+def triage_brief(
+    task_brief: str,
+    findings: list[ReviewFinding],
+    review_reply: str,
+    gate_tail: str,
+    diff_path: str,
+    worktree: str,
+    gates: list[str],
+    answered: str = "",
+) -> str:
+    """Render the triage job brief from the template."""
+    template = string.Template(TRIAGE_TEMPLATE.read_text(encoding="utf-8"))
+    return template.substitute(
+        task_brief=task_brief,
+        findings=_format_findings(findings),
+        review_reply=review_reply,
+        gate_tail=_format_gate_tail(gate_tail),
+        diff_path=diff_path,
+        worktree=worktree,
+        gates=_join_gates(gates),
+        answered=_format_answered(answered),
+        max_files=tasksize.MAX_FILES,
+        max_deliverables=tasksize.MAX_DELIVERABLES,
+        max_tests=tasksize.MAX_TESTS,
     )
