@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -11,6 +11,7 @@ from agenthub.planstate import State
 class CloseResult:
     ok: bool
     report: Path
+    stale: dict[str, list[str]] = field(default_factory=dict)
 
 
 def close(
@@ -26,6 +27,7 @@ def close(
     reviews: dict[str, dict] = {}
     approved: set[str] = set()
     rejected_once: set[str] = set()
+    fixed_tasks: set[str] = set()
 
     implement_tasks = [t for t in plan.tasks if (t.kind or t.role) == "implement"]
 
@@ -80,6 +82,7 @@ def close(
                         if tstate.status == "pending":
                             made_pending = True
                             rejected_once.discard(task.name)
+                            fixed_tasks.add(task.name)
             else:
                 tstate.status = "blocked"
                 reason = r.get("reason") or ""
@@ -89,6 +92,37 @@ def close(
         if not (made_pending or needs_rereview):
             break
 
+    task_map = {t.name: t for t in plan.tasks}
+
+    def get_transitive_deps(name: str) -> set[str]:
+        deps: set[str] = set()
+        stack = list(task_map[name].depends_on) if name in task_map else []
+        while stack:
+            dep = stack.pop()
+            if dep not in deps:
+                deps.add(dep)
+                if dep in task_map:
+                    stack.extend(task_map[dep].depends_on)
+        return deps
+
+    stale: dict[str, list[str]] = {}
+    for task in implement_tasks:
+        if task.name in approved:
+            upstream_fixed = sorted(get_transitive_deps(task.name) & fixed_tasks)
+            if upstream_fixed:
+                stale[task.name] = upstream_fixed
+
     report_path = planreport.write_report(plan, state, reviews, max_rounds)
-    ok = not cancelled and all(t.name in approved for t in implement_tasks)
-    return CloseResult(ok=ok, report=report_path)
+    if stale:
+        stale_lines = [
+            (
+                f"- {task_name}: built before the fix rounds of {', '.join(upstream)} "
+                "(merge carries both; re-review after merge)"
+            )
+            for task_name, upstream in stale.items()
+        ]
+        with open(report_path, "a", encoding="utf-8") as f:
+            f.write("\n## Built before an upstream fix\n" + "\n".join(stale_lines) + "\n")
+
+    ok = not cancelled and not stale and all(t.name in approved for t in implement_tasks)
+    return CloseResult(ok=ok, report=report_path, stale=stale)

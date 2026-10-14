@@ -523,3 +523,176 @@ def test_rejected_only_twice_blocks(tmp_path: Path):
 
     report_content = res.report.read_text(encoding="utf-8")
     assert "- task-1: triage rejected every finding twice; director decides" in report_content
+
+
+def test_no_fix_round_no_stale(tmp_path: Path):
+    tasks = [
+        Task(name="task-1", role="implement"),
+        Task(name="task-2", role="implement", depends_on=["task-1"]),
+    ]
+    plan, state = _make_plan(tmp_path, tasks=tasks)
+
+    def fake_run() -> int:
+        state.task("task-1").status = "done"
+        state.task("task-2").status = "done"
+        return 0
+
+    def fake_review(task: Task) -> dict:
+        return {"gate": "ok", "review": "approve", "job": f"job-{task.name}", "reason": ""}
+
+    def fake_triage(task: Task) -> dict | None:
+        raise AssertionError("triage should not be called")
+
+    def fake_ready(task: Task) -> list[str]:
+        return []
+
+    res = close(
+        plan,
+        state,
+        run=fake_run,
+        review=fake_review,
+        triage=fake_triage,
+        ready=fake_ready,
+        max_rounds=3,
+    )
+
+    assert isinstance(res, CloseResult)
+    assert res.ok is True
+    assert res.stale == {}
+    report_content = res.report.read_text(encoding="utf-8")
+    assert "## Built before an upstream fix" not in report_content
+
+
+def test_dependent_of_fixed_task_is_stale(tmp_path: Path):
+    tasks = [
+        Task(name="task-1", role="implement"),
+        Task(name="task-2", role="implement", depends_on=["task-1"]),
+    ]
+    plan, state = _make_plan(tmp_path, tasks=tasks)
+
+    run_calls = 0
+    triage_calls = 0
+
+    def fake_run() -> int:
+        nonlocal run_calls
+        run_calls += 1
+        if run_calls == 1:
+            state.task("task-1").status = "done"
+            state.task("task-2").status = "done"
+        else:
+            state.task("task-1").status = "done"
+        return 0
+
+    def fake_review(task: Task) -> dict:
+        if task.name == "task-2":
+            return {"gate": "ok", "review": "approve", "job": "job-2", "reason": ""}
+        if task.name == "task-1":
+            if run_calls == 1:
+                return {"gate": "ok", "review": "request-changes", "job": "job-1a", "reason": "fix needed"}
+            return {"gate": "ok", "review": "approve", "job": "job-1b", "reason": ""}
+        raise AssertionError(f"Unexpected review for {task.name}")
+
+    def fake_triage(task: Task) -> dict | None:
+        nonlocal triage_calls
+        triage_calls += 1
+        assert task.name == "task-1"
+        tstate = state.task("task-1")
+        tstate.status = "pending"
+        tstate.fix_rounds += 1
+        return {"status": "fix"}
+
+    def fake_ready(task: Task) -> list[str]:
+        return []
+
+    res = close(
+        plan,
+        state,
+        run=fake_run,
+        review=fake_review,
+        triage=fake_triage,
+        ready=fake_ready,
+        max_rounds=3,
+    )
+
+    assert isinstance(res, CloseResult)
+    assert res.ok is False
+    assert res.stale == {"task-2": ["task-1"]}
+    assert run_calls == 2
+    assert triage_calls == 1
+    assert state.task("task-1").status == "done"
+    assert state.task("task-2").status == "done"
+
+    report_content = res.report.read_text(encoding="utf-8")
+    assert "## Built before an upstream fix" in report_content
+    assert (
+        "- task-2: built before the fix rounds of task-1 (merge carries both; re-review after merge)" in report_content
+    )
+
+
+def test_transitive_dependent_is_stale(tmp_path: Path):
+    tasks = [
+        Task(name="task-1", role="implement"),
+        Task(name="task-2", role="implement", depends_on=["task-1"]),
+        Task(name="task-3", role="implement", depends_on=["task-2"]),
+    ]
+    plan, state = _make_plan(tmp_path, tasks=tasks)
+
+    run_calls = 0
+    triage_calls = 0
+
+    def fake_run() -> int:
+        nonlocal run_calls
+        run_calls += 1
+        if run_calls == 1:
+            state.task("task-1").status = "done"
+            state.task("task-2").status = "done"
+            state.task("task-3").status = "done"
+        else:
+            state.task("task-1").status = "done"
+        return 0
+
+    def fake_review(task: Task) -> dict:
+        if task.name in ("task-2", "task-3"):
+            return {"gate": "ok", "review": "approve", "job": f"job-{task.name}", "reason": ""}
+        if task.name == "task-1":
+            if run_calls == 1:
+                return {"gate": "ok", "review": "request-changes", "job": "job-1a", "reason": "fix needed"}
+            return {"gate": "ok", "review": "approve", "job": "job-1b", "reason": ""}
+        raise AssertionError(f"Unexpected review for {task.name}")
+
+    def fake_triage(task: Task) -> dict | None:
+        nonlocal triage_calls
+        triage_calls += 1
+        assert task.name == "task-1"
+        tstate = state.task("task-1")
+        tstate.status = "pending"
+        tstate.fix_rounds += 1
+        return {"status": "fix"}
+
+    def fake_ready(task: Task) -> list[str]:
+        return []
+
+    res = close(
+        plan,
+        state,
+        run=fake_run,
+        review=fake_review,
+        triage=fake_triage,
+        ready=fake_ready,
+        max_rounds=3,
+    )
+
+    assert isinstance(res, CloseResult)
+    assert res.ok is False
+    assert res.stale == {"task-2": ["task-1"], "task-3": ["task-1"]}
+    assert run_calls == 2
+    assert triage_calls == 1
+
+    report_content = res.report.read_text(encoding="utf-8")
+    assert "## Built before an upstream fix" in report_content
+    assert (
+        "- task-2: built before the fix rounds of task-1 (merge carries both; re-review after merge)" in report_content
+    )
+    assert (
+        "- task-3: built before the fix rounds of task-1 (merge carries both; re-review after merge)" in report_content
+    )
