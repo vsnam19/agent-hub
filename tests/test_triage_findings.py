@@ -288,8 +288,8 @@ def test_unparsed_findings_counts_top_level_bullets():
 - high — valid finding
   - **Failure scenario:** indented sub-bullet should not count
   plain wrapped continuation line
-- note — top-level bullet unknown severity (counts)
-* something else — another top-level bullet unknown (counts)
+- note — top-level bullet — unknown severity (counts)
+* something else — another top-level — bullet unknown (counts)
 - (none) — none-like bullet (should not count)
 * low — valid finding 2
 
@@ -414,3 +414,55 @@ def test_head_is_first_line_only():
         severity="high",
         text=findings[0].text,
     )
+
+
+def test_severity_word_prefix():
+    reply = """
+## Findings
+- severity low — agenthub/triage.py:195-201 — Duplicate finding ids — scenario — evidence
+- Severity: high — agenthub/a.py:1 — problem — scenario — evidence
+- **severity** medium — agenthub/b.py:2 — problem — scenario — evidence
+- `severity:` low — agenthub/c.py:3 — problem — scenario — evidence
+- **Severity:** critical — agenthub/d.py:4 — problem — scenario — evidence
+- `Severity` Important — agenthub/e.py:5 — problem — scenario — evidence
+- severity: minor — agenthub/f.py:6 — problem — scenario — evidence
+"""
+    findings = review_findings(reply)
+    assert len(findings) == 7
+    assert [f.severity for f in findings] == [
+        "low",
+        "high",
+        "medium",
+        "low",
+        "high",
+        "medium",
+        "low",
+    ]
+    assert findings[0].id == "F1"
+    assert findings[0].head == "severity low — agenthub/triage.py:195-201 — Duplicate finding ids — scenario — evidence"
+    assert findings[0].text == "severity low — agenthub/triage.py:195-201 — Duplicate finding ids — scenario — evidence"
+    assert findings[1].head == "Severity: high — agenthub/a.py:1 — problem — scenario — evidence"
+    assert findings[2].head == "**severity** medium — agenthub/b.py:2 — problem — scenario — evidence"
+
+
+def test_checked_ok_bullets_not_unparsed():
+    reply = """
+## Findings
+- The `triage_task` signature `(plan, …)` matches the CLI call (`triagerun.py:27-3…`)
+- **Spec match:** working-tree filtering … is correct
+- Exit codes for blocked tasks … match spec §4 (…)
+- Only one separator — so not finding shaped
+Some prose line
+"""
+    assert unparsed_findings(reply) == 0
+
+
+def test_finding_shaped_unknown_bullet_is_unparsed():
+    reply = """
+## Findings
+- unknown_sev — agenthub/a.py:1 — something broken — scenario — evidence
+- something – other – detail
+- bullet -- with -- two dashes
+- normal bullet without separators
+"""
+    assert unparsed_findings(reply) == 3

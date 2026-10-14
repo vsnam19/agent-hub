@@ -561,7 +561,7 @@ def test_bold_and_alternate_severity_scales(tmp_path):
 def test_unparsed_findings_counted(tmp_path):
     reply = review_reply(
         "- high — agenthub/a.py — Fine",
-        "- something odd without severity",
+        "- something odd — agenthub/x.py:1 — without a severity word",
         "- high — no separator after file",
         "not a bullet line",
     )

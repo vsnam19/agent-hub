@@ -22,6 +22,11 @@ _SEVERITY_PATTERN = re.compile(
     r"^(?:\*\*|`|\[|<)?(high|medium|low|critical|important|minor)(?::\*\*|:`|:\]|:>|\*\*|`|\]|>)?(?::)?$",
     re.IGNORECASE,
 )
+_SEVERITY_PREFIX_PATTERN = re.compile(
+    r"^(?:\*\*|`)*severity:?(?:\*\*|`)*:?$",
+    re.IGNORECASE,
+)
+_FINDING_SEPARATOR = re.compile(r"\s+(?:—|–|--)\s+")
 _SEVERITY_MAP = {
     "high": "high",
     "medium": "medium",
@@ -34,6 +39,19 @@ _NONE_LIKE = re.compile(
     r"^\(?\s*(?:none|no\s+findings?|n/?a)\s*\)?\.?(?:\s*[:—–-].*)?$",
     re.IGNORECASE,
 )
+
+
+def _extract_severity(words: list[str]) -> str | None:
+    if not words:
+        return None
+    sev_match = _SEVERITY_PATTERN.match(words[0])
+    if sev_match:
+        return _SEVERITY_MAP[sev_match.group(1).lower()]
+    if len(words) > 1 and _SEVERITY_PREFIX_PATTERN.match(words[0]):
+        sev_match2 = _SEVERITY_PATTERN.match(words[1])
+        if sev_match2:
+            return _SEVERITY_MAP[sev_match2.group(1).lower()]
+    return None
 
 
 def _findings_heading_level(heading_line: str) -> int:
@@ -101,13 +119,11 @@ def review_findings(reply: str) -> list[ReviewFinding]:
             bullet_prefix = bullet_match.group(1)
             rest = bullet_match.group(2).strip()
             words = rest.split()
-            first_word = words[0] if words else ""
-            sev_match = _SEVERITY_PATTERN.match(first_word)
-            if sev_match:
-                sev_word = sev_match.group(1).lower()
+            sev = _extract_severity(words)
+            if sev is not None:
                 current = ReviewFinding(
                     id=f"F{len(findings) + 1}",
-                    severity=_SEVERITY_MAP[sev_word],
+                    severity=sev,
                     text=rest,
                     head=rest,
                 )
@@ -136,10 +152,10 @@ def unparsed_findings(reply: str) -> int:
             if not bullet_prefix[0].isspace():
                 rest = bullet_match.group(2).strip()
                 words = rest.split()
-                first_word = words[0] if words else ""
-                if _SEVERITY_PATTERN.match(first_word):
+                if _extract_severity(words) is not None:
                     continue
                 if _NONE_LIKE.match(rest):
                     continue
-                count += 1
+                if len(_FINDING_SEPARATOR.findall(rest)) >= 2:
+                    count += 1
     return count
