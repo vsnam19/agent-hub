@@ -37,7 +37,7 @@ three times, at E8 `plan review`). Rule: **every wait must end on success, failu
 process**, and the director keeps a harness-tracked waiter (a `run_in_background` command that exits) before it ends
 a turn. Items:
 
-- **Fixing now (plan `deadlock`):** (1) `plan_review` reaps its child and marks a runner that died without a result
+- **Fixed 2026-10-14 (plan `deadlock`, merged):** (1) `plan_review` reaps its child and marks a runner that died without a result
   `failed`; `plan_review_wait` treats zombies as dead (`procinfo.is_running`). (2) `plan_wait` returns `stalled` when
   the recorded runner (`runner.pid` + start time) is gone while tasks are still `pending`/`running`.
 - **`plan review` ignores SIGTERM/SIGINT:** the per-job signal handler (`orchestrate.py` ~231) stops the current
@@ -48,7 +48,9 @@ a turn. Items:
   default below 120 s and document "call again" in the tool description. Low.
 - **`wait_job` / `agent-hub wait` never detect a dead job (verified):** both loop on `result.json` `status ==
   "running"` with no liveness check (`mcpserver.py` `wait_job`, `cli.py` `_cmd_wait`); a SIGKILLed job waits forever.
-  Use the job's `pid` file (pid + start time) + `is_running`; task 3 of plan `deadlock`.
+  Fixed 2026-10-14 (`fix/wait-job-dead`). Review lows: `agent-hub wait --json` prints the dead-job reason as plain
+  text (like the existing timeout line); the dead-job result is built in three copies (sync/async MCP, CLI) — share
+  one helper.
 - **Orchestrate skill:** state the rule above in the Non-negotiables ("never wait on `kill -0 <pid>`; wait on the
   result file or the wait tool, and cover dead processes"). The skill lives in `agent-plugins`.
 - **Resume notes:** a resume note must name the last review/plan result file, so a new session reads finished

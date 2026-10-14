@@ -6,8 +6,8 @@
 > `~/.local/state/agent-hub/mcp/plan-review/review-e8-1791955390390950145.json` (16 lines: 6 approve,
 > 7 request-changes, 3 failed because agy auth was broken → re-review those on agy). Next: fix E8 findings by rounds,
 > then `plan merge`. Wait rule: never `kill -0 <pid>`; wait on result files with a waiter that also exits on a
-> dead/zombie process (see `docs/follow-ups.md` "Director deadlock avoidance"). Task 3 `wait-job-dead`
-> (branch `fix/wait-job-dead`) was in progress.
+> dead/zombie process (see `docs/follow-ups.md` "Director deadlock avoidance"). `wait_job`/`agent-hub wait` also detect a dead
+> job (`fix/wait-job-dead`, merged).
 
 > **Update 2026-10-14, later — E8 implemented, not yet reviewed/merged.** Design
 > `docs/superpowers/specs/2026-10-14-e8-techlead-loop-design.md` (D-101: `plan triage` + `plan close` first, `verify`
