@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -157,3 +159,95 @@ def test_triage_saves_state(env_sandbox, tmp_path, monkeypatch):
     assert saved_state["tasks"]["t1"]["status"] == "pending"
     assert saved_state["tasks"]["t1"]["reason"] == "fix instructions"
     assert saved_state["tasks"]["t1"]["fix_rounds"] == 1
+
+
+def test_triage_skips_missing_worktree(env_sandbox, tmp_path, monkeypatch, capsys):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    t1_worktree = Path(state["tasks"]["t1"]["worktree"])
+    shutil.rmtree(t1_worktree)
+
+    calls = []
+
+    def fake_triage(plan, task, tstate, jobs, head, now):
+        calls.append(task.name)
+        return {
+            "task": task.name,
+            "status": "fix",
+            "counts": {"fix": 1, "reject": 0, "blocked": 0},
+            "fix_path": "/path/to/fixes/t2-1.md",
+            "rejected_path": "",
+            "reason": "",
+        }
+
+    monkeypatch.setattr(agenthub.triagerun, "triage_task", fake_triage)
+
+    rc = main(["plan", "triage", str(plan_file)])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"t1 skipped: work tree missing: {t1_worktree}" in out
+    assert calls == ["t2"]
+    assert "t2 fix=1 reject=0 blocked=0 brief=/path/to/fixes/t2-1.md" in out
+
+    # When all worktrees are missing, both are skipped and nothing to triage is printed
+    t2_worktree = Path(state["tasks"]["t2"]["worktree"])
+    shutil.rmtree(t2_worktree)
+    calls.clear()
+    rc2 = main(["plan", "triage", str(plan_file)])
+    out2 = capsys.readouterr().out
+    assert rc2 == 0
+    assert f"t1 skipped: work tree missing: {t1_worktree}" in out2
+    assert f"t2 skipped: work tree missing: {t2_worktree}" in out2
+    assert "nothing to triage" in out2
+    assert calls == []
+
+
+def test_triage_refuses_live_runner(env_sandbox, tmp_path, monkeypatch, capsys):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    state_file = plan_file.parent / "state.json"
+    data = json.loads(state_file.read_text())
+    other_pid = os.getpid() + 1000
+    data["runner"] = {"pid": other_pid, "start_time": 12345}
+    state_file.write_text(json.dumps(data))
+
+    monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: 12345 if pid == other_pid else None)
+
+    calls = []
+    monkeypatch.setattr(agenthub.triagerun, "triage_task", lambda *args, **kwargs: calls.append(1))
+
+    rc = main(["plan", "triage", str(plan_file)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert f"agent-hub: plan runner {other_pid} is still running; wait or cancel it first" in err
+    assert len(calls) == 0
+
+    saved_state = json.loads(state_file.read_text())
+    assert saved_state["runner"] == {"pid": other_pid, "start_time": 12345}
+
+
+def test_triage_claims_runner(env_sandbox, tmp_path, monkeypatch):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    state_file = plan_file.parent / "state.json"
+
+    data = json.loads(state_file.read_text())
+    data["runner"] = {"pid": 99999, "start_time": 12345}
+    state_file.write_text(json.dumps(data))
+
+    recorded_pid = os.getpid()
+    recorded_time = 77777
+    monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: recorded_time if pid == recorded_pid else None)
+
+    monkeypatch.setattr(agenthub.triagerun, "triage_task", lambda *args, **kwargs: None)
+
+    rc = main(["plan", "triage", str(plan_file)])
+    assert rc == 0
+
+    saved_state = json.loads(state_file.read_text())
+    assert saved_state["runner"] == {"pid": recorded_pid, "start_time": recorded_time}
+    runner_pid_file = plan_file.parent / "runner.pid"
+    assert runner_pid_file.is_file()
+    assert json.loads(runner_pid_file.read_text()) == {"pid": recorded_pid, "start_time": recorded_time}
+
+    # If the recorded runner is already this process, triage succeeds and claims it again
+    rc2 = main(["plan", "triage", str(plan_file)])
+    assert rc2 == 0

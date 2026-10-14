@@ -955,6 +955,15 @@ def _claim_runner(state, plan_dir: Path) -> None:
     (plan_dir / "runner.pid").write_text(json.dumps(state.runner))
 
 
+def _claim_triage_runner(state, plan_dir: Path) -> None:
+    runner = getattr(state, "runner", None) or {}
+    pid = runner.get("pid")
+    recorded = runner.get("start_time")
+    if isinstance(pid, int) and recorded is not None and pid != os.getpid() and start_time(pid) == recorded:
+        raise UsageError(f"plan runner {pid} is still running; wait or cancel it first")
+    _claim_runner(state, plan_dir)
+
+
 def _stop_runner(pid: int | None, recorded: int | None) -> None:
     """SIGTERM the plan's runner when its start time verifies; say so either way."""
     if _terminate_verified(pid, recorded):
@@ -1158,15 +1167,23 @@ def _cmd_plan(args) -> int:
         if not state_file.is_file():
             raise UsageError("state.json not found")
         state = load_or_init(plan)
+        _claim_triage_runner(state, plan_dir)
         tasks = [t for t in plan.tasks if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"]
-        jobs = list_jobs(paths(), 100000)
+        jobs = list_jobs(paths(), ALL_JOBS)
         triaged_count = 0
         any_blocked = False
         for task in tasks:
             tstate = state.task(task.name)
             if not tstate.worktree:
                 continue
-            head = _head_of(tstate)
+            if not Path(tstate.worktree).is_dir():
+                print(_safe(f"{task.name} skipped: work tree missing: {tstate.worktree}"))
+                continue
+            try:
+                head = _head_of(tstate)
+            except guards.GuardError:
+                print(_safe(f"{task.name} skipped: work tree missing: {tstate.worktree}"))
+                continue
             result = triagerun.triage_task(plan, task, tstate, jobs, head, _now)
             if result is None:
                 continue
