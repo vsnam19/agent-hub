@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agenthub import skillmine
+from agenthub import skillmine, triage
 from agenthub.cli import main
 
 NOW = datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc)
@@ -569,9 +569,11 @@ def test_unparsed_findings_counted(tmp_path):
 
     extract = run_mine(tmp_path)
 
-    assert len(extract.findings) == 1
-    assert extract.unparsed_findings == 2
-    assert skillmine.metrics(extract)["unparsed_findings"] == 2
+    # one parser (triage.review_findings): a severity bullet is a finding
+    assert len(extract.findings) == 2
+    assert extract.findings[1]["file"] == ""
+    assert extract.unparsed_findings == 1
+    assert skillmine.metrics(extract)["unparsed_findings"] == 1
 
 
 def test_redact_colon_and_flag_passwords():
@@ -960,3 +962,18 @@ def test_word_check_is_linear_on_long_capitals():
     for make_text in makers:
         _assert_linear(make_text)
         assert skillmine.redact(make_text(10000))
+
+
+def test_findings_match_triage_parser():
+    reply = """
+## Findings
+- **critical** — agenthub/a.py:1 — critical bug
+- `high` — agenthub/b.py:2 — high bug
+* low — agenthub/c.py:3 — low bug
+  - indented sub-bullet continuation line
+"""
+    triage_findings = triage.review_findings(reply)
+    skillmine_findings, _ = skillmine._findings_of(reply)
+
+    assert [f.severity for f in triage_findings] == ["high", "high", "low"]
+    assert [s for s, _, _ in skillmine_findings] == ["high", "high", "low"]

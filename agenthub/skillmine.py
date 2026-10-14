@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agenthub import triage
+
 CAP = 300
 MAX_CORRECTIONS = 500
 MAX_CORRECTION_CHARS = 600
@@ -75,12 +77,11 @@ _CORRECTION = re.compile(
     r"không được|\bphải\b|\bđừng\b|\bsai\b|\bdon[’']?t\b|\bnever\b|\bwrong\b|\bmust\b",
     re.I,
 )
-_FINDING = re.compile(
-    r"^\s*[-*]\s+(?:\*\*|`)?(high|medium|low|critical|important|minor)(?:\*\*|`)?\s+(?:—|–|--|-)\s+(.+)$", re.I
+_LEADING_SEVERITY = re.compile(
+    r"^\s*(?:\*\*|`|\[|<)?(?:high|medium|low|critical|important|minor)(?::\*\*|:`|:\]|:>|\*\*|`|\]|>)?(?::)?\s*(?:—|–|--|-|:)?\s*",
+    re.IGNORECASE,
 )
 _SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
-_SEVERITY = {"critical": "high", "important": "medium", "minor": "low"}
-_BULLET = re.compile(r"^\s*[-*]\s")
 _DASH = re.compile(r"\s+(?:—|–|--|-)\s+")
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 _FIX_BRIEF = re.compile(r"\bround\s+\d+\s*(?::|fix(?:es)?\b|—|–|-)", re.I)
@@ -428,21 +429,22 @@ def _verdict_of(reply: str) -> str | None:
 
 def _findings_of(reply: str) -> tuple[list[tuple[str, str, str]], int]:
     found: list[tuple[str, str, str]] = []
-    unparsed = 0
-    for line in _section(reply, "findings"):
-        match = _FINDING.match(line)
-        parts = _DASH.split(match.group(2), maxsplit=1) if match else []
-        if len(parts) != 2:
-            unparsed += bool(_BULLET.match(line))
-            continue
-        label = parts[0].strip().strip("`*")
-        link = _LINK.match(label)
-        if link:
-            label = link.group(1).strip().strip("`*")
-        where = re.match(r"[^\s:,]+", label)
-        severity = match.group(1).lower()
-        found.append((_SEVERITY.get(severity, severity), where.group(0).strip("`") if where else "", parts[1].strip()))
-    return found, unparsed
+    for item in triage.review_findings(reply):
+        remainder = _LEADING_SEVERITY.sub("", item.text)
+        parts = _DASH.split(remainder, maxsplit=1)
+        if len(parts) == 2:
+            label = parts[0].strip().strip("`*")
+            link = _LINK.match(label)
+            if link:
+                label = link.group(1).strip().strip("`*")
+            where = re.match(r"[^\s:,]+", label)
+            where_str = where.group(0).strip("`") if where else ""
+            claim = parts[1].strip()
+        else:
+            where_str = ""
+            claim = remainder.strip()
+        found.append((item.severity, where_str, claim))
+    return found, triage.unparsed_findings(reply)
 
 
 def _mine_transcripts(root: Path, extract: Extract, since: datetime) -> None:
