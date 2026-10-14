@@ -1,4 +1,5 @@
 import json
+import re
 
 import pytest
 
@@ -148,3 +149,30 @@ def test_finding_id_must_be_string():
     for bad in (123, None, True, []):
         with pytest.raises(TriageError, match="id must be a string"):
             parse(_reply({"findings": [_finding(id=bad)], "fix_brief": ""}))
+
+
+def test_severity_and_decision_case_insensitive():
+    reply = _reply(
+        {
+            "findings": [
+                _finding(id="F1", severity="High", decision="Fix"),
+                _finding(id="F2", severity="  MEDIUM  ", decision="  REJECT  "),
+                _finding(id="F3", severity="LOW", decision="BLOCKED"),
+            ],
+            "fix_brief": "Fix F1",
+        }
+    )
+    result = parse(reply)
+    assert result.findings[0].severity == "high"
+    assert result.findings[0].decision == "fix"
+    assert result.findings[1].severity == "medium"
+    assert result.findings[1].decision == "reject"
+    assert result.findings[2].severity == "low"
+    assert result.findings[2].decision == "blocked"
+
+
+def test_non_string_severity_rejected():
+    for bad in (123, None, True, ["high"], {"bad": "severity"}):
+        reply = _reply({"findings": [_finding(severity=bad)], "fix_brief": ""})
+        with pytest.raises(TriageError, match=rf"bad severity {re.escape(repr(bad))}"):
+            parse(reply)

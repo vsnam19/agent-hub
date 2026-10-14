@@ -102,9 +102,13 @@ def _parse_finding(index: int, raw: object) -> TriageFinding:
     if not isinstance(finding_id, str):
         raise TriageError(f"finding {index} id must be a string")
     severity = raw["severity"]
+    if isinstance(severity, str):
+        severity = severity.strip().lower()
     if severity not in SEVERITIES:
         raise TriageError(f"finding {index} has bad severity {severity!r}, expected one of {', '.join(SEVERITIES)}")
     decision = raw["decision"]
+    if isinstance(decision, str):
+        decision = decision.strip().lower()
     if decision not in DECISIONS:
         raise TriageError(f"finding {index} has bad decision {decision!r}, expected one of {', '.join(DECISIONS)}")
     evidence = raw["evidence"]
