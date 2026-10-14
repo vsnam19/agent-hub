@@ -20,6 +20,7 @@ from agenthub.jobs import get_job, list_jobs
 from agenthub.orchestrate import readiness, skills_hint
 from agenthub.plan import load as load_plan
 from agenthub.pool import Cooldowns, load_pool, parse_link
+from agenthub.procinfo import is_running
 from agenthub.workers import available_skills
 
 if TYPE_CHECKING:
@@ -713,9 +714,7 @@ def plan_review_wait(
 
         pid = info.get("pid")
         if pid:
-            try:
-                os.kill(pid, 0)
-            except OSError:
+            if not is_running(pid):
                 time.sleep(0.1)
                 try:
                     info = json.loads(info_file.read_text())
@@ -788,9 +787,7 @@ async def plan_review_wait_async(
 
         pid = info.get("pid")
         if pid:
-            try:
-                os.kill(pid, 0)
-            except OSError:
+            if not is_running(pid):
                 await asyncio.sleep(0.1)
                 try:
                     info = json.loads(info_file.read_text())
@@ -900,9 +897,41 @@ def plan_review(
         "stdout": str(stdout_file),
         "stderr": str(stderr_file),
     }
-    result_file.write_text(json.dumps(info))
+    # The child may already have written its final result: never clobber it.
+    with contextlib.suppress(FileExistsError):
+        with open(result_file, "x") as f:
+            f.write(json.dumps(info))
+
+    threading.Thread(target=_reap_review, args=(proc, result_file, stderr_file), daemon=True).start()
 
     return {"handle": handle, "plan": plan.slug, "runner_pid": proc.pid}
+
+
+def _reap_review(proc: subprocess.Popen, result_file: Path, stderr_file: Path) -> None:
+    """Reap the review runner; if it died without a final result, record a failure."""
+    proc.wait()
+    info: dict[str, Any] = {}
+    try:
+        loaded = json.loads(result_file.read_text())
+        if isinstance(loaded, dict):
+            info = loaded
+    except (OSError, ValueError):
+        pass
+    if info.get("status") in ("ok", "failed"):
+        return
+    try:
+        tail = stderr_file.read_text(errors="replace")[-2000:]
+    except OSError:
+        tail = ""
+    failed = {
+        "handle": info.get("handle"),
+        "plan": info.get("plan"),
+        "status": "failed",
+        "exit_code": proc.returncode or 1,
+        "lines": [],
+        "stderr_tail": tail or "runner exited without a result",
+    }
+    result_file.write_text(json.dumps(failed))
 
 
 def plan_merge(

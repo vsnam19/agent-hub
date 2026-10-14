@@ -15,6 +15,7 @@ from agenthub.cli import UsageError, main
 from agenthub.config import ConfigError, Paths, paths
 from agenthub.jobs import get_job, list_jobs, new_job
 from agenthub.mcpserver import (
+    _reap_review,
     _spawn_detached,
     build_server,
     clamp_timeout,
@@ -1578,3 +1579,55 @@ def test_plan_merge_tool_is_destructive_and_merges_ready(env_sandbox, tmp_path, 
     assert res2["stopped_at"]["task"] == "t1"
     assert res2["stopped_at"]["status"] == "not-ready"
     assert len(res2["stopped_at"]["problems"]) > 0
+
+
+def _review_files(handle):
+    d = paths().state_dir / "mcp" / "plan-review"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{handle}.json", d / f"{handle}.stderr"
+
+
+def test_reap_review_marks_dead_runner_failed(env_sandbox):
+    handle = "review-x-1"
+    result_file, stderr_file = _review_files(handle)
+    result_file.write_text(json.dumps({"handle": handle, "plan": "x", "pid": 1, "status": "running"}))
+    with open(stderr_file, "w") as err:
+        proc = subprocess.Popen(["sh", "-c", "echo boom >&2; exit 3"], stderr=err)
+    _reap_review(proc, result_file, stderr_file)
+    data = json.loads(result_file.read_text())
+    assert data["status"] == "failed"
+    assert data["exit_code"] == 3
+    assert data["lines"] == []
+    assert "boom" in data["stderr_tail"]
+    assert data["handle"] == handle
+    res = plan_review_wait(handle, timeout_s=2)
+    assert res["state"] == "failed"
+
+
+def test_reap_review_keeps_finished_result(env_sandbox):
+    handle = "review-x-2"
+    result_file, stderr_file = _review_files(handle)
+    original = {"status": "ok", "exit_code": 0, "lines": ["x"], "stderr_tail": ""}
+    result_file.write_text(json.dumps(original))
+    stderr_file.write_text("")
+    proc = subprocess.Popen(["true"])
+    _reap_review(proc, result_file, stderr_file)
+    assert json.loads(result_file.read_text()) == original
+
+
+def test_plan_review_wait_detects_zombie_runner(env_sandbox):
+    handle = "review-x-3"
+    result_file, _ = _review_files(handle)
+    proc = subprocess.Popen(["true"])
+    try:
+        result_file.write_text(json.dumps({"handle": handle, "plan": "x", "pid": proc.pid, "status": "running"}))
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            text = Path(f"/proc/{proc.pid}/stat").read_text()
+            if text[text.rfind(")") + 1 :].split()[0] == "Z":
+                break
+            time.sleep(0.02)
+        res = plan_review_wait(handle, timeout_s=3)
+        assert res["state"] == "failed"
+    finally:
+        proc.wait()
