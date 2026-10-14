@@ -1,7 +1,9 @@
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
+from agenthub import tasksize
 from agenthub.plandraft import BLOCK_RE, OPEN_RE
 
 SEVERITIES = ("high", "medium", "low")
@@ -31,6 +33,13 @@ class TriageFinding:
 class Triage:
     findings: list[TriageFinding]
     fix_brief: str
+
+
+@dataclass
+class Resolution:
+    findings: list[TriageFinding]
+    fix_brief: str
+    blocked_reason: str
 
 
 def review_findings(reply: str) -> list[ReviewFinding]:
@@ -111,3 +120,89 @@ def _parse_finding(index: int, raw: object) -> TriageFinding:
     if not isinstance(evidence, str):
         raise TriageError(f"finding {index} evidence must be a string")
     return TriageFinding(id=finding_id, severity=severity, decision=decision, evidence=evidence)
+
+
+def _has_valid_reject_evidence(evidence: str, worktree: Path, job_ids: set[str]) -> bool:
+    if not evidence:
+        return False
+
+    for job_id in job_ids:
+        if job_id and job_id in evidence:
+            return True
+
+    for match in re.finditer(r"([^\s:()\[\]{}`'\"<>]+):(\d+)", evidence):
+        try:
+            line_num = int(match.group(2))
+        except ValueError:
+            continue
+        if line_num < 1:
+            continue
+
+        candidate = Path(match.group(1))
+        if ".." in candidate.parts:
+            continue
+
+        try:
+            wt_resolved = worktree.resolve()
+            if candidate.is_absolute():
+                candidate_resolved = candidate.resolve()
+                if not candidate_resolved.is_relative_to(wt_resolved):
+                    continue
+                target = candidate_resolved
+            else:
+                target = (worktree / candidate).resolve()
+                if not target.is_relative_to(wt_resolved):
+                    continue
+            if target.is_file():
+                return True
+        except (OSError, ValueError):
+            continue
+
+    return False
+
+
+def resolve(
+    triage: Triage,
+    reviewed: list[ReviewFinding],
+    worktree: Path,
+    job_ids: set[str],
+) -> Resolution:
+    worktree = Path(worktree)
+    job_ids = set(job_ids)
+
+    resolved_findings = [
+        TriageFinding(
+            id=f.id,
+            severity=f.severity,
+            decision="fix"
+            if (f.decision == "reject" and not _has_valid_reject_evidence(f.evidence, worktree, job_ids))
+            else f.decision,
+            evidence=f.evidence,
+        )
+        for f in triage.findings
+    ]
+
+    triage_ids = {f.id for f in triage.findings}
+    missing = sorted(
+        {rf.id for rf in reviewed if rf.severity.lower() in ("medium", "high") and rf.id not in triage_ids}
+    )
+
+    if missing:
+        blocked_reason = f"triage incomplete: {', '.join(missing)}"
+    elif any(f.decision == "blocked" for f in resolved_findings):
+        first_blocked = next(f for f in resolved_findings if f.decision == "blocked")
+        blocked_reason = f"blocked: {first_blocked.evidence}"
+    elif any(f.decision == "fix" for f in resolved_findings):
+        problems = tasksize.check(triage.fix_brief)
+        if problems:
+            blocked_reason = f"fix brief too big or malformed: {'; '.join(problems)}"
+        else:
+            blocked_reason = ""
+    else:
+        blocked_reason = ""
+
+    return Resolution(
+        findings=resolved_findings,
+        fix_brief=triage.fix_brief,
+        blocked_reason=blocked_reason,
+    )
