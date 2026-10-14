@@ -60,7 +60,14 @@ def test_rejected_file_written_without_fix(tmp_path: Path):
     # Fixes directory and rejected file
     rejected_path = plan_dir / "fixes" / "task-c-1-rejected.md"
     assert rejected_path.is_file()
-    assert rejected_path.read_text() == "- F1 (high): a.py:10\n- F2 (medium): b.py:20\n"
+    expected = (
+        "## Review job-789\n"
+        "- F1 (high): (text not recorded)\n"
+        "  rejected: a.py:10\n"
+        "- F2 (medium): (text not recorded)\n"
+        "  rejected: b.py:20\n"
+    )
+    assert rejected_path.read_text() == expected
     assert result["rejected_path"] == str(rejected_path)
 
 
@@ -181,7 +188,8 @@ def test_fix_with_rejects_writes_both_files(tmp_path: Path):
 
     rej_file = plan_dir / "fixes" / "task-g-1-rejected.md"
     assert rej_file.is_file()
-    assert rej_file.read_text() == "- F2 (medium): bar.py:2\n"
+    expected_rej = "## Review job-review-4\n- F2 (medium): (text not recorded)\n  rejected: bar.py:2\n"
+    assert rej_file.read_text() == expected_rej
     assert result["rejected_path"] == str(rej_file)
 
 
@@ -225,3 +233,102 @@ def test_blocked_with_fix_findings_writes_no_files(tmp_path: Path):
     assert tstate.status == "blocked"
     assert tstate.reason == "fix brief too big or malformed: brief exceeds 80 lines"
     assert tstate.fix_rounds == 1
+
+
+def test_rejected_file_has_review_text(tmp_path: Path):
+    plan_dir = tmp_path / "plan"
+    plan_dir.mkdir()
+    tstate = TaskState(status="running", fix_rounds=0)
+    findings = [
+        TriageFinding(id="F1", severity="high", decision="reject", evidence="a.py:10"),
+        TriageFinding(id="F2", severity="medium", decision="reject", evidence="b.py:20"),
+    ]
+    resolution = Resolution(
+        findings=findings,
+        fix_brief="",
+        blocked_reason="",
+        review_text={"F1": "high — a.py:10 missing check"},
+    )
+
+    result = apply(plan_dir, "task-rev", tstate, resolution, "job-rev-1")
+
+    rejected_path = plan_dir / "fixes" / "task-rev-1-rejected.md"
+    assert rejected_path.is_file()
+    expected = (
+        "## Review job-rev-1\n"
+        "- F1 (high): high — a.py:10 missing check\n"
+        "  rejected: a.py:10\n"
+        "- F2 (medium): (text not recorded)\n"
+        "  rejected: b.py:20\n"
+    )
+    assert rejected_path.read_text() == expected
+    assert result["rejected_path"] == str(rejected_path)
+
+
+def test_rejected_file_appends(tmp_path: Path):
+    plan_dir = tmp_path / "plan"
+    plan_dir.mkdir()
+    tstate = TaskState(status="running", fix_rounds=0)
+    finding1 = [TriageFinding(id="F1", severity="high", decision="reject", evidence="a.py:10")]
+    res1 = Resolution(
+        findings=finding1,
+        fix_brief="",
+        blocked_reason="",
+        review_text={"F1": "finding 1 text"},
+    )
+    result1 = apply(plan_dir, "task-app", tstate, resolution=res1, review_job="job-1")
+
+    rejected_path = plan_dir / "fixes" / "task-app-1-rejected.md"
+    assert rejected_path.is_file()
+    assert result1["rejected_path"] == str(rejected_path)
+
+    finding2 = [TriageFinding(id="F2", severity="medium", decision="reject", evidence="b.py:20")]
+    res2 = Resolution(
+        findings=finding2,
+        fix_brief="",
+        blocked_reason="",
+        review_text={"F2": "finding 2 text"},
+    )
+    result2 = apply(plan_dir, "task-app", tstate, resolution=res2, review_job="job-2")
+    assert result2["rejected_path"] == str(rejected_path)
+
+    expected = (
+        "## Review job-1\n"
+        "- F1 (high): finding 1 text\n"
+        "  rejected: a.py:10\n"
+        "## Review job-2\n"
+        "- F2 (medium): finding 2 text\n"
+        "  rejected: b.py:20\n"
+    )
+    assert rejected_path.read_text() == expected
+
+
+def test_gate_failure_fix_brief_starts_round(tmp_path: Path):
+    from agenthub.planstate import AttemptState
+
+    plan_dir = tmp_path / "plan"
+    plan_dir.mkdir()
+    attempts = [AttemptState(job="job-1", status="failed", exit_code=1)]
+    tstate = TaskState(status="running", attempts=attempts, fix_rounds=0, attempts_base=0)
+    resolution = Resolution(
+        findings=[],
+        fix_brief="## Goal\nFix gate failure",
+        blocked_reason="",
+    )
+
+    result = apply(plan_dir, "task-gate", tstate, resolution, "gate-review-job")
+
+    assert result["status"] == "fix"
+    assert result["counts"] == {"fix": 0, "reject": 0, "blocked": 0}
+    assert result["reason"] == ""
+    assert result["rejected_path"] == ""
+
+    fix_file = plan_dir / "fixes" / "task-gate-1.md"
+    assert fix_file.is_file()
+    assert fix_file.read_text() == "## Goal\nFix gate failure"
+    assert result["fix_path"] == str(fix_file)
+
+    assert tstate.status == "pending"
+    assert tstate.reason == "## Goal\nFix gate failure"
+    assert tstate.fix_rounds == 1
+    assert tstate.attempts_base == 1

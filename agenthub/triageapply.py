@@ -51,7 +51,9 @@ def apply(
             "reason": resolution.blocked_reason,
         }
 
-    has_fix = any(f.decision == "fix" for f in resolution.findings)
+    has_fix = any(f.decision == "fix" for f in resolution.findings) or (
+        not resolution.findings and bool(resolution.fix_brief.strip())
+    )
     rejects = [f for f in resolution.findings if f.decision == "reject"]
 
     rejected_path = ""
@@ -59,8 +61,14 @@ def apply(
         fixes_dir = plan_dir / "fixes"
         fixes_dir.mkdir(parents=True, exist_ok=True)
         rej_file = fixes_dir / f"{task}-{round_num}-rejected.md"
-        rej_lines = [f"- {f.id} ({f.severity}): {f.evidence}" for f in rejects]
-        rej_file.write_text("\n".join(rej_lines) + "\n", encoding="utf-8")
+        rej_lines = [f"## Review {review_job}"]
+        review_text_map = resolution.review_text or {}
+        for f in rejects:
+            text = review_text_map.get(f.id) or "(text not recorded)"
+            rej_lines.append(f"- {f.id} ({f.severity}): {text}")
+            rej_lines.append(f"  rejected: {f.evidence}")
+        with open(rej_file, "a", encoding="utf-8") as rf:
+            rf.write("\n".join(rej_lines) + "\n")
         rejected_path = str(rej_file)
 
     if has_fix:
