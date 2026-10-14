@@ -1,22 +1,50 @@
+import functools
 import json
 import os
 import re
 import shutil
-from collections.abc import Mapping
+import subprocess
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from agenthub.agents import Adapter, Classified, Invocation, Outcome, Request, common_stderr_text
 
 
-def _keyring_env(environ: Mapping[str, str]) -> dict[str, str] | None:
-    """agy uses file token storage under SSH; blank SSH vars send it to the keyring, reachable over the session bus."""
+@functools.cache
+def _secret_service_running() -> bool:
+    """True when a Secret Service (keyring) owns its name on the session bus."""
+    try:
+        result = subprocess.run(
+            [
+                "dbus-send",
+                "--session",
+                "--print-reply",
+                "--dest=org.freedesktop.DBus",
+                "/org/freedesktop/DBus",
+                "org.freedesktop.DBus.NameHasOwner",
+                "string:org.freedesktop.secrets",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0 and "boolean true" in result.stdout
+
+
+def _keyring_env(
+    environ: Mapping[str, str], secret_service: Callable[[], bool] = _secret_service_running
+) -> dict[str, str] | None:
+    """agy uses file token storage under SSH; blank SSH vars send it to the keyring when one runs.
+    Override with AGENTHUB_AGY_KEYRING=1 (force blank) or 0 (never blank)."""
     forced = environ.get("AGENTHUB_AGY_KEYRING")
     if forced == "1":
         return {"SSH_CONNECTION": "", "SSH_CLIENT": "", "SSH_TTY": ""}
     if forced == "0":
         return None
-    if environ.get("SSH_CONNECTION") and environ.get("DBUS_SESSION_BUS_ADDRESS"):
+    if environ.get("SSH_CONNECTION") and secret_service():
         return {"SSH_CONNECTION": "", "SSH_CLIENT": "", "SSH_TTY": ""}
     return None
 
@@ -53,7 +81,9 @@ class AgyAdapter(Adapter):
             ]
         )
 
-        return Invocation(argv=argv, stdin_path=None, env=_keyring_env(os.environ))
+        return Invocation(
+            argv=argv, stdin_path=None, env=_keyring_env(os.environ, secret_service=_secret_service_running)
+        )
 
     def classify(self, rc: int, attempt_dir: Path) -> Classified:
         stdout_file = attempt_dir / "stdout"

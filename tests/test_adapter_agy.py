@@ -1,10 +1,11 @@
 import os
+import subprocess
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from agenthub.agents import Outcome, Request
-from agenthub.agents.agy import AgyAdapter, _keyring_env
+from agenthub.agents.agy import AgyAdapter, _keyring_env, _secret_service_running
 from agenthub.process import run
 
 
@@ -107,26 +108,73 @@ BLANK_SSH = {"SSH_CONNECTION": "", "SSH_CLIENT": "", "SSH_TTY": ""}
 SSH_DBUS = {"SSH_CONNECTION": "10.0.0.2 22 10.0.0.1 5000", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}
 
 
-def test_keyring_env_blanks_under_ssh_with_dbus():
-    assert _keyring_env(SSH_DBUS) == BLANK_SSH
+SSH_ONLY = {"SSH_CONNECTION": "10.0.0.2 22 10.0.0.1 5000"}
 
 
-def test_keyring_env_none_without_dbus():
-    assert _keyring_env({"SSH_CONNECTION": "10.0.0.2 22 10.0.0.1 5000"}) is None
-    assert _keyring_env({"SSH_CONNECTION": "10.0.0.2 22 10.0.0.1 5000", "DBUS_SESSION_BUS_ADDRESS": ""}) is None
+def test_keyring_env_blanks_under_ssh_with_secret_service():
+    assert _keyring_env(SSH_ONLY, secret_service=lambda: True) == BLANK_SSH
+
+
+def test_keyring_env_none_under_ssh_without_secret_service():
+    assert _keyring_env(SSH_DBUS, secret_service=lambda: False) is None
 
 
 def test_keyring_env_none_without_ssh():
-    assert _keyring_env({"DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}) is None
-    assert _keyring_env({}) is None
+    assert (
+        _keyring_env({"DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}, secret_service=lambda: True) is None
+    )
+    assert _keyring_env({}, secret_service=lambda: True) is None
 
 
 def test_keyring_env_forced_on():
-    assert _keyring_env({"AGENTHUB_AGY_KEYRING": "1"}) == BLANK_SSH
+    assert _keyring_env({"AGENTHUB_AGY_KEYRING": "1"}, secret_service=lambda: False) == BLANK_SSH
 
 
 def test_keyring_env_forced_off():
-    assert _keyring_env({"AGENTHUB_AGY_KEYRING": "0", **SSH_DBUS}) is None
+    assert _keyring_env({"AGENTHUB_AGY_KEYRING": "0", **SSH_DBUS}, secret_service=lambda: True) is None
+
+
+def _fake_dbus(monkeypatch, returncode, stdout):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return calls
+
+
+def test_secret_service_running_parses_true(monkeypatch):
+    _secret_service_running.cache_clear()
+    calls = _fake_dbus(monkeypatch, 0, "method return time=1 sender=org.freedesktop.DBus\n   boolean true\n")
+    try:
+        assert _secret_service_running() is True
+        assert calls and "org.freedesktop.secrets" in calls[0][-1]
+    finally:
+        _secret_service_running.cache_clear()
+
+
+def test_secret_service_running_false(monkeypatch):
+    _secret_service_running.cache_clear()
+    _fake_dbus(monkeypatch, 0, "method return time=1 sender=org.freedesktop.DBus\n   boolean false\n")
+    try:
+        assert _secret_service_running() is False
+    finally:
+        _secret_service_running.cache_clear()
+
+
+def test_secret_service_running_missing_binary(monkeypatch):
+    _secret_service_running.cache_clear()
+
+    def missing(argv, **kwargs):
+        raise FileNotFoundError("dbus-send")
+
+    monkeypatch.setattr(subprocess, "run", missing)
+    try:
+        assert _secret_service_running() is False
+    finally:
+        _secret_service_running.cache_clear()
 
 
 def test_build_passes_keyring_env(tmp_path, monkeypatch):
@@ -134,6 +182,7 @@ def test_build_passes_keyring_env(tmp_path, monkeypatch):
     adapter.config = type("C", (), {"binary": "agy"})()
 
     monkeypatch.delenv("AGENTHUB_AGY_KEYRING", raising=False)
+    monkeypatch.setattr("agenthub.agents.agy._secret_service_running", lambda: True)
     for key, value in SSH_DBUS.items():
         monkeypatch.setenv(key, value)
 
@@ -152,7 +201,6 @@ def test_build_passes_keyring_env(tmp_path, monkeypatch):
     )
 
     inv = adapter.build(req)
-    assert inv.env == _keyring_env(os.environ)
     assert inv.env == BLANK_SSH
 
 
