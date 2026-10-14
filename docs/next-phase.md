@@ -1,3 +1,13 @@
+> **Update 2026-10-14, later — E8 implemented, not yet reviewed/merged.** Design
+> `docs/superpowers/specs/2026-10-14-e8-techlead-loop-design.md` (D-101: `plan triage` + `plan close` first, `verify`
+> kind later as E8b). The techlead job `20261014-021547-techlead-c0e9` (claude:sonnet) split it into 16 tasks; the plan
+> is `~/.local/state/agent-hub/plans/e8/plan.json` (base master, slug `e8`). `plan run` finished: **all 16 tasks done**,
+> gates passed; `triage-task` and `mcp-triage-close` have `gate touched: 1` (read those hunks in review).
+> **Next:** `agent-hub plan review ~/.local/state/agent-hub/plans/e8/plan.json` → fix findings (rounds) →
+> `agent-hub plan merge …` (through `ready`, never push) → then use the new `plan triage`/`plan close` on its own
+> follow-ups (dogfood). Restart Claude Code first so the agent-hub MCP tools load (`/compact` does not reload MCP;
+> the server itself answers with all 13 tools). Then F6, E5–E7, follow-ups.
+
 > **Update 2026-10-14 — v0.10.0.** Phases C, D, F done; E partly. Read this block, then `docs/overview.md`,
 > `docs/decisions.md` (D-090..D-100), `docs/follow-ups.md`, and the user memory (pool, small tasks, techlead verifies).
 >
