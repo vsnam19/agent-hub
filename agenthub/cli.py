@@ -22,7 +22,7 @@ from agenthub.plan import PlanError
 from agenthub.plan import load as load_plan
 from agenthub.planrun import run_plan
 from agenthub.pool import Cooldowns, load_pool, parse_link
-from agenthub.procinfo import start_time
+from agenthub.procinfo import pid_file_dead, read_pid_file, start_time
 from agenthub.workers import available_skills
 
 WAIT_POLL_S = 1.0
@@ -827,11 +827,7 @@ def _cmd_show(args) -> int:
 
 def _read_pid_file(path: Path) -> tuple[int | None, int | None]:
     """Return (pid, start_time) from the JSON pid file; a legacy plain int is unverifiable."""
-    try:
-        data = json.loads(path.read_text())
-        return int(data["pid"]), int(data["start_time"])
-    except (OSError, ValueError, TypeError, KeyError):
-        return None, None
+    return read_pid_file(path)
 
 
 def _read_result(job) -> dict:
@@ -918,6 +914,22 @@ def _cmd_wait(args) -> int:
             result = {"status": "running"}
 
         if result.get("status") != "running":
+            if args.json:
+                print(json.dumps(result, indent=2))
+            else:
+                _emit(_summary(result))
+            return result.get("exit_code", 1)
+
+        pid_file = target_job.dir / "pid"
+        if pid_file_dead(pid_file):
+            try:
+                result = target_job.read_json("result.json")
+            except (OSError, ValueError):
+                pass
+            if result.get("status") == "running":
+                pid, _ = read_pid_file(pid_file)
+                print(_safe(f"job process {pid} is not running; result.json was never finished"))
+                return 1
             if args.json:
                 print(json.dumps(result, indent=2))
             else:

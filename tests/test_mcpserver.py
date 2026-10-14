@@ -349,6 +349,34 @@ def test_wait_job_running_before_result(env_sandbox, repo):
     assert res_done["state"] == "ok"
 
 
+def test_wait_job_reports_dead_process(env_sandbox, repo):
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+
+    p = paths()
+    job = new_job(p, "implement", datetime.now(timezone.utc))
+    job.write_json("result.json", {"id": job.id, "status": "running", "workdir": str(repo)})
+    (job.dir / "pid").write_text(json.dumps({"pid": proc.pid, "start_time": 123456}))
+
+    t0 = time.monotonic()
+    res = wait_job(job_id=job.id, timeout_s=5)
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 3.0
+    assert res["status"] == "failed"
+    assert res["state"] == "failed"
+    assert res["exit_code"] == 1
+    assert str(proc.pid) in res["reason"]
+    assert res["reason"] == f"job process {proc.pid} is not running; result.json was never finished"
+    assert job.read_json("result.json")["status"] == "running"
+
+    res_async = asyncio.run(wait_job_async(job_id=job.id, timeout_s=5))
+    assert res_async["status"] == "failed"
+    assert res_async["state"] == "failed"
+    assert res_async["exit_code"] == 1
+    assert res_async["reason"] == f"job process {proc.pid} is not running; result.json was never finished"
+
+
 def git_head(repo):
     res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True)
     return res.stdout.strip()
