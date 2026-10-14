@@ -1,7 +1,7 @@
 import json
 import re
 import string
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from agenthub import tasksize
@@ -42,6 +42,7 @@ class Resolution:
     findings: list[TriageFinding]
     fix_brief: str
     blocked_reason: str
+    review_text: dict[str, str] = field(default_factory=dict)
 
 
 def review_findings(reply: str) -> list[ReviewFinding]:
@@ -133,7 +134,10 @@ def _has_valid_reject_evidence(evidence: str, worktree: Path, job_ids: set[str])
         return False
 
     for job_id in job_ids:
-        if job_id and job_id in evidence:
+        if not job_id:
+            continue
+        pattern = rf"(?<![A-Za-z0-9_-]){re.escape(job_id)}(?![A-Za-z0-9_-])"
+        if re.search(pattern, evidence):
             return True
 
     for match in re.finditer(r"([^\s:()\[\]{}`'\"<>]+):(\d+)", evidence):
@@ -160,7 +164,12 @@ def _has_valid_reject_evidence(evidence: str, worktree: Path, job_ids: set[str])
                 if not target.is_relative_to(wt_resolved):
                     continue
             if target.is_file():
-                return True
+                try:
+                    num_lines = len(target.read_text(encoding="utf-8").splitlines())
+                except (OSError, UnicodeDecodeError, ValueError):
+                    continue
+                if 1 <= line_num <= num_lines:
+                    return True
         except (OSError, ValueError):
             continue
 
@@ -172,6 +181,7 @@ def resolve(
     reviewed: list[ReviewFinding],
     worktree: Path,
     job_ids: set[str],
+    unparsed: int = 0,
 ) -> Resolution:
     worktree = Path(worktree)
     job_ids = set(job_ids)
@@ -192,13 +202,23 @@ def resolve(
     missing = sorted(
         {rf.id for rf in reviewed if rf.severity.lower() in ("medium", "high") and rf.id not in triage_ids}
     )
+    reviewed_ids = {rf.id for rf in reviewed}
+    unknown = sorted({f.id for f in triage.findings if f.id not in reviewed_ids}) if reviewed else []
+    fix_ids = sorted({f.id for f in resolved_findings if f.decision == "fix"})
 
     if missing:
         blocked_reason = f"triage incomplete: {', '.join(missing)}"
+    elif unknown:
+        blocked_reason = f"triage lists unknown findings: {', '.join(unknown)}"
+    elif unparsed > 0:
+        blocked_reason = f"review findings unparsed: {unparsed}"
     elif any(f.decision == "blocked" for f in resolved_findings):
         first_blocked = next(f for f in resolved_findings if f.decision == "blocked")
-        blocked_reason = f"blocked: {first_blocked.evidence}"
-    elif any(f.decision == "fix" for f in resolved_findings):
+        evidence = first_blocked.evidence.strip() or "(no reason given)"
+        blocked_reason = f"blocked: {evidence}"
+    elif fix_ids and not triage.fix_brief.strip():
+        blocked_reason = f"fix needed for {', '.join(fix_ids)} but the triage wrote no fix brief"
+    elif any(f.decision == "fix" for f in resolved_findings) or triage.fix_brief.strip():
         problems = tasksize.check(triage.fix_brief)
         if problems:
             blocked_reason = f"fix brief too big or malformed: {'; '.join(problems)}"
@@ -211,6 +231,7 @@ def resolve(
         findings=resolved_findings,
         fix_brief=triage.fix_brief,
         blocked_reason=blocked_reason,
+        review_text={rf.id: rf.text for rf in reviewed},
     )
 
 
