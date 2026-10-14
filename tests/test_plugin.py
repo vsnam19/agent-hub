@@ -46,6 +46,12 @@ def test_plugin_manifest_fields():
         "author": {"name": "vsnam19"},
         "license": "MIT",
         "keywords": ["agents", "orchestration", "delegation", "codex", "agy"],
+        "mcpServers": {
+            "agent-hub": {
+                "command": "${CLAUDE_PLUGIN_ROOT}/bin/agent-hub",
+                "args": ["mcp"],
+            }
+        },
     }
 
     assert manifest == expected
@@ -63,21 +69,27 @@ def test_plugin_version_matches_pyproject():
     assert manifest["version"] == pyproject["project"]["version"]
 
 
-def test_plugin_declares_mcp_server():
-    mcp_path = REPO_ROOT / ".mcp.json"
-    assert mcp_path.is_file(), ".mcp.json must exist at repo root"
-    with open(mcp_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+def test_plugin_manifest_declares_mcp_server():
+    assert not (REPO_ROOT / ".mcp.json").exists(), ".mcp.json must not exist at repo root"
+    manifest_path = REPO_ROOT / ".claude-plugin" / "plugin.json"
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
 
     expected = {
-        "mcpServers": {
-            "agent-hub": {
-                "command": "${CLAUDE_PLUGIN_ROOT}/bin/agent-hub",
-                "args": ["mcp"],
-            }
+        "agent-hub": {
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/agent-hub",
+            "args": ["mcp"],
         }
     }
-    assert data == expected
+    assert manifest.get("mcpServers") == expected
+
+
+def test_skill_names_every_mcp_tool():
+    server = build_server()
+    server_tools = {t.name for t in asyncio.run(server.list_tools())}
+    text = ORCHESTRATE_SKILL.read_text(encoding="utf-8")
+    for tool_name in server_tools:
+        assert tool_name in text, f"orchestrate skill must name MCP tool {tool_name}"
 
 
 def test_readme_mcp_tools_match_server():

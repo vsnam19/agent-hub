@@ -184,12 +184,13 @@ then a local release. Nothing is pushed.
 
 ## MCP server
 
-agent-hub ships an MCP server (`agent-hub mcp`) that exposes typed tools for Claude Code, Cursor, Codex, and other MCP clients. Claude Code sessions with the agent-hub plugin get the server automatically via `.mcp.json`.
+agent-hub ships an MCP server (`agent-hub mcp`) that exposes typed tools for Claude Code, Cursor, Codex, and other MCP clients. Claude Code sessions with the agent-hub plugin start the server automatically through `bin/agent-hub` (no extra needed).
 
-Install with the optional `mcp` extra:
+A standalone install for other clients uses:
 
 ```sh
 uv tool install --editable '<repo>[mcp]'
+agent-hub mcp
 ```
 
 ### Tools
