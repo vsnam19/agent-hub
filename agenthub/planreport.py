@@ -35,12 +35,20 @@ def write_report(plan: Plan, state: State, reviews: dict[str, dict], rounds: int
 
     findings_lines: list[str] = []
     triage_path = plan_dir / "triage.jsonl"
+    skipped = 0
     if triage_path.is_file():
         for raw_line in triage_path.read_text(encoding="utf-8").splitlines():
             raw_line = raw_line.strip()
             if not raw_line:
                 continue
-            entry = json.loads(raw_line)
+            try:
+                entry = json.loads(raw_line)
+            except Exception:
+                skipped += 1
+                continue
+            if not isinstance(entry, dict):
+                skipped += 1
+                continue
             task_name = entry.get("task", "")
             round_num = entry.get("round", "")
             for f in entry.get("findings", []):
@@ -49,6 +57,9 @@ def write_report(plan: Plan, state: State, reviews: dict[str, dict], rounds: int
                 decision = f.get("decision", "")
                 evidence = f.get("evidence", "")
                 findings_lines.append(f"- {task_name} round {round_num} {fid} ({sev}) {decision}: {evidence}")
+
+    if skipped > 0:
+        findings_lines.append(f"- triage.jsonl: {skipped} unreadable line(s) skipped")
 
     if findings_lines:
         lines.extend(findings_lines)
