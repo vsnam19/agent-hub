@@ -20,7 +20,7 @@ from agenthub.jobs import get_job, list_jobs
 from agenthub.orchestrate import readiness, skills_hint
 from agenthub.plan import load as load_plan
 from agenthub.pool import Cooldowns, load_pool, parse_link
-from agenthub.procinfo import is_running, start_time
+from agenthub.procinfo import is_running, pid_file_dead, read_pid_file, start_time
 from agenthub.workers import available_skills
 
 if TYPE_CHECKING:
@@ -482,6 +482,24 @@ def wait_job(
         if result.get("status") != "running":
             return _format_wait_result(result)
 
+        pid_file = target_job.dir / "pid"
+        if pid_file_dead(pid_file):
+            try:
+                result = target_job.read_json("result.json")
+            except (OSError, ValueError):
+                pass
+            if result.get("status") == "running":
+                pid, _ = read_pid_file(pid_file)
+                return _format_wait_result(
+                    {
+                        **result,
+                        "status": "failed",
+                        "exit_code": 1,
+                        "reason": f"job process {pid} is not running; result.json was never finished",
+                    }
+                )
+            return _format_wait_result(result)
+
         time.sleep(0.1)
 
     return {"state": "running"}
@@ -522,6 +540,24 @@ async def wait_job_async(
             continue
 
         if result.get("status") != "running":
+            return _format_wait_result(result)
+
+        pid_file = target_job.dir / "pid"
+        if pid_file_dead(pid_file):
+            try:
+                result = target_job.read_json("result.json")
+            except (OSError, ValueError):
+                pass
+            if result.get("status") == "running":
+                pid, _ = read_pid_file(pid_file)
+                return _format_wait_result(
+                    {
+                        **result,
+                        "status": "failed",
+                        "exit_code": 1,
+                        "reason": f"job process {pid} is not running; result.json was never finished",
+                    }
+                )
             return _format_wait_result(result)
 
         await asyncio.sleep(0.1)
