@@ -20,7 +20,7 @@ from agenthub.jobs import get_job, list_jobs
 from agenthub.orchestrate import readiness, skills_hint
 from agenthub.plan import load as load_plan
 from agenthub.pool import Cooldowns, load_pool, parse_link
-from agenthub.procinfo import is_running
+from agenthub.procinfo import is_running, start_time
 from agenthub.workers import available_skills
 
 if TYPE_CHECKING:
@@ -994,6 +994,47 @@ def plan_merge(
     return {"merged": merged, "stopped_at": stopped_at}
 
 
+def _dead_runner_pid(plan_dir: Path, state_data: dict[str, Any]) -> int | None:
+    """Pid of the recorded plan runner when it is gone or its pid was reused, else None."""
+    runner: Any = None
+    try:
+        runner = json.loads((plan_dir / "runner.pid").read_text())
+    except (OSError, ValueError):
+        pass
+    if not isinstance(runner, dict):
+        runner = state_data.get("runner")
+    if not isinstance(runner, dict):
+        return None
+    pid = runner.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        return None
+    if not is_running(pid) or start_time(pid) != runner.get("start_time"):
+        return pid
+    return None
+
+
+def _plan_stalled(
+    plan_file: Path, plan_dir: Path, state_file: Path, state_data: dict[str, Any], p: Paths
+) -> dict[str, Any] | None:
+    """Stalled result when tasks are unfinished and the runner is dead; None otherwise."""
+    pid = _dead_runner_pid(plan_dir, state_data)
+    if pid is None:
+        return None
+    try:
+        with open(state_file, "r") as f:
+            fresh = json.load(f)
+    except (OSError, ValueError):
+        fresh = state_data
+    tasks_data = fresh.get("tasks", {})
+    if not any(ts.get("status") in ("pending", "running") for ts in tasks_data.values()):
+        return plan_status(plan_path=str(plan_file), trail=False, p=p)
+    return {
+        "state": "stalled",
+        "reason": f"plan runner {pid} is not running; tasks still pending/running",
+        **plan_status(plan_path=str(plan_file), trail=False, p=p),
+    }
+
+
 def plan_wait(
     plan_path: str,
     timeout_s: Any = 60,
@@ -1032,6 +1073,9 @@ def plan_wait(
         tasks_data = state_data.get("tasks", {})
         if tasks_data and not any(ts.get("status") in ("pending", "running") for ts in tasks_data.values()):
             return plan_status(plan_path=str(plan_file), trail=False, p=p)
+        stalled = _plan_stalled(plan_file, plan_dir, state_file, state_data, p)
+        if stalled is not None:
+            return stalled
 
         time.sleep(0.1)
 
@@ -1076,6 +1120,9 @@ async def plan_wait_async(
         tasks_data = state_data.get("tasks", {})
         if tasks_data and not any(ts.get("status") in ("pending", "running") for ts in tasks_data.values()):
             return plan_status(plan_path=str(plan_file), trail=False, p=p)
+        stalled = _plan_stalled(plan_file, plan_dir, state_file, state_data, p)
+        if stalled is not None:
+            return stalled
 
         await asyncio.sleep(0.1)
 

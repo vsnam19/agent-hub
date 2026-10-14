@@ -1249,6 +1249,43 @@ def test_plan_status_matches_cli(env_sandbox, repo, tmp_path):
     assert "task started" in res_cli_trail.stdout
 
 
+def _stalled_plan(env_sandbox, repo, tmp_path, runner):
+    plan_file = make_plan_file(tmp_path, repo)
+    plan_dir = plan_file.parent
+    (plan_dir / "state.json").write_text(json.dumps({"tasks": {"t1": {"status": "running"}}}))
+    (plan_dir / "runner.pid").write_text(json.dumps(runner))
+    return plan_file
+
+
+def test_plan_wait_stalled_when_runner_dead(env_sandbox, repo, tmp_path):
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    plan_file = _stalled_plan(env_sandbox, repo, tmp_path, {"pid": proc.pid, "start_time": 1})
+    t0 = time.monotonic()
+    res = plan_wait(str(plan_file), timeout_s=5)
+    assert time.monotonic() - t0 < 3
+    assert res["state"] == "stalled"
+    assert str(proc.pid) in res["reason"]
+
+
+def test_plan_wait_running_when_runner_alive(env_sandbox, repo, tmp_path):
+    from agenthub.procinfo import start_time
+
+    plan_file = _stalled_plan(env_sandbox, repo, tmp_path, {"pid": os.getpid(), "start_time": start_time(os.getpid())})
+    assert plan_wait(str(plan_file), timeout_s=1)["state"] == "running"
+
+
+def test_plan_wait_stalled_when_pid_reused(env_sandbox, repo, tmp_path):
+    from agenthub.procinfo import start_time
+
+    plan_file = _stalled_plan(
+        env_sandbox, repo, tmp_path, {"pid": os.getpid(), "start_time": start_time(os.getpid()) + 1}
+    )
+    res = plan_wait(str(plan_file), timeout_s=5)
+    assert res["state"] == "stalled"
+    assert str(os.getpid()) in res["reason"]
+
+
 def test_plan_wait_bounded(env_sandbox, repo, tmp_path, monkeypatch):
     assert clamp_timeout(0) == 1
     assert clamp_timeout(-10) == 1
