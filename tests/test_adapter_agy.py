@@ -1,10 +1,11 @@
 import os
+import subprocess
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from agenthub.agents import Outcome, Request
-from agenthub.agents.agy import AgyAdapter
+from agenthub.agents.agy import AgyAdapter, _keyring_env, _secret_service_running
 from agenthub.process import run
 
 
@@ -103,6 +104,106 @@ def test_agy_build_review_argv(tmp_path):
     assert (attempt / "brief.md").read_text() == "hello"
 
 
+BLANK_SSH = {"SSH_CONNECTION": "", "SSH_CLIENT": "", "SSH_TTY": ""}
+SSH_DBUS = {"SSH_CONNECTION": "10.0.0.2 22 10.0.0.1 5000", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}
+
+
+SSH_ONLY = {"SSH_CONNECTION": "10.0.0.2 22 10.0.0.1 5000"}
+
+
+def test_keyring_env_blanks_under_ssh_with_secret_service():
+    assert _keyring_env(SSH_ONLY, secret_service=lambda: True) == BLANK_SSH
+
+
+def test_keyring_env_none_under_ssh_without_secret_service():
+    assert _keyring_env(SSH_DBUS, secret_service=lambda: False) is None
+
+
+def test_keyring_env_none_without_ssh():
+    assert (
+        _keyring_env({"DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}, secret_service=lambda: True) is None
+    )
+    assert _keyring_env({}, secret_service=lambda: True) is None
+
+
+def test_keyring_env_forced_on():
+    assert _keyring_env({"AGENTHUB_AGY_KEYRING": "1"}, secret_service=lambda: False) == BLANK_SSH
+
+
+def test_keyring_env_forced_off():
+    assert _keyring_env({"AGENTHUB_AGY_KEYRING": "0", **SSH_DBUS}, secret_service=lambda: True) is None
+
+
+def _fake_dbus(monkeypatch, returncode, stdout):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return calls
+
+
+def test_secret_service_running_parses_true(monkeypatch):
+    _secret_service_running.cache_clear()
+    calls = _fake_dbus(monkeypatch, 0, "method return time=1 sender=org.freedesktop.DBus\n   boolean true\n")
+    try:
+        assert _secret_service_running() is True
+        assert calls and "org.freedesktop.secrets" in calls[0][-1]
+    finally:
+        _secret_service_running.cache_clear()
+
+
+def test_secret_service_running_false(monkeypatch):
+    _secret_service_running.cache_clear()
+    _fake_dbus(monkeypatch, 0, "method return time=1 sender=org.freedesktop.DBus\n   boolean false\n")
+    try:
+        assert _secret_service_running() is False
+    finally:
+        _secret_service_running.cache_clear()
+
+
+def test_secret_service_running_missing_binary(monkeypatch):
+    _secret_service_running.cache_clear()
+
+    def missing(argv, **kwargs):
+        raise FileNotFoundError("dbus-send")
+
+    monkeypatch.setattr(subprocess, "run", missing)
+    try:
+        assert _secret_service_running() is False
+    finally:
+        _secret_service_running.cache_clear()
+
+
+def test_build_passes_keyring_env(tmp_path, monkeypatch):
+    adapter = AgyAdapter()
+    adapter.config = type("C", (), {"binary": "agy"})()
+
+    monkeypatch.delenv("AGENTHUB_AGY_KEYRING", raising=False)
+    monkeypatch.setattr("agenthub.agents.agy._secret_service_running", lambda: True)
+    for key, value in SSH_DBUS.items():
+        monkeypatch.setenv(key, value)
+
+    brief = tmp_path / "b.md"
+    brief.write_text("hello")
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+
+    req = Request(
+        role="implement",
+        model="m",
+        workdir=tmp_path,
+        brief_path=brief,
+        attempt_dir=attempt,
+        git_common_dir=tmp_path,
+    )
+
+    inv = adapter.build(req)
+    assert inv.env == BLANK_SSH
+
+
 def run_fake(env_sandbox, adapter, scenario, req):
     os.environ["FAKE_AGY_SCENARIO"] = scenario
     inv = adapter.build(req)
@@ -160,6 +261,19 @@ def test_agy_quota_reset_time_parsed(env_sandbox, adapter_agy, req_agy):
 
 def test_agy_classify_auth(env_sandbox, adapter_agy, req_agy):
     c = run_fake(env_sandbox, adapter_agy, "auth", req_agy)
+    assert c.outcome == Outcome.AUTH
+
+
+def test_classify_auth_timeout_is_auth(adapter_agy, tmp_path):
+    attempt = tmp_path / "auth-timeout"
+    attempt.mkdir()
+    (attempt / "stdout").write_text("")
+    (attempt / "stderr").write_text(
+        "Waiting for authentication (timeout 60s)...\n"
+        "Error: authentication timed out.\n"
+        "error: authentication failed or timed out\n"
+    )
+    c = adapter_agy.classify(1, attempt)
     assert c.outcome == Outcome.AUTH
 
 
