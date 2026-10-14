@@ -101,10 +101,11 @@ def test_blocked_finding_blocks_task(tmp_path):
 
 def test_oversized_fix_brief_blocks(tmp_path):
     finding = TriageFinding(id="F1", severity="high", decision="fix", evidence="")
-    triage = Triage(findings=[finding], fix_brief="")
+    bad_brief = "invalid brief without headings"
+    triage = Triage(findings=[finding], fix_brief=bad_brief)
     reviewed = [ReviewFinding(id="F1", severity="high", text="high issue")]
 
-    problems = check("")
+    problems = check(bad_brief)
     expected_reason = f"fix brief too big or malformed: {'; '.join(problems)}"
 
     res = resolve(triage, reviewed, tmp_path, set())
@@ -206,6 +207,17 @@ def test_order_of_checks_blocked_before_fix_brief(tmp_path):
 
     assert res.blocked_reason == "blocked: director needed"
 
+    # Precedence: blocked before missing fix brief check as well
+    triage_empty = Triage(
+        findings=[
+            TriageFinding(id="F1", severity="high", decision="blocked", evidence="director needed"),
+            TriageFinding(id="F2", severity="medium", decision="fix", evidence=""),
+        ],
+        fix_brief="",
+    )
+    res_empty = resolve(triage_empty, reviewed, tmp_path, set())
+    assert res_empty.blocked_reason == "blocked: director needed"
+
 
 def test_no_fix_findings_skips_fix_brief_check(tmp_path):
     foo = tmp_path / "foo.py"
@@ -214,13 +226,130 @@ def test_no_fix_findings_skips_fix_brief_check(tmp_path):
     reviewed = [ReviewFinding(id="F1", severity="high", text="issue")]
     triage = Triage(
         findings=[TriageFinding(id="F1", severity="high", decision="reject", evidence="foo.py:1")],
-        fix_brief="not a valid brief",
+        fix_brief="",
     )
 
     res = resolve(triage, reviewed, tmp_path, set())
 
     assert res.findings[0].decision == "reject"
     assert res.blocked_reason == ""
+
+
+def test_fix_brief_checked_without_fix_findings(tmp_path):
+    foo = tmp_path / "foo.py"
+    foo.write_text("content\n")
+
+    reviewed = [ReviewFinding(id="F1", severity="high", text="issue")]
+    bad_brief = "not a valid brief"
+    problems = check(bad_brief)
+    triage = Triage(
+        findings=[TriageFinding(id="F1", severity="high", decision="reject", evidence="foo.py:1")],
+        fix_brief=bad_brief,
+    )
+
+    res = resolve(triage, reviewed, tmp_path, set())
+
+    assert res.findings[0].decision == "reject"
+    assert res.blocked_reason == f"fix brief too big or malformed: {'; '.join(problems)}"
+
+
+def test_unknown_triage_ids_block(tmp_path):
+    foo = tmp_path / "foo.py"
+    foo.write_text("content\n")
+
+    reviewed = [
+        ReviewFinding(id="F1", severity="high", text="issue 1"),
+        ReviewFinding(id="F2", severity="medium", text="issue 2"),
+    ]
+    triage = Triage(
+        findings=[
+            TriageFinding(id="F1", severity="high", decision="reject", evidence="foo.py:1"),
+            TriageFinding(id="F2", severity="medium", decision="reject", evidence="foo.py:1"),
+            TriageFinding(id="F7", severity="low", decision="blocked", evidence="waiting"),
+            TriageFinding(id="F3", severity="high", decision="fix", evidence=""),
+        ],
+        fix_brief=VALID_FIX_BRIEF,
+    )
+
+    res = resolve(triage, reviewed, tmp_path, set())
+    assert res.blocked_reason == "triage lists unknown findings: F3, F7"
+
+    # Precedence: missing ids comes before unknown ids
+    triage_missing_and_unknown = Triage(
+        findings=[
+            TriageFinding(id="F1", severity="high", decision="reject", evidence="foo.py:1"),
+            TriageFinding(id="F7", severity="low", decision="fix", evidence=""),
+        ],
+        fix_brief=VALID_FIX_BRIEF,
+    )
+    res_missing = resolve(triage_missing_and_unknown, reviewed, tmp_path, set())
+    assert res_missing.blocked_reason == "triage incomplete: F2"
+
+    # Precedence: unknown ids comes before unparsed
+    res_unparsed = resolve(triage, reviewed, tmp_path, set(), unparsed=3)
+    assert res_unparsed.blocked_reason == "triage lists unknown findings: F3, F7"
+
+    # When reviewed is empty, unknown check does not trigger
+    triage_gate = Triage(
+        findings=[TriageFinding(id="F1", severity="high", decision="reject", evidence="foo.py:1")],
+        fix_brief="",
+    )
+    res_gate = resolve(triage_gate, [], tmp_path, set())
+    assert res_gate.blocked_reason == ""
+
+
+def test_blocked_without_evidence_has_reason(tmp_path):
+    finding_empty = TriageFinding(id="F1", severity="low", decision="blocked", evidence="")
+    triage_empty = Triage(findings=[finding_empty], fix_brief="")
+    reviewed = [ReviewFinding(id="F1", severity="low", text="low issue")]
+
+    res_empty = resolve(triage_empty, reviewed, tmp_path, set())
+    assert res_empty.blocked_reason == "blocked: (no reason given)"
+
+    # Also test whitespace-only evidence
+    finding_ws = TriageFinding(id="F1", severity="low", decision="blocked", evidence="   \t\n")
+    triage_ws = Triage(findings=[finding_ws], fix_brief="")
+    res_ws = resolve(triage_ws, reviewed, tmp_path, set())
+    assert res_ws.blocked_reason == "blocked: (no reason given)"
+
+
+def test_fix_without_brief_blocks_with_clear_reason(tmp_path):
+    # Direct fix finding with empty fix_brief
+    finding1 = TriageFinding(id="F1", severity="high", decision="fix", evidence="")
+    triage1 = Triage(findings=[finding1], fix_brief="")
+    reviewed1 = [ReviewFinding(id="F1", severity="high", text="high issue")]
+
+    res1 = resolve(triage1, reviewed1, tmp_path, set())
+    assert res1.blocked_reason == "fix needed for F1 but the triage wrote no fix brief"
+
+    # Reject downgraded to fix with whitespace-only fix_brief
+    finding_downgraded = TriageFinding(
+        id="F2",
+        severity="low",
+        decision="reject",
+        evidence="invalid evidence",
+    )
+    triage2 = Triage(findings=[finding_downgraded], fix_brief="   \n")
+    reviewed2 = [ReviewFinding(id="F2", severity="low", text="low issue")]
+
+    res2 = resolve(triage2, reviewed2, tmp_path, set())
+    assert res2.findings[0].decision == "fix"
+    assert res2.blocked_reason == "fix needed for F2 but the triage wrote no fix brief"
+
+    # Multiple fix findings sorted and comma-separated
+    triage3 = Triage(
+        findings=[
+            TriageFinding(id="F3", severity="medium", decision="fix", evidence=""),
+            TriageFinding(id="F1", severity="high", decision="fix", evidence=""),
+        ],
+        fix_brief="",
+    )
+    reviewed3 = [
+        ReviewFinding(id="F1", severity="high", text="high issue"),
+        ReviewFinding(id="F3", severity="medium", text="medium issue"),
+    ]
+    res3 = resolve(triage3, reviewed3, tmp_path, set())
+    assert res3.blocked_reason == "fix needed for F1, F3 but the triage wrote no fix brief"
 
 
 def test_reject_line_past_end_becomes_fix(tmp_path):

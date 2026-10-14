@@ -196,15 +196,23 @@ def resolve(
     missing = sorted(
         {rf.id for rf in reviewed if rf.severity.lower() in ("medium", "high") and rf.id not in triage_ids}
     )
+    reviewed_ids = {rf.id for rf in reviewed}
+    unknown = sorted({f.id for f in triage.findings if f.id not in reviewed_ids}) if reviewed else []
+    fix_ids = sorted({f.id for f in resolved_findings if f.decision == "fix"})
 
     if missing:
         blocked_reason = f"triage incomplete: {', '.join(missing)}"
+    elif unknown:
+        blocked_reason = f"triage lists unknown findings: {', '.join(unknown)}"
     elif unparsed > 0:
         blocked_reason = f"review findings unparsed: {unparsed}"
     elif any(f.decision == "blocked" for f in resolved_findings):
         first_blocked = next(f for f in resolved_findings if f.decision == "blocked")
-        blocked_reason = f"blocked: {first_blocked.evidence}"
-    elif any(f.decision == "fix" for f in resolved_findings) or (not triage.findings and triage.fix_brief.strip()):
+        evidence = first_blocked.evidence.strip() or "(no reason given)"
+        blocked_reason = f"blocked: {evidence}"
+    elif fix_ids and not triage.fix_brief.strip():
+        blocked_reason = f"fix needed for {', '.join(fix_ids)} but the triage wrote no fix brief"
+    elif any(f.decision == "fix" for f in resolved_findings) or triage.fix_brief.strip():
         problems = tasksize.check(triage.fix_brief)
         if problems:
             blocked_reason = f"fix brief too big or malformed: {'; '.join(problems)}"
