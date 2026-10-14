@@ -24,6 +24,19 @@ def _blocked(task: Task, tstate: TaskState, reason: str) -> dict:
     }
 
 
+def _rejected_sort_key(task_name: str, path: Path) -> tuple[int, int, str]:
+    prefix = f"{task_name}-"
+    suffix = "-rejected.md"
+    name = path.name
+    if name.startswith(prefix) and name.endswith(suffix):
+        raw = name[len(prefix) : len(name) - len(suffix)]
+        try:
+            return (0, int(raw), name)
+        except ValueError:
+            pass
+    return (1, 0, name)
+
+
 def triage_task(
     plan: Plan,
     task: Task,
@@ -42,7 +55,10 @@ def triage_task(
 
     plan_dir = plan.path.parent
     task_brief = task.brief.read_text() if task.brief and task.brief.is_file() else ""
-    rejected = sorted((plan_dir / "fixes").glob(f"{task.name}-*-rejected.md"))
+    rejected = sorted(
+        (plan_dir / "fixes").glob(f"{task.name}-*-rejected.md"),
+        key=lambda p: _rejected_sort_key(task.name, p),
+    )
     answered = "\n".join(p.read_text() for p in rejected)
     brief = triage.triage_brief(
         task_brief,
@@ -78,6 +94,12 @@ def triage_task(
     except (triage.TriageError, OSError) as e:
         return _blocked(task, tstate, f"triage reply invalid: {e}")
 
-    resolution = triage.resolve(parsed, inputs.findings, worktree, inputs.job_ids)
+    resolution = triage.resolve(
+        parsed,
+        inputs.findings,
+        worktree,
+        inputs.job_ids,
+        unparsed=triage.unparsed_findings(inputs.review_reply),
+    )
     summary = triageapply.apply(plan_dir, task.name, tstate, resolution, inputs.review_job)
     return {**summary, "task": task.name}
