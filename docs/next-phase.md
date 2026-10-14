@@ -1,3 +1,24 @@
+> **Update 2026-10-14, night — deadlock + agy fixes merged; E8 review results on disk.** Merged on master (not
+> pushed): plan `deadlock` (`plan_review` reaps its runner, zombie-aware waits, `plan_wait` → `stalled` on a dead
+> runner) and `fix/agy-ssh-auth` (agy headless works under SSH via the keyring). Released as **v0.10.1** (plugin
+> installed; MCP server smoke-tested). The installed CLI is an editable install of this repo.
+> **E8 review is done; do not re-run it.** Results:
+> `~/.local/state/agent-hub/mcp/plan-review/review-e8-1791955390390950145.json` (16 lines: 6 approve,
+> 7 request-changes, 3 failed because agy auth was broken → re-review those on agy). Next: fix E8 findings by rounds,
+> then `plan merge`. Wait rule: never `kill -0 <pid>`; wait on result files with a waiter that also exits on a
+> dead/zombie process (see `docs/follow-ups.md` "Director deadlock avoidance"). `wait_job`/`agent-hub wait` also detect a dead
+> job (`fix/wait-job-dead`, merged).
+
+> **Update 2026-10-14, later — E8 implemented, not yet reviewed/merged.** Design
+> `docs/superpowers/specs/2026-10-14-e8-techlead-loop-design.md` (D-101: `plan triage` + `plan close` first, `verify`
+> kind later as E8b). The techlead job `20261014-021547-techlead-c0e9` (claude:sonnet) split it into 16 tasks; the plan
+> is `~/.local/state/agent-hub/plans/e8/plan.json` (base master, slug `e8`). `plan run` finished: **all 16 tasks done**,
+> gates passed; `triage-task` and `mcp-triage-close` have `gate touched: 1` (read those hunks in review).
+> **Next:** `agent-hub plan review ~/.local/state/agent-hub/plans/e8/plan.json` → fix findings (rounds) →
+> `agent-hub plan merge …` (through `ready`, never push) → then use the new `plan triage`/`plan close` on its own
+> follow-ups (dogfood). Restart Claude Code first so the agent-hub MCP tools load (`/compact` does not reload MCP;
+> the server itself answers with all 13 tools). Then F6, E5–E7, follow-ups.
+
 > **Update 2026-10-14 — v0.10.0.** Phases C, D, F done; E partly. Read this block, then `docs/overview.md`,
 > `docs/decisions.md` (D-090..D-100), `docs/follow-ups.md`, and the user memory (pool, small tasks, techlead verifies).
 >
