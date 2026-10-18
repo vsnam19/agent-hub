@@ -1058,7 +1058,7 @@ def plan_merge(
     target = into or plan.base
     tasks = [t for t in merge_order(plan) if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"]
     if not tasks:
-        return {"merged": [], "stopped_at": None}
+        return {"merged": [], "stopped_at": None, "error": "no done tasks to merge"}
 
     try:
         problem = merge_target_problem(plan.repo, target)
