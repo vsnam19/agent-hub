@@ -448,3 +448,167 @@ def test_autopilot_only_from_cwd_repo(tmp_path):
     assert res2 is not None
     ctx = res2["hookSpecificOutput"]["additionalContext"]
     assert "owner's resume protocol: docs/next-phase.md AUTOPILOT" in ctx
+
+
+def test_session_start_reports_failed_task_plan(tmp_path):
+    repo = make_repo(tmp_path / "repo")
+    p = paths()
+
+    plan_dir = p.state_dir / "plans" / "plan-failed"
+    plan_dir.mkdir(parents=True, exist_ok=True)
+    (plan_dir / "plan.json").write_text(
+        json.dumps(
+            {
+                "slug": "plan-failed",
+                "repo": str(repo),
+                "tasks": [
+                    {"name": "task-1"},
+                    {"name": "task-2"},
+                    {"name": "task-3"},
+                    {"name": "task-4"},
+                ],
+            }
+        )
+    )
+    (plan_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "slug": "plan-failed",
+                "tasks": {
+                    "task-1": {"status": "failed"},
+                    "task-2": {"status": "cancelled"},
+                    "task-3": {"status": "skipped"},
+                    "task-4": {"status": "scope-violation"},
+                },
+            }
+        )
+    )
+
+    payload = {"cwd": str(repo), "session_id": "sess-failed", "hook_event_name": "SessionStart"}
+    res = session_start(payload, p)
+    assert res is not None
+    ctx = res["hookSpecificOutput"]["additionalContext"]
+    assert "plan-failed" in ctx
+    assert "1 failed" in ctx
+    assert "1 cancelled" in ctx
+    assert "1 skipped" in ctx
+    assert "1 scope-violation" in ctx
+
+
+def test_hook_skips_malformed_job_record(tmp_path):
+    repo = make_repo(tmp_path / "repo")
+    p = paths()
+
+    # Valid running job
+    job = new_job(p, "implement", datetime.now(timezone.utc))
+    job.write_json(
+        "result.json",
+        {"id": job.id, "role": "implement", "status": "running", "workdir": str(repo)},
+    )
+    pid = os.getpid()
+    st = start_time(pid)
+    (job.dir / "pid").write_text(json.dumps({"pid": pid, "start_time": st}))
+
+    # Malformed job: lacks "id"
+    malformed_dir = p.jobs_dir / "20261018-120000-implement-beef"
+    malformed_dir.mkdir(parents=True, exist_ok=True)
+    (malformed_dir / "result.json").write_text(
+        json.dumps({"role": "implement", "status": "running", "workdir": str(repo)})
+    )
+
+    # Another malformed job: non-string fields
+    malformed_dir2 = p.jobs_dir / "20261018-120001-implement-feed"
+    malformed_dir2.mkdir(parents=True, exist_ok=True)
+    (malformed_dir2 / "result.json").write_text(json.dumps({"id": 12345, "status": 999, "workdir": True}))
+
+    # Plan with task whose status is not a string
+    plan_dir = p.state_dir / "plans" / "plan-bad-task"
+    plan_dir.mkdir(parents=True, exist_ok=True)
+    (plan_dir / "plan.json").write_text(
+        json.dumps({"slug": "plan-bad-task", "repo": str(repo), "tasks": [{"name": "bad"}]})
+    )
+    (plan_dir / "state.json").write_text(json.dumps({"slug": "plan-bad-task", "tasks": {"bad": {"status": 12345}}}))
+
+    # Non-string session_id
+    payload = {"cwd": str(repo), "session_id": 99999, "hook_event_name": "SessionStart"}
+
+    # session_start should skip malformed jobs and still report the valid running job
+    res_start = session_start(payload, p)
+    assert res_start is not None
+    ctx = res_start["hookSpecificOutput"]["additionalContext"]
+    assert job.id in ctx
+
+    # Also test via main for session-start
+    stdin_start = io.StringIO(json.dumps(payload))
+    stdout_start = io.StringIO()
+    rc_start = main("session-start", stdin_start, stdout_start, p=p)
+    assert rc_start == 0
+    assert job.id in stdout_start.getvalue()
+
+    # stop should skip malformed jobs and still block because of the valid running job
+    payload_stop = {"cwd": str(repo), "session_id": 99999, "hook_event_name": "Stop"}
+    res_stop = stop(payload_stop, p)
+    assert res_stop is not None
+    assert res_stop.get("decision") == "block"
+    assert job.id in res_stop["reason"]
+
+    # Also test via main for stop
+    stdin_stop = io.StringIO(json.dumps(payload_stop))
+    stdout_stop = io.StringIO()
+    rc_stop = main("stop", stdin_stop, stdout_stop, p=p)
+    assert rc_stop == 0
+    assert job.id in stdout_stop.getvalue()
+    assert "block" in stdout_stop.getvalue()
+
+
+def test_stop_does_not_run_git_for_plans(tmp_path, monkeypatch):
+    repo = make_repo(tmp_path / "repo")
+    p = paths()
+
+    # Create a plan with a live runner
+    plan_dir = p.state_dir / "plans" / "plan-stop-test"
+    plan_dir.mkdir(parents=True, exist_ok=True)
+    plan_file = plan_dir / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "slug": "plan-stop-test",
+                "repo": str(repo),
+                "tasks": [{"name": "task-1"}],
+            }
+        )
+    )
+    pid = os.getpid()
+    st = start_time(pid)
+    (plan_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "runner": {"pid": pid, "start_time": st},
+                "tasks": {"task-1": {"status": "done", "branch": "orch/stop-test/task-1"}},
+            }
+        )
+    )
+
+    recorded_cmds: list[list[str]] = []
+    real_run = subprocess.run
+
+    def recording_run(cmd, *args, **kwargs):
+        if isinstance(cmd, (list, tuple)):
+            recorded_cmds.append(list(cmd))
+        else:
+            recorded_cmds.append([str(cmd)])
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", recording_run)
+
+    payload = {"cwd": str(repo), "session_id": "sess-stop-git", "hook_event_name": "Stop"}
+    res = stop(payload, p)
+    assert res is not None
+    assert res.get("decision") == "block"
+    assert "plan runner plan-stop-test" in res["reason"]
+
+    # Verify that stop did not invoke git for-each-ref or git branch --merged
+    for cmd in recorded_cmds:
+        cmd_str = " ".join(cmd)
+        assert "for-each-ref" not in cmd_str
+        assert "--merged" not in cmd_str

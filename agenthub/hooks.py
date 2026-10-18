@@ -130,7 +130,7 @@ def _is_unmerged_done(
     orch_cache: dict[Path, set[str]],
     merged_cache: dict[tuple[Path, str], set[str]],
 ) -> bool:
-    if not t_branch:
+    if not t_branch or not isinstance(t_branch, str):
         return False
     if t_branch.startswith("refs/heads/"):
         t_branch = t_branch[len("refs/heads/") :]
@@ -147,15 +147,24 @@ def _is_unmerged_done(
 def _get_alive_running_jobs(p: Paths, worktrees: set[Path]) -> list[dict]:
     alive_jobs = []
     for r in list_jobs(p, ALL_JOBS):
-        if r.get("status") != "running":
+        if not isinstance(r, dict):
             continue
+        job_id = r.get("id")
         workdir_str = r.get("workdir")
+        status = r.get("status")
+        if not isinstance(job_id, str) or not isinstance(workdir_str, str) or not isinstance(status, str):
+            continue
+        if status != "running":
+            continue
         if not workdir_str:
             continue
-        workdir = Path(workdir_str).resolve()
+        try:
+            workdir = Path(workdir_str).resolve()
+        except Exception:
+            continue
         if not any(workdir == wt or workdir.is_relative_to(wt) for wt in worktrees):
             continue
-        pid_file = p.jobs_dir / r["id"] / "pid"
+        pid_file = p.jobs_dir / job_id / "pid"
         pid, recorded = read_pid_file(pid_file)
         if pid is not None and recorded is not None and is_running(pid) and start_time(pid) == recorded:
             alive_jobs.append(r)
@@ -185,9 +194,12 @@ def _get_plans_info(p: Paths, repo: Path, worktrees: set[Path]) -> list[dict]:
             continue
 
         plan_repo_str = plan_data.get("repo")
-        if not plan_repo_str:
+        if not plan_repo_str or not isinstance(plan_repo_str, str):
             continue
-        plan_repo = Path(plan_repo_str).resolve()
+        try:
+            plan_repo = Path(plan_repo_str).resolve()
+        except Exception:
+            continue
         if plan_repo != repo and plan_repo not in worktrees:
             continue
 
@@ -213,24 +225,39 @@ def _get_plans_info(p: Paths, repo: Path, worktrees: set[Path]) -> list[dict]:
             for t in plan_tasks:
                 t_name = t.get("name") if isinstance(t, dict) else str(t)
                 ts = state_tasks.get(t_name, {}) if isinstance(state_tasks, dict) else {}
-                status = ts.get("status", "pending") if isinstance(ts, dict) else "pending"
+                if isinstance(ts, dict) and "status" in ts:
+                    status = ts["status"]
+                elif isinstance(t, dict) and "status" in t:
+                    status = t["status"]
+                else:
+                    status = "pending"
+                if not isinstance(status, str):
+                    continue
                 counts[status] += 1
-                if status in ("pending", "running", "blocked"):
-                    has_unmerged = True
-                elif status == "done":
+                if status == "done":
                     t_branch = ts.get("branch", "") if isinstance(ts, dict) else ""
+                    if not isinstance(t_branch, str):
+                        t_branch = ""
                     if _is_unmerged_done(t_branch, plan_repo, base, orch_cache, merged_cache):
                         has_unmerged = True
+                else:
+                    has_unmerged = True
         elif isinstance(state_tasks, dict) and state_tasks:
             for _t_name, ts in state_tasks.items():
-                status = ts.get("status", "pending") if isinstance(ts, dict) else "pending"
+                if not isinstance(ts, dict):
+                    continue
+                status = ts.get("status", "pending")
+                if not isinstance(status, str):
+                    continue
                 counts[status] += 1
-                if status in ("pending", "running", "blocked"):
-                    has_unmerged = True
-                elif status == "done":
-                    t_branch = ts.get("branch", "") if isinstance(ts, dict) else ""
+                if status == "done":
+                    t_branch = ts.get("branch", "")
+                    if not isinstance(t_branch, str):
+                        t_branch = ""
                     if _is_unmerged_done(t_branch, plan_repo, base, orch_cache, merged_cache):
                         has_unmerged = True
+                else:
+                    has_unmerged = True
 
         plans_info.append(
             {
@@ -244,8 +271,50 @@ def _get_plans_info(p: Paths, repo: Path, worktrees: set[Path]) -> list[dict]:
     return plans_info
 
 
+def _get_live_plan_runners(p: Paths, repo: Path, worktrees: set[Path]) -> list[dict]:
+    plans_dir = p.state_dir / "plans"
+    if not plans_dir.is_dir():
+        return []
+
+    live_runners = []
+    for plan_dir in sorted(plans_dir.iterdir()):
+        if not plan_dir.is_dir():
+            continue
+        plan_file = plan_dir / "plan.json"
+        if not plan_file.is_file():
+            continue
+        try:
+            plan_data = json.loads(plan_file.read_text())
+            if not isinstance(plan_data, dict):
+                continue
+        except (OSError, ValueError):
+            continue
+
+        plan_repo_str = plan_data.get("repo")
+        if not plan_repo_str or not isinstance(plan_repo_str, str):
+            continue
+        try:
+            plan_repo = Path(plan_repo_str).resolve()
+        except Exception:
+            continue
+        if plan_repo != repo and plan_repo not in worktrees:
+            continue
+
+        runner_pid = live_runner(plan_dir, exclude_self=False)
+        if runner_pid is not None:
+            slug = plan_data.get("slug") or plan_dir.name
+            live_runners.append(
+                {
+                    "slug": slug,
+                    "dir": plan_dir,
+                }
+            )
+    return live_runners
+
+
 def session_start(payload: dict, p: Paths) -> dict | None:
-    cwd = payload.get("cwd") or os.getcwd()
+    raw_cwd = payload.get("cwd")
+    cwd = str(raw_cwd) if raw_cwd is not None else os.getcwd()
     repo, worktrees = _repo_and_worktrees(cwd)
 
     lines: list[str] = []
@@ -291,15 +360,19 @@ def session_start(payload: dict, p: Paths) -> dict | None:
 
 
 def stop(payload: dict, p: Paths) -> dict | None:
-    cwd = payload.get("cwd") or os.getcwd()
+    raw_cwd = payload.get("cwd")
+    cwd = str(raw_cwd) if raw_cwd is not None else os.getcwd()
     repo, worktrees = _repo_and_worktrees(cwd)
 
     alive_jobs = _get_alive_running_jobs(p, worktrees)
-    plans_info = _get_plans_info(p, repo, worktrees)
-    live_runners = [pi for pi in plans_info if pi["live_runner"] is not None]
+    live_runners = _get_live_plan_runners(p, repo, worktrees)
 
-    raw_session_id = payload.get("session_id") or "default"
-    session_id = re.sub(r"[^A-Za-z0-9_-]", "_", raw_session_id)
+    raw_session_id = payload.get("session_id")
+    if raw_session_id is None or raw_session_id == "":
+        session_id_str = "default"
+    else:
+        session_id_str = str(raw_session_id)
+    session_id = re.sub(r"[^A-Za-z0-9_-]", "_", session_id_str)
     counter_file = p.state_dir / "hooks" / f"stop-{session_id}"
 
     if not alive_jobs and not live_runners:
