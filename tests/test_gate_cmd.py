@@ -238,8 +238,9 @@ def test_gate_refuses_only_when_no_gates_anywhere(env_sandbox, repo, capsys):
     assert [g["cmd"] for g in out["gate"]] == ["test -f feature.txt"]
 
 
-def test_gate_job_sigterm_marks_cancelled(env_sandbox, repo):
-    set_repo_gates(repo, ["sleep 30"])
+def test_gate_job_sigterm_marks_cancelled(env_sandbox, repo, tmp_path):
+    marker = tmp_path / "started"
+    set_repo_gates(repo, [f"touch {marker} && sleep 30"])
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
@@ -256,7 +257,6 @@ def test_gate_job_sigterm_marks_cancelled(env_sandbox, repo):
     try:
         deadline = time.time() + 10.0
         result_path = None
-        gate_output = None
         while time.time() < deadline:
             if proc.poll() is not None:
                 out_bytes, err_bytes = proc.communicate()
@@ -265,16 +265,13 @@ def test_gate_job_sigterm_marks_cancelled(env_sandbox, repo):
                 break
             gate_jobs = [j for j in list_jobs(paths(), 10) if j.get("kind") == "gate" and j.get("status") == "running"]
             if gate_jobs:
-                job_dir = paths().jobs_dir / gate_jobs[0]["id"]
-                result_path = job_dir / "result.json"
-                output_file = job_dir / "gate" / "1" / "stdout"
-                if output_file.is_file():
-                    gate_output = output_file
+                result_path = paths().jobs_dir / gate_jobs[0]["id"] / "result.json"
+                if marker.is_file():
                     break
             time.sleep(0.02)
 
         assert result_path is not None, f"gate job did not enter running status; proc exit code: {proc.poll()}"
-        assert gate_output is not None, f"first gate command output file did not appear; proc exit code: {proc.poll()}"
+        assert marker.is_file(), f"gate command marker did not appear; proc exit code: {proc.poll()}"
 
         proc.send_signal(signal.SIGTERM)
         try:
