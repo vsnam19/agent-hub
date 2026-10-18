@@ -7,7 +7,9 @@ every task is merged or a limit stops you (quota, a decision only the owner can 
 running, nothing pushed. agent-hub v0.10.1 installed (the CLI is an editable install of this repo, so master's code
 runs; the MCP server is the plugin cache 0.10.1 — use the **CLI** for `plan triage/close`).
 
-**Current work: plan `followups-1`** — spec `docs/superpowers/specs/2026-10-18-followups-1.md` (17 small tasks).
+**Current work: plan `followups-1`** — spec `docs/superpowers/specs/2026-10-18-followups-1.md` (19 tasks; 18–19 are
+the owner's new Claude Code hooks: SessionStart context and a Stop guard while jobs run — they need a release to
+take effect, so after merging them ask the owner whether to release).
 
 1. Follow the `agent-hub:orchestrate` skill. Director never codes; briefs from `brief-template.md` with
    Goal / Input / Expected output / Constraints / Gate; gate is `just lint` + `uv run pytest -q`.
