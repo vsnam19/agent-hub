@@ -1,3 +1,5 @@
+import pytest
+
 from agenthub.skillweekly import Report
 
 
@@ -8,11 +10,26 @@ def test_report_says_bumped_not_released():
     assert "## Released" not in rendered
     assert "- learned-worker 0.1.1" in rendered
 
-    report.outcome = "released"
-    rendered_released = report.render()
-    assert "## Released" in rendered_released
-    assert "## Bumped (not released)" not in rendered_released
-    assert "- learned-worker 0.1.1" in rendered_released
+    report.outcome = "stopped — gate failed"
+    rendered_stopped = report.render()
+    assert "## Bumped (not released)" in rendered_stopped
+    assert "## Released" not in rendered_stopped
+    assert "- learned-worker 0.1.1" in rendered_stopped
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "released learned-worker 0.1.1",
+        "released, install failed: x",
+    ],
+)
+def test_report_released_heading_after_real_release(outcome: str):
+    report = Report(date="2026-10-12", released=["learned-worker 0.1.1"], outcome=outcome)
+    rendered = report.render()
+    assert "## Released" in rendered
+    assert "## Bumped (not released)" not in rendered
+    assert "- learned-worker 0.1.1" in rendered
 
 
 def test_report_groups_single_categories():
@@ -62,3 +79,30 @@ def test_evaluate_runs_every_skill_before_stopping(tmp_path):
     assert "foo" in report.evals
     assert (env.out / "eval-bar.json").is_file()
     assert (env.out / "eval-foo.json").is_file()
+
+
+def test_eval_error_keeps_below_baseline_names(tmp_path):
+    from agenthub.skillweekly import Proc
+    from tests.test_skillweekly import Env, eval_json
+
+    env = Env(
+        tmp_path,
+        director=True,
+        evals=[eval_json(0.5, 0.8)],
+    )
+    real_eval = env.fake.eval
+
+    def fake_eval(argv):
+        if "foo" in " ".join(argv):
+            return Proc(1, "", "eval process crashed\n")
+        return real_eval(argv)
+
+    env.fake.eval = fake_eval
+    report = env.run()
+
+    assert report.exit_code == 1
+    assert "eval of foo failed" in report.stop_reason
+    assert "; also below baseline: bar (with 0.50, without 0.80)" in report.stop_reason
+    assert "bar" in report.evals
+    rendered = (env.out / "report.md").read_text()
+    assert "; also below baseline: bar (with 0.50, without 0.80)" in rendered

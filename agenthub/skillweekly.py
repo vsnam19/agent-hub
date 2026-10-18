@@ -112,7 +112,7 @@ class Report:
             ("Drafted skills", self.drafted),
             ("Eval scores vs baseline", [f"{k}: {v}" for k, v in self.evals.items()]),
             ("Review verdicts", self.reviews),
-            ("Released" if self.outcome == "released" else "Bumped (not released)", self.released),
+            ("Released" if self.outcome.startswith("released") else "Bumped (not released)", self.released),
             ("MCP proposals", self.proposals),
         ):
             lines += ["", f"## {title}"] + ([f"- {i}" for i in items] or ["- (none)"])
@@ -475,42 +475,48 @@ class _Run:
 
     def evaluate(self, skills: list[tuple[str, str]]) -> None:
         failed = []
-        for plugin, skill in skills:
-            remaining = self.cfg.max_cost_usd - self.spent
-            if remaining < 0.01:  # less than a cent left cannot pay for an eval, and is passed as 0.00
-                raise Stop(f"eval budget ${self.cfg.max_cost_usd} spent before {skill}")
-            target = self.out / f"eval-{skill}.json"
-            cases = [arg for case in self.eval_cases(plugin, skill) for arg in ("--case", case)]
-            proc = self.runner(
-                [
-                    "claude", "plugin", "eval", str(self.wt / "plugins" / plugin), *cases,
-                    "--ablation", "with-without", "--max-cost-usd", f"{remaining:.2f}", "--json", str(target),
-                    "--no-publish", "--trust-plugin",
-                ],
-                self.wt,
-                EVAL_TIMEOUT,
-            )  # fmt: skip
-            if proc.rc != 0:
-                raise Stop(f"eval of {skill} failed (rc {proc.rc}): {(proc.stderr or proc.stdout).strip()[:200]}")
-            try:
-                data = json.loads(target.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                self.spent += remaining  # no cost is readable, so the whole remaining budget counts as spent
-                self.report.evals[skill] = "cost unknown"
-                raise Stop(f"eval of {skill} wrote no readable result") from None
-            try:
-                with_mean, without_mean = _arm_means(skill, data, target)
-            except Stop:
-                self.spent += _cost_or(data, remaining)
-                if _cost(data) is None:
+        try:
+            for plugin, skill in skills:
+                remaining = self.cfg.max_cost_usd - self.spent
+                if remaining < 0.01:  # less than a cent left cannot pay for an eval, and is passed as 0.00
+                    raise Stop(f"eval budget ${self.cfg.max_cost_usd} spent before {skill}")
+                target = self.out / f"eval-{skill}.json"
+                cases = [arg for case in self.eval_cases(plugin, skill) for arg in ("--case", case)]
+                proc = self.runner(
+                    [
+                        "claude", "plugin", "eval", str(self.wt / "plugins" / plugin), *cases,
+                        "--ablation", "with-without", "--max-cost-usd", f"{remaining:.2f}", "--json", str(target),
+                        "--no-publish", "--trust-plugin",
+                    ],
+                    self.wt,
+                    EVAL_TIMEOUT,
+                )  # fmt: skip
+                if proc.rc != 0:
+                    raise Stop(f"eval of {skill} failed (rc {proc.rc}): {(proc.stderr or proc.stdout).strip()[:200]}")
+                try:
+                    data = json.loads(target.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    self.spent += remaining  # no cost is readable, so the whole remaining budget counts as spent
                     self.report.evals[skill] = "cost unknown"
-                raise
-            cost = _cost(data)
-            self.spent += _cost_or(data, remaining)
-            unknown = " (cost unknown)" if cost is None else ""
-            self.report.evals[skill] = f"with {with_mean:.2f} vs without {without_mean:.2f}{unknown}"
-            if with_mean < PASS_SCORE or with_mean <= without_mean:
-                failed.append((skill, with_mean, without_mean))
+                    raise Stop(f"eval of {skill} wrote no readable result") from None
+                try:
+                    with_mean, without_mean = _arm_means(skill, data, target)
+                except Stop:
+                    self.spent += _cost_or(data, remaining)
+                    if _cost(data) is None:
+                        self.report.evals[skill] = "cost unknown"
+                    raise
+                cost = _cost(data)
+                self.spent += _cost_or(data, remaining)
+                unknown = " (cost unknown)" if cost is None else ""
+                self.report.evals[skill] = f"with {with_mean:.2f} vs without {without_mean:.2f}{unknown}"
+                if with_mean < PASS_SCORE or with_mean <= without_mean:
+                    failed.append((skill, with_mean, without_mean))
+        except Stop as stop:
+            if failed:
+                details = ", ".join(f"{s} (with {w:.2f}, without {wo:.2f})" for s, w, wo in failed)
+                raise Stop(f"{stop.reason}; also below baseline: {details}", code=stop.code) from None
+            raise
         if failed:
             if len(failed) == 1:
                 skill, with_mean, without_mean = failed[0]
