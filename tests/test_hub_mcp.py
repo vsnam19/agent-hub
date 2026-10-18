@@ -61,9 +61,15 @@ class McpEnv:
         self.bin.mkdir()
         self.state = tmp_path / "fakestate"
         self.state.mkdir()
+        self.home = tmp_path / "hubhome"
+        self.codex_home = tmp_path / "codexhome"
+        self.home.mkdir()
+        self.codex_home.mkdir()
         self.config = tmp_path / "hubconfig"
         self.config.mkdir()
         (self.config / "workers.toml").write_text("default = []\n")
+        monkeypatch.setenv("HOME", str(self.home))
+        monkeypatch.setenv("CODEX_HOME", str(self.codex_home))
         monkeypatch.setenv("FAKE_HUB_STATE", str(self.state))
         monkeypatch.setenv("AGENT_HUB_CONFIG", str(self.config))
         for tool in ("git", "python3"):
@@ -173,6 +179,44 @@ def test_mcp_row_stale_codex_removes_then_adds(mcp_env, tmp_path):
         ["codex", "mcp", "remove", "agent-hub"],
         ["codex", "mcp", "add", "agent-hub", "--", bin_cmd, "mcp"],
     ]
+
+
+def test_codex_args_string_detail(mcp_env, tmp_path):
+    bin_cmd = hub._mcp_command()[0]
+    mcp_env.set_codex_mcp(
+        [
+            {
+                "name": "agent-hub",
+                "enabled": True,
+                "transport": {
+                    "type": "stdio",
+                    "command": bin_cmd,
+                    "args": "mcp x",
+                },
+            }
+        ]
+    )
+    rows = hub.status(mcp_env.config, tmp_path / "repo")
+    codex_row = next(r for r in rows if r.host == "codex" and r.plugin == hub.MCP_ROW)
+    assert codex_row.state == "stale"
+    assert codex_row.detail == f"{bin_cmd} mcp x"
+
+    mcp_env.set_codex_mcp(
+        [
+            {
+                "name": "agent-hub",
+                "enabled": True,
+                "transport": {
+                    "type": "stdio",
+                    "command": bin_cmd,
+                    "args": "mcp",
+                },
+            }
+        ]
+    )
+    rows_current = hub.status(mcp_env.config, tmp_path / "repo")
+    codex_row_current = next(r for r in rows_current if r.host == "codex" and r.plugin == hub.MCP_ROW)
+    assert codex_row_current.state == "current"
 
 
 def test_mcp_row_stale_agy_updates(mcp_env, tmp_path):

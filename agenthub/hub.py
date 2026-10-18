@@ -26,14 +26,12 @@ def _mcp_command() -> list[str]:
     return [str(_mcp_bin_path()), "mcp"]
 
 
-mcp_command = _mcp_command
-
-
 @dataclass(frozen=True)
 class Row:
     host: str
     plugin: str
-    state: str  # current | stale | missing | error | not-a-worker-plugin | host-not-installed | per-run | stray
+    # current | stale | missing | error | disabled | not-a-worker-plugin | host-not-installed | per-run | stray
+    state: str
     installed_version: str | None = None
     source_version: str | None = None
     detail: str = ""
@@ -381,8 +379,14 @@ def _codex_mcp_row() -> Row:
     if not isinstance(transport, dict):
         return Row("codex", MCP_ROW, "error", detail="codex mcp list output not understood")
     cmd = transport.get("command") or ""
-    args = transport.get("args") or []
-    registered = " ".join([cmd] + list(args)).strip()
+    raw_args = transport.get("args")
+    if raw_args is None:
+        args: list[str] = []
+    elif isinstance(raw_args, list):
+        args = [str(a) for a in raw_args]
+    else:
+        args = [str(raw_args)]
+    registered = " ".join([cmd] + args).strip()
     if cmd == str(bin_path) and args == ["mcp"]:
         return Row("codex", MCP_ROW, "current")
     return Row("codex", MCP_ROW, "stale", detail=registered)
