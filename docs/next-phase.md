@@ -3,15 +3,16 @@
 The owner wants the next session to run on its own from a one-word prompt. Do exactly this, without asking, until
 every task is merged or a limit stops you (quota, a decision only the owner can make). Report in Vietnamese.
 
-**State at hand-off (2026-10-19, later):** master has plans `followups-1` (D-103) and `f6` (D-104) merged, 1222 tests,
-lint clean, no worktrees, no `orch/*` branches, nothing running, nothing pushed. agent-hub v0.10.1 still installed.
+**State at hand-off (2026-10-19, released):** **v0.11.0 released** (commit `b90c040`; Claude Code plugin updated to
+0.11.0 — restart loads the SessionStart/Stop hooks and the 100 s MCP wait cap; MCP server and both hooks smoke-tested
+from the plugin cache). `agent-hub hub install --apply` ran: the agent-hub MCP server is registered with codex and agy
+(`hub status` → `mcp:agent-hub current` on both); agy plugins worker/telaf/aspice/learned-worker are installed (see the
+agy list-format follow-up: `hub status` still shows them missing). Master clean, no worktrees, no `orch/*` branches,
+nothing running, nothing pushed. Owner: F6 before G; Phase G is discussed at v0.12 — do not start it.
 
-**Current work: none in flight.** Owner (2026-10-19): F6 before G; Phase G is discussed at v0.12 — do not start it.
-Next, in order:
-1. Ask the owner: release v0.11.0 (version bump in 3 manifests, plugin reload) — needed for the hooks, the 100 s wait
-   cap and F6; and whether to run `agent-hub hub install --apply` (registers the MCP server with codex and agy, and also
-   installs the agy plugins telaf/aspice/learned-worker that `hub status` lists as missing). Neither without the owner.
-2. Then E5 (`plan draft`, with the E5 extras in follow-ups), E6, E7 techlead bench. Lows: `docs/follow-ups.md`.
+**Current work: none in flight.** Next, in order:
+1. Small task: parse agy 1.4.2's text `agy plugin list` in `agenthub/hub.py` (follow-ups, last items).
+2. E5 (`plan draft`, with the E5 extras in follow-ups), E6, E7 techlead bench. Lows: `docs/follow-ups.md`.
 
 The steps below describe how `followups-1` was run; reuse them for the next plan (new slug, new spec).
 

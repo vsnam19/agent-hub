@@ -116,3 +116,7 @@ a turn. Items:
   `hub status` raise. Low.
 - **uv-tool `agent-hub` lacks the `mcp` extra:** `agent-hub mcp` on PATH fails ("mcp SDK not installed"); reinstall
   with `uv tool install -e '.[mcp]'` at release, or keep registering `bin/agent-hub`. Low.
+- **agy 1.4.2 changed `agy plugin list` to text** (`Installed plugins:` / `- name (enabled, 1.0.0)` / `Source:` …;
+  no JSON `imports`): `hub status` reports `agy - error: agy list output not understood` and every agy plugin as
+  `missing`, so each `hub install` reinstalls them (harmless). Parse the text form (keep the JSON form). Seen at the
+  v0.11.0 `hub install --apply` (2026-10-19), where the plugins were in fact installed. Small task, next.
