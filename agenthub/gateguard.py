@@ -3,6 +3,7 @@ import re
 import subprocess
 from collections import Counter
 from dataclasses import dataclass
+from dataclasses import field as dc_field
 from pathlib import Path
 
 from agenthub import guards
@@ -30,6 +31,7 @@ class TestDef:
     # (place, ast.dump, nested) of each assertion; see _assertion_places
     asserts: list[tuple[tuple[str, ...], str, bool]]
     kept: list[tuple]  # what the test keeps: ("direct", dump), ("placed", place, dump) or ("nested", place, dump)
+    raw_asserts: list[tuple[tuple[str, ...], ast.AST, bool]] = dc_field(default_factory=list)
 
 
 def _parse_diff(diff_text: str) -> list[Change]:
@@ -141,11 +143,60 @@ def _test_index(source: bytes | None) -> dict[str, TestDef] | None:
     tests = {}
     for ident, fn in index.items():
         statements = _statement_ids(fn)
-        asserts = [(place, _assertion_key(node), id(node) not in statements) for place, node in _assertion_places(fn)]
+        raw_places = _assertion_places(fn)
+        asserts = [(place, _assertion_key(node), id(node) not in statements) for place, node in raw_places]
+        raw_asserts = [(place, node, id(node) not in statements) for place, node in raw_places]
         tests[ident] = TestDef(
-            fn.lineno, fn.end_lineno, ast.dump(fn, include_attributes=False), asserts, _kept_tokens(fn)
+            fn.lineno, fn.end_lineno, ast.dump(fn, include_attributes=False), asserts, _kept_tokens(fn), raw_asserts
         )
     return tests
+
+
+def _is_container_eq(cmp: ast.Compare) -> bool:
+    return (
+        len(cmp.ops) == 1
+        and isinstance(cmp.ops[0], ast.Eq)
+        and len(cmp.comparators) == 1
+        and isinstance(cmp.comparators[0], (ast.Set, ast.List, ast.Tuple, ast.Dict))
+    )
+
+
+def _literal_elements(lit: ast.AST) -> list:
+    if isinstance(lit, (ast.Set, ast.List, ast.Tuple)):
+        return [ast.dump(elt) for elt in lit.elts]
+    if isinstance(lit, ast.Dict):
+        return [
+            (ast.dump(k) if k is not None else None, ast.dump(v)) for k, v in zip(lit.keys, lit.values, strict=True)
+        ]
+    return []
+
+
+def _is_literal_superset(base_lit: ast.AST, new_lit: ast.AST) -> bool:
+    if type(base_lit) is not type(new_lit):
+        return False
+    base_elts = _literal_elements(base_lit)
+    new_elts = _literal_elements(new_lit)
+    base_counts = Counter(base_elts)
+    new_counts = Counter(new_elts)
+    return all(new_counts[elt] >= count for elt, count in base_counts.items())
+
+
+def _keeps_by_superset(base_cmp: ast.Compare, new_cmp: ast.Compare) -> bool:
+    if not (_is_container_eq(base_cmp) and _is_container_eq(new_cmp)):
+        return False
+    if ast.dump(base_cmp.left) != ast.dump(new_cmp.left):
+        return False
+    return _is_literal_superset(base_cmp.comparators[0], new_cmp.comparators[0])
+
+
+def _assertion_compares(node: ast.AST | None) -> list[ast.Compare]:
+    if not isinstance(node, ast.Assert):
+        return []
+    if isinstance(node.test, ast.Compare):
+        return [node.test]
+    if isinstance(node.test, ast.BoolOp) and isinstance(node.test.op, ast.And):
+        return [v for v in node.test.values if isinstance(v, ast.Compare)]
+    return []
 
 
 def _weakened(base: TestDef, new: TestDef) -> bool:
@@ -153,18 +204,57 @@ def _weakened(base: TestDef, new: TestDef) -> bool:
     place (same enclosing statements and their guards), or as a direct statement of the new test anywhere (see
     _kept_tokens). A nested assertion is kept only by the identical nested one in the same place, never by a statement.
     Containment in
-    a larger expression (`x == 1 or True`, `not (x == 1)`) keeps nothing. An identical test is never weakened."""
+    a larger expression (`x == 1 or True`, `not (x == 1)`) keeps nothing. An identical test is never weakened.
+    A base assertion Compare with one == whose right side is a set/list/tuple/dict literal is kept by a new assertion
+    in the same place with the same left side whose right literal is a superset."""
     if base.dump == new.dump:
         return False
     pool = Counter(new.kept)
     unmatched = []
-    for place, key, nested in base.asserts:
+    for i, (place, key, nested) in enumerate(base.asserts):
         token = ("nested", place, key) if nested else ("placed", place, key)
         if pool[token]:
             pool[token] -= 1
         else:
-            unmatched.append((nested, key))
-    for nested, key in unmatched:
+            base_node = base.raw_asserts[i][1] if i < len(base.raw_asserts) else None
+            unmatched.append((place, key, nested, base_node))
+
+    still_unmatched = []
+    for place, key, nested, base_node in unmatched:
+        matched = False
+        base_cmps = _assertion_compares(base_node)
+        if base_cmps and any(_is_container_eq(c) for c in base_cmps):
+            for base_cmp in base_cmps:
+                if not _is_container_eq(base_cmp):
+                    continue
+                for new_place, new_node, new_nested in new.raw_asserts:
+                    if new_place != place or new_nested != nested:
+                        continue
+                    new_cmps = _assertion_compares(new_node)
+                    if any(_keeps_by_superset(base_cmp, nc) for nc in new_cmps):
+                        key_new = _assertion_key(new_node)
+                        token_placed = ("placed", new_place, key_new)
+                        token_direct = ("direct", key_new)
+                        token_nested = ("nested", new_place, key_new)
+                        if nested and pool[token_nested] > 0:
+                            pool[token_nested] -= 1
+                            matched = True
+                            break
+                        elif not nested:
+                            if pool[token_placed] > 0:
+                                pool[token_placed] -= 1
+                                matched = True
+                                break
+                            elif pool[token_direct] > 0:
+                                pool[token_direct] -= 1
+                                matched = True
+                                break
+                if matched:
+                    break
+        if not matched:
+            still_unmatched.append((nested, key))
+
+    for nested, key in still_unmatched:
         if nested or not pool[("direct", key)]:
             return True
         pool[("direct", key)] -= 1
@@ -439,8 +529,10 @@ def inspect_diff(repo: guards.Repo, since: str) -> list[dict]:
         if _is_test_file(c.path):
             if c.path not in compared and c.kind == "removed" and "assert" in c.content:
                 findings.append({"file": c.path, "kind": "assert-removed", "line": c.line_num})
-            if c.kind == "added" and re.search(r"\b(?:skip|xfail)\b|--ignore|--deselect", c.content):
-                findings.append({"file": c.path, "kind": "skip-added", "line": c.line_num})
+            if c.kind == "added":
+                line_content = re.sub(r"#\s*fmt\s*:\s*(?:skip|off|on)\b", "", c.content, flags=re.IGNORECASE)
+                if re.search(r"\b(?:skip|xfail)\b|--ignore|--deselect", line_content):
+                    findings.append({"file": c.path, "kind": "skip-added", "line": c.line_num})
             name = _test_def(c.content) if c.kind == "removed" else None
             # A compared file's removed def that an index entry owns is judged by identity (_compare_tests); any other
             # removed def falls back to the line rule.
