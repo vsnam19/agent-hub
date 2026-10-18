@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 
@@ -44,3 +45,38 @@ def pid_file_dead(path: Path, *, proc_root: Path = Path("/proc")) -> bool:
     if pid is None or recorded is None:
         return False
     return not is_running(pid, proc_root=proc_root) or start_time(pid, proc_root=proc_root) != recorded
+
+
+def live_runner(
+    plan_dir: Path,
+    *,
+    exclude_self: bool = True,
+    _is_running=None,
+    _start_time=None,
+) -> int | None:
+    """Return the recorded runner pid when it is alive and verified (is_running and matching
+    start_time, not this process if exclude_self=True), else None. Unreadable file -> None."""
+    check_running = _is_running or is_running
+    check_start_time = _start_time or start_time
+
+    state_file = Path(plan_dir) / "state.json"
+    try:
+        data = json.loads(state_file.read_text())
+        if not isinstance(data, dict):
+            return None
+    except (OSError, ValueError):
+        return None
+    runner = data.get("runner")
+    if not isinstance(runner, dict):
+        return None
+    pid = runner.get("pid")
+    recorded = runner.get("start_time")
+    if (
+        isinstance(pid, int)
+        and recorded is not None
+        and (not exclude_self or pid != os.getpid())
+        and check_running(pid)
+        and check_start_time(pid) == recorded
+    ):
+        return pid
+    return None

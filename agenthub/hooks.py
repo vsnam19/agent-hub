@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -10,7 +11,7 @@ from typing import TextIO
 
 from agenthub.config import Paths, paths
 from agenthub.jobs import list_jobs
-from agenthub.procinfo import is_running, read_pid_file, start_time
+from agenthub.procinfo import is_running, live_runner, read_pid_file, start_time
 
 ALL_JOBS = 100000
 
@@ -75,23 +76,72 @@ def _repo_and_worktrees(cwd: str | Path) -> tuple[Path, set[Path]]:
     return repo, worktrees
 
 
-def _live_runner(plan_dir: Path) -> int | None:
-    """Return the recorded runner pid when it is alive and verified."""
-    state_file = plan_dir / "state.json"
+def _get_orch_branches(repo: Path) -> set[str]:
     try:
-        data = json.loads(state_file.read_text())
-        if not isinstance(data, dict):
-            return None
-    except (OSError, ValueError):
-        return None
-    runner = data.get("runner")
-    if not isinstance(runner, dict):
-        return None
-    pid = runner.get("pid")
-    recorded = runner.get("start_time")
-    if isinstance(pid, int) and recorded is not None and is_running(pid) and start_time(pid) == recorded:
-        return pid
-    return None
+        res = subprocess.run(
+            ["git", "-C", str(repo), "for-each-ref", "refs/heads/orch/"],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+        if res.returncode != 0:
+            return set()
+        branches = set()
+        for line in res.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            ref = parts[-1]
+            if ref.startswith("refs/heads/"):
+                ref = ref[len("refs/heads/") :]
+            branches.add(ref)
+        return branches
+    except OSError:
+        return set()
+
+
+def _get_merged_branches(repo: Path, base: str) -> set[str]:
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(repo), "branch", "--merged", base],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+        if res.returncode != 0:
+            return set()
+        merged = set()
+        for line in res.stdout.splitlines():
+            name = line.strip().lstrip("*+ ")
+            if name:
+                if name.startswith("refs/heads/"):
+                    name = name[len("refs/heads/") :]
+                merged.add(name)
+        return merged
+    except OSError:
+        return set()
+
+
+def _is_unmerged_done(
+    t_branch: str,
+    plan_repo: Path,
+    base: str,
+    orch_cache: dict[Path, set[str]],
+    merged_cache: dict[tuple[Path, str], set[str]],
+) -> bool:
+    if not t_branch:
+        return False
+    if t_branch.startswith("refs/heads/"):
+        t_branch = t_branch[len("refs/heads/") :]
+    if plan_repo not in orch_cache:
+        orch_cache[plan_repo] = _get_orch_branches(plan_repo)
+    if t_branch not in orch_cache[plan_repo]:
+        return False
+    key = (plan_repo, base)
+    if key not in merged_cache:
+        merged_cache[key] = _get_merged_branches(plan_repo, base)
+    return t_branch not in merged_cache[key]
 
 
 def _get_alive_running_jobs(p: Paths, worktrees: set[Path]) -> list[dict]:
@@ -117,6 +167,9 @@ def _get_plans_info(p: Paths, repo: Path, worktrees: set[Path]) -> list[dict]:
     if not plans_dir.is_dir():
         return []
 
+    orch_cache: dict[Path, set[str]] = {}
+    merged_cache: dict[tuple[Path, str], set[str]] = {}
+
     plans_info = []
     for plan_dir in sorted(plans_dir.iterdir()):
         if not plan_dir.is_dir():
@@ -139,7 +192,8 @@ def _get_plans_info(p: Paths, repo: Path, worktrees: set[Path]) -> list[dict]:
             continue
 
         slug = plan_data.get("slug") or plan_dir.name
-        live_runner = _live_runner(plan_dir)
+        runner_pid = live_runner(plan_dir, exclude_self=False)
+        base = plan_data.get("base") or "master"
 
         state_file = plan_dir / "state.json"
         state_tasks = {}
@@ -153,28 +207,36 @@ def _get_plans_info(p: Paths, repo: Path, worktrees: set[Path]) -> list[dict]:
 
         plan_tasks = plan_data.get("tasks", [])
         counts: Counter[str] = Counter()
-        has_tasks = False
+        has_unmerged = False
 
         if isinstance(plan_tasks, list) and plan_tasks:
-            has_tasks = True
             for t in plan_tasks:
                 t_name = t.get("name") if isinstance(t, dict) else str(t)
                 ts = state_tasks.get(t_name, {}) if isinstance(state_tasks, dict) else {}
                 status = ts.get("status", "pending") if isinstance(ts, dict) else "pending"
                 counts[status] += 1
+                if status in ("pending", "running", "blocked"):
+                    has_unmerged = True
+                elif status == "done":
+                    t_branch = ts.get("branch", "") if isinstance(ts, dict) else ""
+                    if _is_unmerged_done(t_branch, plan_repo, base, orch_cache, merged_cache):
+                        has_unmerged = True
         elif isinstance(state_tasks, dict) and state_tasks:
-            has_tasks = True
             for _t_name, ts in state_tasks.items():
                 status = ts.get("status", "pending") if isinstance(ts, dict) else "pending"
                 counts[status] += 1
-
-        has_unmerged = has_tasks and any(st != "merged" for st in counts.keys())
+                if status in ("pending", "running", "blocked"):
+                    has_unmerged = True
+                elif status == "done":
+                    t_branch = ts.get("branch", "") if isinstance(ts, dict) else ""
+                    if _is_unmerged_done(t_branch, plan_repo, base, orch_cache, merged_cache):
+                        has_unmerged = True
 
         plans_info.append(
             {
                 "slug": slug,
                 "dir": plan_dir,
-                "live_runner": live_runner,
+                "live_runner": runner_pid,
                 "counts": dict(counts),
                 "has_unmerged": has_unmerged,
             }
@@ -214,17 +276,6 @@ def session_start(payload: dict, p: Paths) -> dict | None:
         except OSError:
             pass
 
-    if not autopilot_found:
-        for wt in worktrees:
-            candidate = wt / "docs" / "next-phase.md"
-            if candidate.is_file():
-                try:
-                    if candidate.read_text(encoding="utf-8").startswith("# AUTOPILOT"):
-                        autopilot_found = True
-                        break
-                except OSError:
-                    pass
-
     if autopilot_found:
         lines.append("owner's resume protocol: docs/next-phase.md AUTOPILOT")
 
@@ -247,7 +298,8 @@ def stop(payload: dict, p: Paths) -> dict | None:
     plans_info = _get_plans_info(p, repo, worktrees)
     live_runners = [pi for pi in plans_info if pi["live_runner"] is not None]
 
-    session_id = payload.get("session_id") or "default"
+    raw_session_id = payload.get("session_id") or "default"
+    session_id = re.sub(r"[^A-Za-z0-9_-]", "_", raw_session_id)
     counter_file = p.state_dir / "hooks" / f"stop-{session_id}"
 
     if not alive_jobs and not live_runners:
@@ -259,23 +311,46 @@ def stop(payload: dict, p: Paths) -> dict | None:
         return None
 
     running_desc: list[str] = []
+    wait_cmds: list[str] = []
     for job in alive_jobs:
         running_desc.append(f"job {job['id']} ({job.get('role', 'unknown')})")
+        workdir = job.get("workdir", "")
+        wait_cmds.append(f"agent-hub wait -d {workdir}")
     for pi in live_runners:
         running_desc.append(f"plan runner {pi['slug']}")
+        plan_file = pi["dir"] / "plan.json"
+        wait_cmds.append(f"agent-hub plan wait {plan_file}")
 
     what_is_running = ", ".join(running_desc)
+    wait_str = " / ".join(wait_cmds)
 
     counter_file.parent.mkdir(parents=True, exist_ok=True)
-    count = 0
+    saved_count = 0
+    saved_desc = None
     if counter_file.is_file():
         try:
-            count = int(counter_file.read_text().strip())
-        except (ValueError, OSError):
-            count = 0
+            content = counter_file.read_text()
+            if content.strip().startswith("{"):
+                data = json.loads(content)
+                saved_count = int(data.get("count", 0))
+                saved_desc = data.get("description", "")
+            else:
+                lines_cf = content.splitlines()
+                if lines_cf:
+                    saved_count = int(lines_cf[0].strip())
+                    saved_desc = lines_cf[1].strip() if len(lines_cf) > 1 else ""
+        except (ValueError, OSError, json.JSONDecodeError):
+            saved_count = 0
+            saved_desc = None
+
+    if saved_desc != what_is_running:
+        count = 0
+    else:
+        count = saved_count
+
     count += 1
     try:
-        counter_file.write_text(str(count))
+        counter_file.write_text(f"{count}\n{what_is_running}\n")
     except OSError:
         pass
 
@@ -284,9 +359,7 @@ def stop(payload: dict, p: Paths) -> dict | None:
 
     return {
         "decision": "block",
-        "reason": (
-            f"{what_is_running} — wait with agent-hub wait -d <wt> / agent-hub plan wait <plan> before ending the turn"
-        ),
+        "reason": (f"{what_is_running} — wait with {wait_str} before ending the turn"),
     }
 
 
