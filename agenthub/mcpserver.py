@@ -16,7 +16,7 @@ from agenthub import guards
 from agenthub.agents import registry
 from agenthub.cli import ALL_JOBS, WAIT_APPEAR_S, UsageError, _job_repo, _repo_of
 from agenthub.config import ConfigError, Paths, parse_duration, paths, role_kind
-from agenthub.jobs import get_job, list_jobs
+from agenthub.jobs import dead_job_result, get_job, list_jobs
 from agenthub.orchestrate import readiness, skills_hint
 from agenthub.plan import load as load_plan
 from agenthub.pool import Cooldowns, load_pool, parse_link
@@ -490,14 +490,7 @@ def wait_job(
                 pass
             if result.get("status") == "running":
                 pid, _ = read_pid_file(pid_file)
-                return _format_wait_result(
-                    {
-                        **result,
-                        "status": "failed",
-                        "exit_code": 1,
-                        "reason": f"job process {pid} is not running; result.json was never finished",
-                    }
-                )
+                return _format_wait_result(dead_job_result(result, pid))
             return _format_wait_result(result)
 
         time.sleep(0.1)
@@ -550,14 +543,7 @@ async def wait_job_async(
                 pass
             if result.get("status") == "running":
                 pid, _ = read_pid_file(pid_file)
-                return _format_wait_result(
-                    {
-                        **result,
-                        "status": "failed",
-                        "exit_code": 1,
-                        "reason": f"job process {pid} is not running; result.json was never finished",
-                    }
-                )
+                return _format_wait_result(dead_job_result(result, pid))
             return _format_wait_result(result)
 
         await asyncio.sleep(0.1)

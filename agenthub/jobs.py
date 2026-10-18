@@ -78,3 +78,12 @@ def list_jobs(p: Paths, limit: int) -> list[dict]:
             continue
 
     return results
+
+
+def dead_job_result(result: dict, pid: int | None) -> dict:
+    return {
+        **result,
+        "status": "failed",
+        "exit_code": 1,
+        "reason": f"job process {pid} is not running; result.json was never finished",
+    }
