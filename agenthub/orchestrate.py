@@ -263,21 +263,6 @@ def run_job(
     # read-only jobs must leave the tree as they found it; a review also gets a diff, a plan has no base
     read_only = kind in ("review", "plan")
     adapters = registry()
-    # effort is ignored here: the same model at another effort is not an independent reviewer
-    excluded = {text.partition("@")[0] for text in args.exclude}
-    if kind == "review":
-        excluded.update(implementers_of(p, args.workdir, base=args.base))
-    links = [link for link in args.links if link.quota_key not in excluded]
-    for link in links:
-        if link.agent not in adapters:
-            raise ConfigError(f"unknown agent in chain: {link.agent}")
-    briefmod.validate(kind, args.brief)
-    skills = list(dict.fromkeys(args.skills))
-    known_skills = available_skills(p.config_dir) if skills else {}
-    for skill in skills:
-        if skill not in known_skills:
-            raise ConfigError(f"unknown skill {skill!r}: {skills_hint(known_skills)}")
-
     started = now()
     workdir = args.workdir
     repo = None
@@ -293,6 +278,22 @@ def run_job(
             diff = guards.review_diff(repo, base)
     except guards.GuardError as e:
         refusal = str(e)
+
+    jobs = list_jobs(p, 100000) if kind == "review" else []
+    # effort is ignored here: the same model at another effort is not an independent reviewer
+    excluded = {text.partition("@")[0] for text in args.exclude}
+    if kind == "review" and repo is not None:
+        excluded.update(implementers(jobs, repo.root, guards.head(repo)))
+    links = [link for link in args.links if link.quota_key not in excluded]
+    for link in links:
+        if link.agent not in adapters:
+            raise ConfigError(f"unknown agent in chain: {link.agent}")
+    briefmod.validate(kind, args.brief)
+    skills = list(dict.fromkeys(args.skills))
+    known_skills = available_skills(p.config_dir) if skills else {}
+    for skill in skills:
+        if skill not in known_skills:
+            raise ConfigError(f"unknown skill {skill!r}: {skills_hint(known_skills)}")
 
     gates = args.gates
     if kind == "implement" and repo is not None:
@@ -348,7 +349,7 @@ def run_job(
     if kind == "implement":
         text += "\n" + handoff.FOOTER
     elif kind == "review":
-        judge = _touched_section(touched_findings(list_jobs(p, 100000), workdir, guards.head(repo))) if repo else ""
+        judge = _touched_section(touched_findings(jobs, workdir, guards.head(repo))) if repo else ""
         text += "\n\n" + judge + handoff.REVIEW_FOOTER
     (job.dir / "brief.md").write_text(text)
     pid = os.getpid()
@@ -536,33 +537,36 @@ def run_job(
     return _finish(job, record, status or ("failed" if denied_last else "exhausted"), now, started)
 
 
-def implementers_of(p: Paths, workdir: Path | str, base: str | None = None) -> set[str]:
-    """The agent:model of every job on that resolved work tree with kind implement and status ok or gate-failed.
-    When `base` is given, keep only implement jobs whose `head` is an ancestor-or-equal of the work tree's HEAD
-    and is not a strict ancestor of `merge-base(HEAD, base)` (so a job whose head equals the merge base still counts).
+def implementers(jobs: list[dict], workdir: Path, head: str) -> set[str]:
+    """The agent:model of every implement job on that resolved work tree with status ok or gate-failed
+    whose recorded `head` is an ancestor-or-equal of `head` (`git merge-base --is-ancestor <job head> <head>`).
     Jobs whose `head` is missing or unknown to git are dropped."""
     target = Path(workdir).resolve()
-    jobs = list_jobs(p, 100000)
     mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == target]
 
-    if base is not None:
+    cache: dict[str, bool] = {}
+
+    def is_ancestor(a: str, b: str) -> bool:
+        keep = cache.get(a)
+        if keep is not None:
+            return keep
         try:
-            head_sha = guards._run_git(target, "rev-parse", "--verify", "HEAD^{commit}")
-            mb_sha = guards._run_git(target, "merge-base", head_sha, base)
-        except (subprocess.CalledProcessError, guards.GuardError, OSError):
-            return set()
-
-        def is_ancestor(a: str, b: str) -> bool:
-            res = subprocess.run(
-                guards._git_argv("merge-base", "--is-ancestor", a, b),
-                cwd=target,
-                capture_output=True,
-                text=True,
-                env=guards._git_env(),
-            )
-            return res.returncode == 0
-
-        cache: dict[str, bool] = {}
+            argv = guards._git_argv("merge-base", "--is-ancestor", "--end-of-options", a, b)
+            res = subprocess.run(argv, cwd=target, capture_output=True, text=True, env=guards._git_env())
+            if res.returncode == 0:
+                keep = True
+            elif res.returncode == 1:
+                keep = False
+            elif "end-of-options" in res.stderr:
+                fallback = guards._git_argv("merge-base", "--is-ancestor", a, b)
+                res_fb = subprocess.run(fallback, cwd=target, capture_output=True, text=True, env=guards._git_env())
+                keep = res_fb.returncode == 0
+            else:
+                keep = False
+        except (subprocess.CalledProcessError, OSError):
+            keep = False
+        cache[a] = keep
+        return keep
 
     found: set[str] = set()
     for j in mine:
@@ -573,21 +577,11 @@ def implementers_of(p: Paths, workdir: Path | str, base: str | None = None) -> s
             or not j.get("model")
         ):
             continue
-        if base is not None:
-            j_head = j.get("head")
-            if not j_head or not isinstance(j_head, str):
-                continue
-            keep = cache.get(j_head)
-            if keep is None:
-                try:
-                    j_sha = guards._run_git(target, "rev-parse", "--verify", f"{j_head}^{{commit}}")
-                    keep = is_ancestor(j_sha, head_sha) and (j_sha == mb_sha or not is_ancestor(j_sha, mb_sha))
-                except (subprocess.CalledProcessError, OSError):
-                    keep = False
-                cache[j_head] = keep
-            if not keep:
-                continue
-        found.add(f"{j['agent']}:{j['model']}")
+        j_head = j.get("head")
+        if not j_head or not isinstance(j_head, str):
+            continue
+        if is_ancestor(j_head, head):
+            found.add(f"{j['agent']}:{j['model']}")
     return found
 
 
@@ -600,12 +594,12 @@ def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
         return f"{j.get('agent')}:{j.get('model')}"
 
     gated = [j for j in mine if _passed_gate(j, head)]
-    implementers = {who(j) for j in mine if j.get("kind") == "implement" and j.get("status") in ("ok", "gate-failed")}
+    impl = implementers(jobs, workdir, head)
     reviews = [j for j in mine if j.get("kind") == "review" and j.get("status") == "ok" and j.get("verdict")]
     problems = []
     if not gated:
         problems.append(f"no passing gate on {head}")
-    if not implementers:
+    if not impl:
         problems.append("no implementer recorded: cannot check reviewer independence")
     judges: list[dict] = []
     if not reviews:
@@ -618,9 +612,9 @@ def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
             approved = [r for r in on_head if r["verdict"] == "approve"]
             if not approved:
                 problems.append(f"review verdict {on_head[0]['verdict']}")
-            elif all(who(r) in implementers for r in approved):
+            elif all(who(r) in impl for r in approved):
                 problems.append("reviewer is the implementer")
-            judges = [r for r in on_head if who(r) not in implementers]
+            judges = [r for r in on_head if who(r) not in impl]
     if gated:
         problems.extend(_touched_problems(touched_findings(jobs, workdir, head), judges))
     return problems

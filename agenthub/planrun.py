@@ -13,7 +13,7 @@ from agenthub import guards
 from agenthub.config import ConfigError, load_pool, paths
 from agenthub.guards import _git_argv
 from agenthub.jobs import list_jobs
-from agenthub.orchestrate import RunArgs, _passed_gate, implementers_of, readiness, run_gate_job, run_job
+from agenthub.orchestrate import RunArgs, _passed_gate, implementers, readiness, run_gate_job, run_job
 from agenthub.plan import Plan, Task
 from agenthub.planstate import AttemptState, State, TaskState
 from agenthub.pool import parse_link
@@ -614,8 +614,8 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
     head = guards.head(repo)
     # The branch the task was created from: the plan base, or its dependency's branch.
     base = tstate.start_ref or plan.base
-    implementers = implementers_of(paths(), repo.root, base)
     jobs = list_jobs(paths(), 100000)
+    impl = implementers(jobs, repo.root, head)
     mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == repo.root.resolve()]
     on_head = [j for j in mine if j.get("kind") == "review" and j.get("status") == "ok" and j.get("head") == head]
 
@@ -633,7 +633,7 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
         and task_gated
         and on_head
         and on_head[0]["verdict"] == "approve"
-        and who(on_head[0]) not in implementers
+        and who(on_head[0]) not in impl
     ):
         return {"gate": "ok", "review": "approve", "job": on_head[0]["id"], "reason": "", "up_to_date": True}
 
@@ -653,8 +653,8 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
         return res
 
     pool = load_pool()
-    if implementers and not _reviewers_besides("review", implementers):
-        names = ", ".join(sorted(implementers))
+    if impl and not _reviewers_besides("review", impl):
+        names = ", ".join(sorted(impl))
         return {
             "gate": "ok",
             "review": "failed",
@@ -672,7 +672,7 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
             timeout=pool.timeouts["review"],
             base=base,
             jev=plan.jev,
-            exclude=sorted(implementers),
+            exclude=sorted(impl),
         ),
         paths(),
         pool,
@@ -724,14 +724,14 @@ def _merge_reviewer(jobs: list[dict], workdir: Path, head: str) -> str:
         return f"{j.get('agent')}:{j.get('model')}"
 
     mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == workdir.resolve()]
-    implementers = {who(j) for j in mine if j.get("kind") == "implement" and j.get("status") in ("ok", "gate-failed")}
+    impl = implementers(jobs, workdir, head)
     for j in mine:
         if (
             j.get("kind") == "review"
             and j.get("status") == "ok"
             and j.get("verdict") == "approve"
             and j.get("head") == head
-            and who(j) not in implementers
+            and who(j) not in impl
         ):
             return who(j)
     return "?"
