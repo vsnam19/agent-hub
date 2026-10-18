@@ -263,23 +263,8 @@ def run_job(
     # read-only jobs must leave the tree as they found it; a review also gets a diff, a plan has no base
     read_only = kind in ("review", "plan")
     adapters = registry()
-    # effort is ignored here: the same model at another effort is not an independent reviewer
-    excluded = {text.partition("@")[0] for text in args.exclude}
-    if kind == "review":
-        excluded.update(implementers_of(p, args.workdir))
-    links = [link for link in args.links if link.quota_key not in excluded]
-    for link in links:
-        if link.agent not in adapters:
-            raise ConfigError(f"unknown agent in chain: {link.agent}")
-    briefmod.validate(kind, args.brief)
-    skills = list(dict.fromkeys(args.skills))
-    known_skills = available_skills(p.config_dir) if skills else {}
-    for skill in skills:
-        if skill not in known_skills:
-            raise ConfigError(f"unknown skill {skill!r}: {skills_hint(known_skills)}")
-
     started = now()
-    workdir = args.workdir
+    workdir = Path(args.workdir).resolve()
     repo = None
     refusal = None
     base = None
@@ -293,6 +278,22 @@ def run_job(
             diff = guards.review_diff(repo, base)
     except guards.GuardError as e:
         refusal = str(e)
+
+    jobs = list_jobs(p, 100000) if kind == "review" else []
+    # effort is ignored here: the same model at another effort is not an independent reviewer
+    excluded = {text.partition("@")[0] for text in args.exclude}
+    if kind == "review":
+        excluded.update(implementers(jobs, workdir))
+    links = [link for link in args.links if link.quota_key not in excluded]
+    for link in links:
+        if link.agent not in adapters:
+            raise ConfigError(f"unknown agent in chain: {link.agent}")
+    briefmod.validate(kind, args.brief)
+    skills = list(dict.fromkeys(args.skills))
+    known_skills = available_skills(p.config_dir) if skills else {}
+    for skill in skills:
+        if skill not in known_skills:
+            raise ConfigError(f"unknown skill {skill!r}: {skills_hint(known_skills)}")
 
     gates = args.gates
     if kind == "implement" and repo is not None:
@@ -348,7 +349,7 @@ def run_job(
     if kind == "implement":
         text += "\n" + handoff.FOOTER
     elif kind == "review":
-        judge = _touched_section(touched_findings(list_jobs(p, 100000), workdir, guards.head(repo))) if repo else ""
+        judge = _touched_section(touched_findings(jobs, workdir, guards.head(repo))) if repo else ""
         text += "\n\n" + judge + handoff.REVIEW_FOOTER
     (job.dir / "brief.md").write_text(text)
     pid = os.getpid()
@@ -549,19 +550,24 @@ def run_job(
     return _finish(job, record, status or ("failed" if denied_last else "exhausted"), now, started)
 
 
-def implementers_of(p: Paths, workdir: Path | str) -> set[str]:
-    """The agent:model of every job on that resolved work tree with kind implement and status ok or gate-failed."""
+def implementers(jobs: list[dict], workdir: Path) -> set[str]:
+    """The agent:model of every implement job on that resolved work tree with status ok or gate-failed."""
     target = Path(workdir).resolve()
-    jobs = list_jobs(p, 100000)
-    mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == target]
-    return {
-        f"{j['agent']}:{j['model']}"
-        for j in mine
-        if j.get("kind") == "implement"
-        and j.get("status") in ("ok", "gate-failed")
-        and j.get("agent")
-        and j.get("model")
-    }
+    found: set[str] = set()
+    for j in jobs:
+        if (
+            j.get("kind") == "implement"
+            and j.get("status") in ("ok", "gate-failed")
+            and j.get("agent")
+            and j.get("model")
+            and j.get("workdir")
+        ):
+            try:
+                if Path(j["workdir"]).resolve() == target:
+                    found.add(f"{j['agent']}:{j['model']}")
+            except OSError:
+                continue
+    return found
 
 
 def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
@@ -573,12 +579,12 @@ def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
         return f"{j.get('agent')}:{j.get('model')}"
 
     gated = [j for j in mine if _passed_gate(j, head)]
-    implementers = {who(j) for j in mine if j.get("kind") == "implement" and j.get("status") in ("ok", "gate-failed")}
+    impl = implementers(jobs, workdir)
     reviews = [j for j in mine if j.get("kind") == "review" and j.get("status") == "ok" and j.get("verdict")]
     problems = []
     if not gated:
         problems.append(f"no passing gate on {head}")
-    if not implementers:
+    if not impl:
         problems.append("no implementer recorded: cannot check reviewer independence")
     judges: list[dict] = []
     if not reviews:
@@ -591,9 +597,9 @@ def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
             approved = [r for r in on_head if r["verdict"] == "approve"]
             if not approved:
                 problems.append(f"review verdict {on_head[0]['verdict']}")
-            elif all(who(r) in implementers for r in approved):
+            elif all(who(r) in impl for r in approved):
                 problems.append("reviewer is the implementer")
-            judges = [r for r in on_head if who(r) not in implementers]
+            judges = [r for r in on_head if who(r) not in impl]
     if gated:
         problems.extend(_touched_problems(touched_findings(jobs, workdir, head), judges))
     return problems
