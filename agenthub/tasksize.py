@@ -10,7 +10,24 @@ HEADINGS = ("Goal", "Input", "Expected output", "Constraints", "Gate")
 DELIVERABLE = re.compile(r"^\d+\.\s+\S")
 TEST_NAME = re.compile(r"`(?:[^`\s]+::)?(test_\w+)`")
 BACKTICKED = re.compile(r"`([^`]+)`")
-FILE_EXTENSION = re.compile(r"\.[A-Za-z][A-Za-z0-9]*$")
+FILE_EXTENSIONS = (
+    ".py",
+    ".md",
+    ".toml",
+    ".json",
+    ".sh",
+    ".yml",
+    ".yaml",
+    ".txt",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".c",
+    ".js",
+    ".ts",
+    ".cfg",
+    ".ini",
+)
 CHANGE_WORD = re.compile(r"\bchanges?\b|\bchanged\b")
 WHITESPACE = re.compile(r"\s")
 
@@ -50,11 +67,11 @@ def _only_bullets(lines: list[str]) -> list[str]:
 
 
 def _paths(text: str) -> set[str]:
-    """Backticked spans that name a file: no whitespace, has '/' or an extension; `path::test` forms are skipped."""
+    """Backticked spans naming a file: no whitespace, has '/' or allowed extension; `path::test` skipped."""
     return {
         span
         for span in BACKTICKED.findall(text)
-        if not WHITESPACE.search(span) and "::" not in span and ("/" in span or FILE_EXTENSION.search(span))
+        if not WHITESPACE.search(span) and "::" not in span and ("/" in span or span.endswith(FILE_EXTENSIONS))
     }
 
 
