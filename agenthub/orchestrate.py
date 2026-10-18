@@ -264,7 +264,7 @@ def run_job(
     read_only = kind in ("review", "plan")
     adapters = registry()
     started = now()
-    workdir = args.workdir
+    workdir = Path(args.workdir).resolve()
     repo = None
     refusal = None
     base = None
@@ -282,8 +282,8 @@ def run_job(
     jobs = list_jobs(p, 100000) if kind == "review" else []
     # effort is ignored here: the same model at another effort is not an independent reviewer
     excluded = {text.partition("@")[0] for text in args.exclude}
-    if kind == "review" and repo is not None:
-        excluded.update(implementers(jobs, repo.root, guards.head(repo)))
+    if kind == "review":
+        excluded.update(implementers(jobs, workdir))
     links = [link for link in args.links if link.quota_key not in excluded]
     for link in links:
         if link.agent not in adapters:
@@ -537,51 +537,23 @@ def run_job(
     return _finish(job, record, status or ("failed" if denied_last else "exhausted"), now, started)
 
 
-def implementers(jobs: list[dict], workdir: Path, head: str) -> set[str]:
-    """The agent:model of every implement job on that resolved work tree with status ok or gate-failed
-    whose recorded `head` is an ancestor-or-equal of `head` (`git merge-base --is-ancestor <job head> <head>`).
-    Jobs whose `head` is missing or unknown to git are dropped."""
+def implementers(jobs: list[dict], workdir: Path) -> set[str]:
+    """The agent:model of every implement job on that resolved work tree with status ok or gate-failed."""
     target = Path(workdir).resolve()
-    mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == target]
-
-    cache: dict[str, bool] = {}
-
-    def is_ancestor(a: str, b: str) -> bool:
-        keep = cache.get(a)
-        if keep is not None:
-            return keep
-        try:
-            argv = guards._git_argv("merge-base", "--is-ancestor", "--end-of-options", a, b)
-            res = subprocess.run(argv, cwd=target, capture_output=True, text=True, env=guards._git_env())
-            if res.returncode == 0:
-                keep = True
-            elif res.returncode == 1:
-                keep = False
-            elif "end-of-options" in res.stderr:
-                fallback = guards._git_argv("merge-base", "--is-ancestor", a, b)
-                res_fb = subprocess.run(fallback, cwd=target, capture_output=True, text=True, env=guards._git_env())
-                keep = res_fb.returncode == 0
-            else:
-                keep = False
-        except (subprocess.CalledProcessError, OSError):
-            keep = False
-        cache[a] = keep
-        return keep
-
     found: set[str] = set()
-    for j in mine:
+    for j in jobs:
         if (
-            j.get("kind") != "implement"
-            or j.get("status") not in ("ok", "gate-failed")
-            or not j.get("agent")
-            or not j.get("model")
+            j.get("kind") == "implement"
+            and j.get("status") in ("ok", "gate-failed")
+            and j.get("agent")
+            and j.get("model")
+            and j.get("workdir")
         ):
-            continue
-        j_head = j.get("head")
-        if not j_head or not isinstance(j_head, str):
-            continue
-        if is_ancestor(j_head, head):
-            found.add(f"{j['agent']}:{j['model']}")
+            try:
+                if Path(j["workdir"]).resolve() == target:
+                    found.add(f"{j['agent']}:{j['model']}")
+            except OSError:
+                continue
     return found
 
 
@@ -594,7 +566,7 @@ def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
         return f"{j.get('agent')}:{j.get('model')}"
 
     gated = [j for j in mine if _passed_gate(j, head)]
-    impl = implementers(jobs, workdir, head)
+    impl = implementers(jobs, workdir)
     reviews = [j for j in mine if j.get("kind") == "review" and j.get("status") == "ok" and j.get("verdict")]
     problems = []
     if not gated:

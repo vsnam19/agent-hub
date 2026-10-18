@@ -615,7 +615,7 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
     # The branch the task was created from: the plan base, or its dependency's branch.
     base = tstate.start_ref or plan.base
     jobs = list_jobs(paths(), 100000)
-    impl = implementers(jobs, repo.root, head)
+    impl = implementers(jobs, repo.root)
     mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == repo.root.resolve()]
     on_head = [j for j in mine if j.get("kind") == "review" and j.get("status") == "ok" and j.get("head") == head]
 
@@ -724,7 +724,7 @@ def _merge_reviewer(jobs: list[dict], workdir: Path, head: str) -> str:
         return f"{j.get('agent')}:{j.get('model')}"
 
     mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == workdir.resolve()]
-    impl = implementers(jobs, workdir, head)
+    impl = implementers(jobs, workdir)
     for j in mine:
         if (
             j.get("kind") == "review"

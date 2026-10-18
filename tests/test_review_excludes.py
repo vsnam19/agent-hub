@@ -237,58 +237,8 @@ def test_plan_review_skips_fix_author(env_sandbox, repo, tmp_path, monkeypatch):
     assert "codex:m2" in req_json["exclude"]
 
 
-def test_review_ignores_implementers_of_other_branches(env_sandbox, repo):
+def test_readiness_and_review_agree(env_sandbox, repo, tmp_path):
     p = paths()
-    # Create another branch with a commit
-    subprocess.run(["git", "checkout", "-b", "other-branch"], cwd=repo, check=True, env=guards._git_env())
-    (repo / "other.txt").write_text("other\n")
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, env=guards._git_env())
-    subprocess.run(["git", "commit", "-m", "other commit"], cwd=repo, check=True, env=guards._git_env())
-    other_head = guards.head(guards.inspect(repo))
-
-    # Switch back to feat/x
-    subprocess.run(["git", "checkout", "feat/x"], cwd=repo, check=True, env=guards._git_env())
-    (repo / "feature.txt").write_text("feature\n")
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, env=guards._git_env())
-    subprocess.run(["git", "commit", "-m", "feature commit"], cwd=repo, check=True, env=guards._git_env())
-    feat_head = guards.head(guards.inspect(repo))
-
-    # Record implement job whose head was on other-branch (model: agy:m1)
-    _record_implement_job(p, repo, "agy", "m1", status="ok", ts_offset=40, head=other_head)
-
-    # Record implement job on current branch (feat/x) by codex:m2 with passing gate
-    _record_implement_job(
-        p,
-        repo,
-        "codex",
-        "m2",
-        status="ok",
-        ts_offset=30,
-        head=feat_head,
-        gate=[{"cmd": "true", "rc": 0, "sha": feat_head}],
-    )
-
-    # run_job for review with base="master" should not exclude agy:m1
-    review_args = args_for(repo, ["agy:m1"], role="review", base="master")
-    result = run_job(review_args, p, make_pool(), now)
-    assert result["status"] == "ok"
-    assert (result["agent"], result["model"]) == ("agy", "m1")
-    req_json = json.loads((p.jobs_dir / result["id"] / "request.json").read_text())
-    assert "agy:m1" not in req_json["exclude"]
-    assert req_json["links"] == ["agy:m1"]
-
-    # Record approving review by agy:m1 on feat_head
-    _record_review_job(p, repo, "agy", "m1", verdict="approve", status="ok", ts_offset=10, head=feat_head)
-
-    # readiness accepts agy:m1's approval (no problems returned)
-    jobs = list_jobs(p, 100000)
-    assert readiness(jobs, repo, feat_head) == []
-
-
-def test_readiness_and_review_agree(env_sandbox, repo):
-    p = paths()
-    # Branch starts at initial commit c0 on feat/x
-    c0 = guards.head(guards.inspect(repo))
 
     # Commit c1 on feat/x
     (repo / "c1.txt").write_text("c1\n")
@@ -302,24 +252,17 @@ def test_readiness_and_review_agree(env_sandbox, repo):
     subprocess.run(["git", "commit", "-m", "commit c2"], cwd=repo, check=True, env=guards._git_env())
     c2 = guards.head(guards.inspect(repo))
 
-    # Create an unrelated branch from c0
-    subprocess.run(["git", "checkout", "-b", "unrelated", c0], cwd=repo, check=True, env=guards._git_env())
-    (repo / "unrelated.txt").write_text("unrelated\n")
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, env=guards._git_env())
-    subprocess.run(["git", "commit", "-m", "commit unrelated"], cwd=repo, check=True, env=guards._git_env())
-    c3 = guards.head(guards.inspect(repo))
-
-    # Switch back to feat/x at c2
-    subprocess.run(["git", "checkout", "feat/x"], cwd=repo, check=True, env=guards._git_env())
+    other_worktree = tmp_path / "other"
+    other_worktree.mkdir()
 
     # Record implement jobs:
-    # 1. agy:m1 at c1 (ancestor of c2)
+    # 1. agy:m1 on repo (ok)
     _record_implement_job(p, repo, "agy", "m1", status="ok", ts_offset=50, head=c1)
-    # 2. codex:m2 at c2 (equal to c2)
+    # 2. codex:m2 on repo (gate-failed)
     _record_implement_job(p, repo, "codex", "m2", status="gate-failed", ts_offset=40, head=c2)
-    # 3. claude:m3 at c3 (unrelated branch)
-    _record_implement_job(p, repo, "claude", "m3", status="ok", ts_offset=30, head=c3)
-    # 4. gemini:m4 at c2 (failed status -> should not count)
+    # 3. claude:m3 on other_worktree (ok) -> different worktree, not an implementer of repo
+    _record_implement_job(p, other_worktree, "claude", "m3", status="ok", ts_offset=30, head="other_head")
+    # 4. gemini:m4 on repo (failed status -> should not count)
     t = now() - timedelta(seconds=20)
     j_fail = new_job(p, "implement", t)
     j_fail.write_json(
@@ -340,7 +283,7 @@ def test_readiness_and_review_agree(env_sandbox, repo):
 
     jobs = list_jobs(p, 100000)
     expected_implementers = {"agy:m1", "codex:m2"}
-    assert implementers(jobs, repo, c2) == expected_implementers
+    assert implementers(jobs, repo) == expected_implementers
 
     # run_job for review with candidate models:
     review_args = args_for(repo, ["agy:m1", "codex:m2", "claude:m3"], role="review", base="master")
@@ -368,12 +311,15 @@ def test_readiness_and_review_agree(env_sandbox, repo):
     assert "reviewer is the implementer" in problems
 
 
-def test_implementer_with_uncommitted_work_counts(env_sandbox, repo):
+def test_implementer_survives_history_rewrite(env_sandbox, repo):
     p = paths()
-    # Branch starts at start_commit
-    start_commit = guards.head(guards.inspect(repo))
+    # Initial commit / setup on feat/x
+    (repo / "feature.txt").write_text("initial work\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, env=guards._git_env())
+    subprocess.run(["git", "commit", "-m", "implement commit H1"], cwd=repo, check=True, env=guards._git_env())
+    h1 = guards.head(guards.inspect(repo))
 
-    # Implement job ran at start_commit
+    # Implement job recorded at head H1
     _record_implement_job(
         p,
         repo,
@@ -381,21 +327,31 @@ def test_implementer_with_uncommitted_work_counts(env_sandbox, repo):
         "m1",
         status="ok",
         ts_offset=40,
-        head=start_commit,
-        gate=[{"cmd": "true", "rc": 0, "sha": start_commit}],
+        head=h1,
+        gate=[{"cmd": "true", "rc": 0, "sha": h1}],
     )
 
-    # Work committed afterwards on the branch
-    (repo / "work.txt").write_text("branch work\n")
+    # Branch amended so H1 is no longer an ancestor
+    (repo / "feature.txt").write_text("amended work\n")
     subprocess.run(["git", "add", "."], cwd=repo, check=True, env=guards._git_env())
-    subprocess.run(["git", "commit", "-m", "commit branch work"], cwd=repo, check=True, env=guards._git_env())
-    new_head = guards.head(guards.inspect(repo))
-    assert new_head != start_commit
+    subprocess.run(["git", "commit", "--amend", "-m", "amended commit H2"], cwd=repo, check=True, env=guards._git_env())
+    h2 = guards.head(guards.inspect(repo))
+    assert h2 != h1
 
-    # agy:m1 is excluded from review
+    # Verify H1 is no longer an ancestor of H2
+    ancestor_check = subprocess.run(
+        guards._git_argv("merge-base", "--is-ancestor", h1, h2),
+        cwd=repo,
+        capture_output=True,
+        env=guards._git_env(),
+    )
+    assert ancestor_check.returncode != 0
+
+    # Under fail-closed rule, agy:m1 is still an implementer
     jobs = list_jobs(p, 100000)
-    assert implementers(jobs, repo, new_head) == {"agy:m1"}
+    assert implementers(jobs, repo) == {"agy:m1"}
 
+    # A review excludes that model and selects claude:m3
     review_args = args_for(repo, ["agy:m1", "claude:m3"], role="review", base="master")
     result = run_job(review_args, p, make_pool(), now)
     assert result["status"] == "ok"
@@ -404,13 +360,13 @@ def test_implementer_with_uncommitted_work_counts(env_sandbox, repo):
     assert "agy:m1" in req_json["exclude"]
     assert req_json["links"] == ["claude:m3"]
 
-    # Passing gate on new_head
-    _record_gate_job(p, repo, new_head)
+    # Passing gate on H2
+    _record_gate_job(p, repo, h2)
 
-    # Approving review by agy:m1 on new_head is refused by readiness
-    _record_review_job(p, repo, "agy", "m1", verdict="approve", status="ok", ts_offset=10, head=new_head)
+    # Approving review by agy:m1 on H2 is refused by readiness
+    _record_review_job(p, repo, "agy", "m1", verdict="approve", status="ok", ts_offset=10, head=h2)
     jobs_after_review = list_jobs(p, 100000)
-    problems = readiness(jobs_after_review, repo, new_head)
+    problems = readiness(jobs_after_review, repo, h2)
     assert "reviewer is the implementer" in problems
 
 
