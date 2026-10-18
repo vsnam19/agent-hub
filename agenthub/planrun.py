@@ -556,6 +556,42 @@ def escalate(tstate: TaskState, task: Task, job_result: dict, job_status: str) -
     tstate.reason = f"{brief}\n\n{note}" if brief else note
 
 
+def rejected_context(plan_dir: Path, task_name: str) -> str:
+    """Read fixes/<task>-<round>-rejected.md in numeric round order and format for the review brief."""
+    fixes_dir = Path(plan_dir) / "fixes"
+    if not fixes_dir.is_dir():
+        return ""
+
+    prefix = f"{task_name}-"
+    suffix = "-rejected.md"
+    rounds: list[tuple[int, Path]] = []
+    for p in fixes_dir.iterdir():
+        if not p.is_file():
+            continue
+        name = p.name
+        if name.startswith(prefix) and name.endswith(suffix):
+            round_str = name[len(prefix) : -len(suffix)]
+            if round_str.isdigit():
+                rounds.append((int(round_str), p))
+
+    if not rounds:
+        return ""
+
+    rounds.sort(key=lambda x: x[0])
+    lines: list[str] = []
+    for _, path in rounds:
+        content = path.read_text(encoding="utf-8")
+        for line in content.splitlines():
+            if line.strip():
+                lines.append(line.rstrip())
+
+    if not lines:
+        return ""
+
+    heading = "## Already answered (rejected findings; repeat one only with new evidence)"
+    return f"{heading}\n" + "\n".join(lines) + "\n"
+
+
 def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], datetime]) -> dict:
     """Gate the committed HEAD of a done task, then run the plan's review role on it, unless HEAD is already up to
     date (the work tree is clean, readiness passes, a passing gate job on HEAD covers every command of task.gate, and
@@ -625,7 +661,7 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
         RunArgs(
             role="review",
             kind="review",
-            brief="",
+            brief=rejected_context(plan.path.parent, task.name),
             workdir=repo.root,
             links=[parse_link(x) for x in pool.roles["review"].chain],
             timeout=pool.timeouts["review"],
