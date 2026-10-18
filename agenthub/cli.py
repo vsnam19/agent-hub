@@ -999,6 +999,14 @@ def _claim_runner(state, plan_dir: Path, plan=None) -> None:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
+def _release_runner(state, plan_dir: Path) -> None:
+    """Release this process's runner claim if still held."""
+    if isinstance(state.runner, dict) and state.runner.get("pid") == os.getpid():
+        state.runner = {}
+        state.save()
+        (plan_dir / "runner.pid").unlink(missing_ok=True)
+
+
 def _stop_runner(pid: int | None, recorded: int | None) -> None:
     """SIGTERM the plan's runner when its start time verifies; say so either way."""
     if _terminate_verified(pid, recorded):
@@ -1252,10 +1260,7 @@ def _cmd_plan(args) -> int:
                 return 0
             return 1 if any_blocked else 0
         finally:
-            if isinstance(state.runner, dict) and state.runner.get("pid") == os.getpid():
-                state.runner = {}
-                state.save()
-                (plan_dir / "runner.pid").unlink(missing_ok=True)
+            _release_runner(state, plan_dir)
 
     elif args.plan_command == "merge":
         from agenthub.planrun import merge_order, merge_target_problem, merge_task
@@ -1307,52 +1312,55 @@ def _cmd_plan(args) -> int:
         from agenthub.planstate import load_or_init
 
         state = load_or_init(plan)
-        _claim_runner(state, plan_dir)
+        _claim_runner(state, plan_dir, plan=plan)
+        try:
 
-        def spawn(argv: list[str], log: Path) -> subprocess.Popen:
-            f = open(log, "wb")
-            return subprocess.Popen(argv, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+            def spawn(argv: list[str], log: Path) -> subprocess.Popen:
+                f = open(log, "wb")
+                return subprocess.Popen(argv, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
 
-        def run():
-            return run_plan(plan, state, spawn, args.max_parallel)
+            def run():
+                return run_plan(plan, state, spawn, args.max_parallel)
 
-        def review(task):
-            return review_task(plan, task, state.task(task.name), _now)
+            def review(task):
+                return review_task(plan, task, state.task(task.name), _now)
 
-        def triage(task):
-            tstate = state.task(task.name)
-            head, err = _task_head(tstate)
-            if err:
-                tstate.status = "blocked"
-                tstate.reason = err
-                return {
-                    "task": task.name,
-                    "status": "blocked",
-                    "counts": {"fix": 0, "reject": 0, "blocked": 0},
-                    "fix_path": "",
-                    "rejected_path": "",
-                    "reason": err,
-                }
-            return triagerun.triage_task(plan, task, tstate, list_jobs(paths(), 100000), head, _now)
+            def triage(task):
+                tstate = state.task(task.name)
+                head, err = _task_head(tstate)
+                if err:
+                    tstate.status = "blocked"
+                    tstate.reason = err
+                    return {
+                        "task": task.name,
+                        "status": "blocked",
+                        "counts": {"fix": 0, "reject": 0, "blocked": 0},
+                        "fix_path": "",
+                        "rejected_path": "",
+                        "reason": err,
+                    }
+                return triagerun.triage_task(plan, task, tstate, list_jobs(paths(), 100000), head, _now)
 
-        def ready(task):
-            tstate = state.task(task.name)
-            head, err = _task_head(tstate)
-            if err:
-                return [err]
-            return readiness(list_jobs(paths(), 100000), Path(tstate.worktree), head)
+            def ready(task):
+                tstate = state.task(task.name)
+                head, err = _task_head(tstate)
+                if err:
+                    return [err]
+                return readiness(list_jobs(paths(), 100000), Path(tstate.worktree), head)
 
-        result = close(
-            plan,
-            state,
-            run=run,
-            review=review,
-            triage=triage,
-            ready=ready,
-            max_rounds=args.rounds,
-        )
-        print(_safe(str(result.report)))
-        return 0 if result.ok else 1
+            result = close(
+                plan,
+                state,
+                run=run,
+                review=review,
+                triage=triage,
+                ready=ready,
+                max_rounds=args.rounds,
+            )
+            print(_safe(str(result.report)))
+            return 0 if result.ok else 1
+        finally:
+            _release_runner(state, plan_dir)
 
     elif args.plan_command == "wait":
         import argparse

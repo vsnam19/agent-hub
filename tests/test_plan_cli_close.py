@@ -1,3 +1,8 @@
+import json
+import os
+
+import pytest
+
 import agenthub.planclose
 from agenthub.cli import main
 from agenthub.planclose import CloseResult
@@ -57,6 +62,7 @@ def test_close_passes_rounds(env_sandbox, tmp_path, monkeypatch, capsys):
         recorded["triage"] = triage
         recorded["ready"] = ready
         recorded["max_rounds"] = max_rounds
+        assert (plan_file.parent / "runner.pid").is_file()
         return CloseResult(ok=True, report=report_file)
 
     monkeypatch.setattr(agenthub.planclose, "close", fake_close)
@@ -72,7 +78,7 @@ def test_close_passes_rounds(env_sandbox, tmp_path, monkeypatch, capsys):
     assert callable(recorded["triage"])
     assert callable(recorded["ready"])
     assert recorded["state"].runner is not None
-    assert (plan_file.parent / "runner.pid").is_file()
+    assert not (plan_file.parent / "runner.pid").is_file()
 
     # Also verify default rounds is 3
     rc_default = main(["plan", "close", str(plan_file)])
@@ -236,3 +242,48 @@ def test_close_passes_max_parallel(env_sandbox, tmp_path, monkeypatch, capsys):
     rc_default = main(["plan", "close", str(plan_file)])
     assert rc_default == 0
     assert run_plan_args == [None]
+
+
+def test_close_releases_runner_claim(env_sandbox, tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    make_repo(repo)
+    plan_file = make_plan_file(tmp_path, repo)
+    plan_dir = plan_file.parent
+    state_file = plan_dir / "state.json"
+    report_file = plan_dir / "report.md"
+
+    recorded_pid = os.getpid()
+    recorded_time = 77777
+    monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: recorded_time if pid == recorded_pid else None)
+
+    claimed_during_close = None
+
+    def fake_close(plan, state, *, run, review, triage, ready, max_rounds=3):
+        nonlocal claimed_during_close
+        disk_state = json.loads(state_file.read_text())
+        claimed_during_close = disk_state.get("runner")
+        return CloseResult(ok=True, report=report_file)
+
+    monkeypatch.setattr(agenthub.planclose, "close", fake_close)
+
+    rc = main(["plan", "close", str(plan_file)])
+    assert rc == 0
+    assert claimed_during_close == {"pid": recorded_pid, "start_time": recorded_time}
+
+    # After close finishes, claim is released
+    saved_state = json.loads(state_file.read_text())
+    assert saved_state["runner"] == {}
+    assert not (plan_dir / "runner.pid").is_file()
+
+    # Also releases on error
+    def failing_close(plan, state, *, run, review, triage, ready, max_rounds=3):
+        raise RuntimeError("simulated close crash")
+
+    monkeypatch.setattr(agenthub.planclose, "close", failing_close)
+
+    with pytest.raises(RuntimeError, match="simulated close crash"):
+        main(["plan", "close", str(plan_file)])
+
+    saved_state_after_error = json.loads(state_file.read_text())
+    assert saved_state_after_error["runner"] == {}
+    assert not (plan_dir / "runner.pid").is_file()
