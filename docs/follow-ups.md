@@ -91,7 +91,7 @@ a turn. Items:
 
 ## From plan `followups-1` (2026-10-19)
 
-- **Gate-touched judgement must match the finding group exactly:** `orchestrate._touched_problems` keys a judgement by
+- **Done 2026-10-19 (plan `f6`, D-104).** **Gate-touched judgement must match the finding group exactly:** `orchestrate._touched_problems` keys a judgement by
   (file, kind, all lines); a reviewer who splits one group (`lines 235,…,1410`) into two lines leaves it "not judged"
   and `ready` refuses (wait-timeout-cap needed a targeted re-review). Accept legitimate entries whose lines together
   cover the group. Low.
@@ -111,3 +111,8 @@ a turn. Items:
   Medium.
 - **agent-plugins repo:** add to `skills/orchestrate/SKILL.md` Non-negotiables "never wait on `kill -0 <pid>`; wait on
   the result file or a wait tool that also ends on a dead/zombie process" (still open).
+- **F6 lows (review of `orch/f6/mcp-register`, approve):** a stale codex entry is replaced by `mcp remove` then `mcp add`;
+  if the add fails the server is gone until the next `hub install`. A non-string codex `transport.command` would make
+  `hub status` raise. Low.
+- **uv-tool `agent-hub` lacks the `mcp` extra:** `agent-hub mcp` on PATH fails ("mcp SDK not installed"); reinstall
+  with `uv tool install -e '.[mcp]'` at release, or keep registering `bin/agent-hub`. Low.

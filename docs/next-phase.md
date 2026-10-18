@@ -3,18 +3,15 @@
 The owner wants the next session to run on its own from a one-word prompt. Do exactly this, without asking, until
 every task is merged or a limit stops you (quota, a decision only the owner can make). Report in Vietnamese.
 
-**State at hand-off (2026-10-19):** master has plan `followups-1` merged (D-103, 19 tasks, 1207 tests, lint clean),
-no worktrees, no `orch/*` branches, nothing running, nothing pushed. agent-hub v0.10.1 still installed: the new Claude
-Code hooks (`agent-hub hook session-start|stop`, `hooks/hooks.json`) and the 100 s MCP wait cap only reach the plugin
-after a release.
+**State at hand-off (2026-10-19, later):** master has plans `followups-1` (D-103) and `f6` (D-104) merged, 1222 tests,
+lint clean, no worktrees, no `orch/*` branches, nothing running, nothing pushed. agent-hub v0.10.1 still installed.
 
-**Current work: none in flight.** Next, in order:
-1. Ask the owner whether to release v0.11.0 (version bump in the 3 manifests, `hub install`, plugin reload) — needed for
-   the hooks. Do not release without the owner.
-2. The owner left `phase-g-audit-prompt.md` (untracked, repo root): Phase G (audit log). Its preconditions are met (E8
-   merged). Ask the owner whether Phase G comes before F6, then follow that prompt.
-3. Otherwise F6 (codex/agy MCP registration via `hub install`), E5 (`plan draft`, with E5 extras in follow-ups), E6,
-   E7 techlead bench. New lows from this plan: `docs/follow-ups.md` "From plan `followups-1`".
+**Current work: none in flight.** Owner (2026-10-19): F6 before G; Phase G is discussed at v0.12 — do not start it.
+Next, in order:
+1. Ask the owner: release v0.11.0 (version bump in 3 manifests, plugin reload) — needed for the hooks, the 100 s wait
+   cap and F6; and whether to run `agent-hub hub install --apply` (registers the MCP server with codex and agy, and also
+   installs the agy plugins telaf/aspice/learned-worker that `hub status` lists as missing). Neither without the owner.
+2. Then E5 (`plan draft`, with the E5 extras in follow-ups), E6, E7 techlead bench. Lows: `docs/follow-ups.md`.
 
 The steps below describe how `followups-1` was run; reuse them for the next plan (new slug, new spec).
 
