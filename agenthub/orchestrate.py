@@ -211,10 +211,10 @@ def run_gate_job(
     }
     pid = os.getpid()
     (job.dir / "pid").write_text(json.dumps({"pid": pid, "start_time": start_time(pid)}))
-    job.write_json("result.json", record)
-    (on_started or globals()["on_started"])(job.id)
     with _Cancel() as cancel:
         try:
+            job.write_json("result.json", record)
+            (on_started or globals()["on_started"])(job.id)
             record["gate"], passed = run_gates(
                 merge_gates(defaults, cli_gates), repo.root, job.dir / "gate", head, cancel
             )
@@ -378,117 +378,128 @@ def run_job(
     }
     if not links:
         record["reason"] = f"all links excluded: {', '.join(sorted(excluded))}" if excluded else "no links"
-    job.write_json("result.json", record)
-    (on_started or globals()["on_started"])(job.id)
-
-    if refusal is not None:
-        record["error"] = refusal
-        return _finish(job, record, "refused", now, started)
-
-    assert repo is not None
-    start_head = guards.head(repo)
-    before = guards.fingerprint(repo)
-    cooldowns = Cooldowns(p.cooldowns_file)
     status: str | None = None
     denied_last = False
 
     with _Cancel() as cancel:
-        for n, link in enumerate(links, start=1):
-            if cancel.cancelled:
-                status = "cancelled"
-                break
-            adapter = adapters[link.agent]
-            entry: dict = {"n": n, "agent": link.agent, "model": link.model}
-            if link.effort:
-                entry["effort"] = link.effort
-            record["attempts"].append(entry)
-
-            if link.effort and link.agent != "claude":
-                entry.update(outcome="config", reason="effort is only supported for claude links")
-                continue
-            if not adapter.installed():
-                entry.update(outcome="skipped", reason="not-installed")
-                continue
-            until = cooldowns.until(link, now())
-            if until is not None:
-                entry.update(outcome="skipped", reason=f"cooldown until {until.isoformat()}")
-                continue
-
-            attempt_dir = job.attempt_dir(n, link.agent, link.model)
-            req = Request(
-                role=kind,
-                model=link.model,
-                workdir=workdir,
-                brief_path=job.dir / "brief.md",
-                attempt_dir=attempt_dir,
-                git_common_dir=repo.common_dir,
-                plugin_dirs=plugin_dirs,
-                effort=link.effort,
-            )
-            cl = adapter.preflight(req)
-            if cl is not None:
-                ran = None
-            else:
-                inv = adapter.build(req)
-                child_env, _ = env.child_env(os.environ, adapter.config.env_passthrough)
-
-                def on_start(pgid: int, n=n, link=link, attempt_dir=attempt_dir) -> None:
-                    cancel.pgid = pgid
-                    meta = {
-                        "n": n,
-                        "agent": link.agent,
-                        "model": link.model,
-                        "pgid": pgid,
-                        "started": now().isoformat(),
-                    }
-                    if link.effort:
-                        meta["effort"] = link.effort
-                    job.write_json(_rel(job, attempt_dir, "attempt.json"), meta)
-
-                ran = process.run(inv, workdir, child_env, attempt_dir, args.timeout, on_start=on_start)
-                cancel.pgid = None
-
-                cl = adapter.classify(ran.rc, attempt_dir)
-                if ran.timed_out:
-                    cl = dataclasses.replace(cl, outcome=Outcome.TIMEOUT)
-            _write_reply(attempt_dir, cl)
-            if ran is None:
-                entry.update(outcome=str(cl.outcome), reason=cl.detail)
-            else:
-                entry.update(outcome=str(cl.outcome), rc=ran.rc, duration_s=round(ran.duration_s, 3))
-            record.update(agent=link.agent, model=link.model, reply_path=str(attempt_dir / "reply.md"))
-            if link.effort:
-                record["effort"] = link.effort
-            else:
-                record.pop("effort", None)
+        try:
+            job.write_json("result.json", record)
+            (on_started or globals()["on_started"])(job.id)
 
             if cancel.cancelled:
-                entry["outcome"] = "cancelled"
-                status = "cancelled"
-                break
-            denied_last = False
-            if cl.outcome == Outcome.QUOTA:
-                cooldowns.set(link, cl.reset_at or (now() + pool.quota_cooldown))
-            elif cl.outcome == Outcome.TRANSIENT:
-                cooldowns.set(link, now() + timedelta(minutes=3))
+                return _finish(job, record, "cancelled", now, started)
 
-            if read_only and guards.fingerprint(repo) != before:
-                status = "modified-tree"
-                break
-            if cl.outcome == Outcome.OK:
-                status = "ok"
-                break
-            if cl.outcome in FALLBACK:
-                if guards.fingerprint(repo) != before:
-                    status = "interrupted"
+            if refusal is not None:
+                record["error"] = refusal
+                return _finish(job, record, "refused", now, started)
+
+            assert repo is not None
+            start_head = guards.head(repo)
+            before = guards.fingerprint(repo)
+            cooldowns = Cooldowns(p.cooldowns_file)
+
+            for n, link in enumerate(links, start=1):
+                if cancel.cancelled:
+                    status = "cancelled"
                     break
-                continue
-            if read_only and cl.outcome == Outcome.FAILED and cl.detail.startswith("permission auto-denied"):
-                entry["fallthrough"] = "permission auto-denied"
-                denied_last = True
-                continue
-            status = TERMINAL[cl.outcome]
-            break
+                adapter = adapters[link.agent]
+                entry: dict = {"n": n, "agent": link.agent, "model": link.model}
+                if link.effort:
+                    entry["effort"] = link.effort
+                record["attempts"].append(entry)
+
+                if link.effort and link.agent != "claude":
+                    entry.update(outcome="config", reason="effort is only supported for claude links")
+                    continue
+                if not adapter.installed():
+                    entry.update(outcome="skipped", reason="not-installed")
+                    continue
+                until = cooldowns.until(link, now())
+                if until is not None:
+                    entry.update(outcome="skipped", reason=f"cooldown until {until.isoformat()}")
+                    continue
+
+                attempt_dir = job.attempt_dir(n, link.agent, link.model)
+                req = Request(
+                    role=kind,
+                    model=link.model,
+                    workdir=workdir,
+                    brief_path=job.dir / "brief.md",
+                    attempt_dir=attempt_dir,
+                    git_common_dir=repo.common_dir,
+                    plugin_dirs=plugin_dirs,
+                    effort=link.effort,
+                )
+                cl = adapter.preflight(req)
+                if cl is not None:
+                    ran = None
+                else:
+                    inv = adapter.build(req)
+                    child_env, _ = env.child_env(os.environ, adapter.config.env_passthrough)
+
+                    def on_start(pgid: int, n=n, link=link, attempt_dir=attempt_dir) -> None:
+                        cancel.pgid = pgid
+                        meta = {
+                            "n": n,
+                            "agent": link.agent,
+                            "model": link.model,
+                            "pgid": pgid,
+                            "started": now().isoformat(),
+                        }
+                        if link.effort:
+                            meta["effort"] = link.effort
+                        job.write_json(_rel(job, attempt_dir, "attempt.json"), meta)
+
+                    ran = process.run(inv, workdir, child_env, attempt_dir, args.timeout, on_start=on_start)
+                    cancel.pgid = None
+
+                    cl = adapter.classify(ran.rc, attempt_dir)
+                    if ran.timed_out:
+                        cl = dataclasses.replace(cl, outcome=Outcome.TIMEOUT)
+                _write_reply(attempt_dir, cl)
+                if ran is None:
+                    entry.update(outcome=str(cl.outcome), reason=cl.detail)
+                else:
+                    entry.update(outcome=str(cl.outcome), rc=ran.rc, duration_s=round(ran.duration_s, 3))
+                record.update(agent=link.agent, model=link.model, reply_path=str(attempt_dir / "reply.md"))
+                if link.effort:
+                    record["effort"] = link.effort
+                else:
+                    record.pop("effort", None)
+
+                if cancel.cancelled:
+                    entry["outcome"] = "cancelled"
+                    status = "cancelled"
+                    break
+                denied_last = False
+                if cl.outcome == Outcome.QUOTA:
+                    cooldowns.set(link, cl.reset_at or (now() + pool.quota_cooldown))
+                elif cl.outcome == Outcome.TRANSIENT:
+                    cooldowns.set(link, now() + timedelta(minutes=3))
+
+                if read_only and guards.fingerprint(repo) != before:
+                    status = "modified-tree"
+                    break
+                if cl.outcome == Outcome.OK:
+                    status = "ok"
+                    break
+                if cl.outcome in FALLBACK:
+                    if guards.fingerprint(repo) != before:
+                        status = "interrupted"
+                        break
+                    continue
+                if read_only and cl.outcome == Outcome.FAILED and cl.detail.startswith("permission auto-denied"):
+                    entry["fallthrough"] = "permission auto-denied"
+                    denied_last = True
+                    continue
+                status = TERMINAL[cl.outcome]
+                break
+
+            if cancel.cancelled:
+                status = "cancelled"
+        except BaseException:
+            _finish(job, record, "cancelled" if cancel.cancelled else "failed", now, started)
+            raise
 
     record["handoff_inferred"] = None
     if kind == "implement":
