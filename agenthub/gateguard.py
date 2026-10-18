@@ -171,7 +171,19 @@ def _literal_elements(lit: ast.AST) -> list:
     return []
 
 
+def _contains_starred_or_none_key(lit: ast.AST) -> bool:
+    if isinstance(lit, (ast.Set, ast.List, ast.Tuple)):
+        return any(isinstance(elt, ast.Starred) for elt in lit.elts)
+    if isinstance(lit, ast.Dict):
+        return any(k is None or isinstance(k, ast.Starred) for k in lit.keys) or any(
+            isinstance(v, ast.Starred) for v in lit.values
+        )
+    return False
+
+
 def _is_literal_superset(base_lit: ast.AST, new_lit: ast.AST) -> bool:
+    if _contains_starred_or_none_key(base_lit) or _contains_starred_or_none_key(new_lit):
+        return False
     if type(base_lit) is not type(new_lit):
         return False
     base_elts = _literal_elements(base_lit)

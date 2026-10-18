@@ -177,3 +177,40 @@ def test_superset_does_not_steal_token_from_exact_direct_match():
     base = gateguard._test_index(base_src.encode("utf-8"))["test_a"]
     new = gateguard._test_index(new_src.encode("utf-8"))["test_a"]
     assert not gateguard._weakened(base, new)
+
+
+def test_starred_growth_is_weakening(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    assert x == [1, 2]\n",
+        "def test_a():\n    assert x == [1, 2, *x[2:]]\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+    base = gateguard._test_index(b"def test_a():\n    assert x == [1, 2]\n")["test_a"]
+    new = gateguard._test_index(b"def test_a():\n    assert x == [1, 2, *x[2:]]\n")["test_a"]
+    assert gateguard._weakened(base, new)
+
+    res_set = _weaken_test(
+        repo,
+        "def test_a():\n    assert set(x) == {'a', 'b'}\n",
+        "def test_a():\n    assert set(x) == {'a', 'b', *set(x)}\n",
+    )
+    assert res_set == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+    base_set = gateguard._test_index(b"def test_a():\n    assert set(x) == {'a', 'b'}\n")["test_a"]
+    new_set = gateguard._test_index(b"def test_a():\n    assert set(x) == {'a', 'b', *set(x)}\n")["test_a"]
+    assert gateguard._weakened(base_set, new_set)
+
+
+def test_dict_unpack_growth_is_weakening(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    assert x == {'a': 1}\n",
+        "def test_a():\n    assert x == {'a': 1, **x}\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+    base = gateguard._test_index(b"def test_a():\n    assert x == {'a': 1}\n")["test_a"]
+    new = gateguard._test_index(b"def test_a():\n    assert x == {'a': 1, **x}\n")["test_a"]
+    assert gateguard._weakened(base, new)
