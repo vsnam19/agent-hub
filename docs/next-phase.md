@@ -1,3 +1,48 @@
+# AUTOPILOT — what to do when the owner says "tiếp tục" / "continue" (written 2026-10-18)
+
+The owner wants the next session to run on its own from a one-word prompt. Do exactly this, without asking, until
+every task is merged or a limit stops you (quota, a decision only the owner can make). Report in Vietnamese.
+
+**State at hand-off:** master `98263dd`+ (E8 merged, D-102), clean: no worktrees, no `orch/*` branches, nothing
+running, nothing pushed. agent-hub v0.10.1 installed (the CLI is an editable install of this repo, so master's code
+runs; the MCP server is the plugin cache 0.10.1 — use the **CLI** for `plan triage/close`).
+
+**Current work: plan `followups-1`** — spec `docs/superpowers/specs/2026-10-18-followups-1.md` (17 small tasks).
+
+1. Follow the `agent-hub:orchestrate` skill. Director never codes; briefs from `brief-template.md` with
+   Goal / Input / Expected output / Constraints / Gate; gate is `just lint` + `uv run pytest -q`.
+2. If `~/.local/state/agent-hub/plans/followups-1/plan.json` does not exist: read the spec, read the code each task
+   touches, write one brief per task under `~/.local/state/agent-hub/plans/followups-1/briefs/`, write `plan.json`
+   (base `master`, slug `followups-1`, `max_parallel` 3, each task `"agent": "agy:gemini-3.8-flash-high"`, `"gate":
+   ["just lint", "uv run pytest -q"]`; task 17 `role: implement-hard` and `depends_on` nothing; avoid stacking tasks
+   on the same file — serialise them with `depends_on` only when unavoidable). If it exists, read `plan status`.
+3. `agent-hub plan run <plan>` (Bash `run_in_background`), then `agent-hub plan wait <plan> --timeout 9m` until it
+   stops returning 124. Then `agent-hub plan review <plan>` (background; results also printed per task).
+4. For each request-changes: read the review reply (`~/.local/state/agent-hub/jobs/<id>/attempts/*/reply.md`), decide
+   fix or reject-with-evidence yourself (or try `agent-hub plan triage <plan>` — new in E8), write a round brief, run
+   `agent-hub run --role implement --agent agy:gemini-3.8-flash-high --brief … -d <worktree> --gate 'just lint'
+   --gate 'uv run pytest -q' --allow <files>`, read the diff, then `agent-hub plan review --task <name> <plan>`.
+   If branches stack, cascade fixes down with `scripts/cascade.sh followups-1 <task> <dep>...` and re-review heads.
+5. Before merging: `agent-hub ready -d <worktree>` for every task. "reviewer is the implementer" → re-review with
+   `agent-hub run --role review -d <wt> --base master --exclude agy:gemini-3.8-flash-high`. Optionally trial-merge
+   all branches into a scratch branch and run the gate. Then `agent-hub plan merge <plan>`; gate master; delete the
+   scratch branch.
+6. After merge: mark the items done in `docs/follow-ups.md`, add a decision line to `docs/decisions.md` (next
+   D-103), replace this AUTOPILOT block's "Current work" with the next step, commit docs on master. Remove leftover
+   worktrees/branches only if merged. Never push; never create remotes.
+
+**Wait rules (lost 8 h ×3 before):** never end a turn while a job runs; never `kill -0 <pid>`; wait with
+`agent-hub wait`/`plan wait` or a `run_in_background` loop on the result file. Foreground waits over ~10 min get moved
+to the background — keep a backgrounded waiter and keep working.
+
+**Routing:** gwen is off. Implement: `agy:gemini-3.8-flash-high` first (saves Claude tokens); haiku fallback.
+Review: a model that did not write any commit on the branch (usually `claude:opus`). If claude:opus is on cooldown,
+wait for it (check `agent-hub pool`) rather than accept a self-review.
+
+**After `followups-1`:** release v0.11.0 only if the owner asks; otherwise next is F6 (codex/agy MCP registration via
+`hub install`), then E5 (`plan draft`, with the E5 extras in follow-ups), E6, E7 techlead bench. Update
+`docs/agent-hub-overview.pdf` status section (E8 done) when convenient.
+
 > **Update 2026-10-18 — E8 merged.** All 16 E8 tasks (`plan triage` + `plan close`, D-101/D-102) went through review
 > rounds (agy Gemini fixes, claude:opus reviews), were cascaded down the stacked branches, approved by a model other
 > than the fix author and merged into master through `ready` (not pushed). Master: lint clean, 1105 tests pass. gwen is
