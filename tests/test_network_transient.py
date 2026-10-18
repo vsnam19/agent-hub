@@ -62,3 +62,15 @@ def test_transient_falls_through_with_short_cooldown(env_sandbox, repo, monkeypa
     assert until is not None
     assert now() < until <= now() + timedelta(minutes=3)
     assert until - now() > timedelta(minutes=2)
+
+
+def test_network_words_on_success_stay_ok(tmp_path):
+    adapter = ClaudeAdapter()
+    adapter.config = type("C", (), {"binary": "claude"})()
+
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    (attempt / "stdout").write_text(json.dumps({"result": "done"}))
+    (attempt / "stderr").write_text("ECONNREFUSED from mcp server")
+    c = adapter.classify(0, attempt)
+    assert c.outcome == Outcome.OK

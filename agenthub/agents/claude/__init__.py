@@ -111,10 +111,12 @@ class ClaudeAdapter(Adapter):
         error_messages = []
         limit_text = ""
         api_status = None
+        is_error = False
         try:
             data = json.loads(stdout_text)
             reply = data.get("result", "")
-            if data.get("is_error"):
+            is_error = bool(data.get("is_error"))
+            if is_error:
                 api_status = data.get("api_error_status")
                 if "subtype" in data:
                     error_messages.append(data["subtype"])
@@ -136,7 +138,7 @@ class ClaudeAdapter(Adapter):
                 reset_at = _reset_from_text(limit_text)
             return Classified(Outcome.QUOTA, reply=reply, reset_at=reset_at, detail=diag)
 
-        if any(
+        if (rc != 0 or is_error) and any(
             x in diag
             for x in [
                 "can't reach the api server",
