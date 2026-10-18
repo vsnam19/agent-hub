@@ -4,7 +4,7 @@ from pathlib import Path
 
 import agenthub.planclose
 import agenthub.triagerun
-from agenthub.cli import _merged_or_gone, main
+from agenthub.cli import _merge_state, _merged_or_gone, main
 from agenthub.plan import load as load_plan
 from agenthub.planstate import TaskState, load_or_init
 from tests.gitrepo import make_repo
@@ -163,6 +163,67 @@ def test_close_keeps_merged_tasks_in_plan(env_sandbox, tmp_path, monkeypatch):
     report_content = report_file.read_text()
     assert "t1" in report_content
     assert "t2" in report_content
+    assert "- t1: done, fix rounds 0/3, review approve, review job -" in report_content
+    assert "t1: blocked" not in report_content
+
+    end_state = load_or_init(plan)
+    assert end_state.task("t1").status == "done"
+    assert end_state.task("t1").status != "blocked"
+
+
+def test_close_blocks_deleted_unmerged_branch(env_sandbox, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "handoff")
+    monkeypatch.setenv("FAKE_AGY_SCENARIO", "handoff")
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "handoff")
+    fake_review(monkeypatch, "approve")
+
+    repo = tmp_path / "repo"
+    make_repo(repo, branch=None)
+    (repo / ".agent-hub").mkdir()
+    (repo / ".agent-hub" / "config.toml").write_text('gates = ["test -f README.md"]\n')
+    (repo / ".gitignore").write_text(".worktrees/\n")
+    subprocess.run(["git", "add", ".agent-hub", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "repo gates"], cwd=repo, check=True)
+
+    content = {
+        "goal": "do it",
+        "repo": str(repo),
+        "base": "master",
+        "slug": "plan-1",
+        "tasks": [
+            {"name": "t1", "role": "implement", "brief": "b1.md"},
+        ],
+    }
+    plan_file = make_plan_file(tmp_path, repo, content=content)
+    plan = load_plan(plan_file)
+
+    # Create t1 branch with a commit, but delete it without merging into master
+    t1_branch = "orch/plan-1/t1"
+    subprocess.run(["git", "checkout", "-b", t1_branch], cwd=repo, check=True)
+    (repo / "t1.txt").write_text("t1")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "t1 commit"], cwd=repo, check=True)
+    subprocess.run(["git", "checkout", "master"], cwd=repo, check=True)
+    subprocess.run(["git", "branch", "-D", t1_branch], cwd=repo, check=True)
+
+    # Setup state: t1 is done, but its branch was deleted without being merged
+    pstate = load_or_init(plan)
+    pstate.tasks["t1"].status = "done"
+    pstate.tasks["t1"].branch = t1_branch
+    pstate.tasks["t1"].start_ref = "master"
+    pstate.save()
+
+    rc = main(["plan", "close", str(plan_file)])
+    assert rc != 0
+    report_file = plan_file.parent / "report.md"
+    assert report_file.is_file()
+    report_content = report_file.read_text()
+    assert "- t1: blocked" in report_content
+    assert "review failed" in report_content
+
+    end_state = load_or_init(plan)
+    assert end_state.task("t1").status == "blocked"
+    assert "branch deleted before merge" in end_state.task("t1").reason
 
 
 def test_merged_or_gone_false_on_git_error(env_sandbox, tmp_path):
@@ -173,6 +234,7 @@ def test_merged_or_gone_false_on_git_error(env_sandbox, tmp_path):
     shutil.rmtree(repo)
     tstate = TaskState(status="done", branch="feature", start_ref="master")
     assert _merged_or_gone(plan, tstate) is False
+    assert _merge_state(plan, tstate) is None
 
 
 def test_branch_without_own_commits_not_merged(env_sandbox, tmp_path):
@@ -198,6 +260,7 @@ def test_branch_without_own_commits_not_merged(env_sandbox, tmp_path):
     # t2 tip is an ancestor of plan.base (master) because t1 is in master,
     # but t2 has no commits of its own (tip == start_ref).
     assert _merged_or_gone(plan, t2_state) is False
+    assert _merge_state(plan, t2_state) is None
 
 
 def test_merged_or_gone_helper(env_sandbox, tmp_path):
@@ -217,6 +280,8 @@ def test_merged_or_gone_helper(env_sandbox, tmp_path):
     # Before merge or deletion: both branches exist and are unmerged
     assert _merged_or_gone(plan, t1_state) is False
     assert _merged_or_gone(plan, t2_state) is False
+    assert _merge_state(plan, t1_state) is None
+    assert _merge_state(plan, t2_state) is None
 
     # After merging t1 and removing its worktree:
     subprocess.run(["git", "merge", "--ff-only", t1_state.branch], cwd=repo, check=True)
@@ -224,13 +289,17 @@ def test_merged_or_gone_helper(env_sandbox, tmp_path):
     shutil.rmtree(t1_worktree)
     assert _merged_or_gone(plan, t1_state) is True
     assert _merged_or_gone(plan, t2_state) is False
+    assert _merge_state(plan, t1_state) == "merged"
+    assert _merge_state(plan, t2_state) is None
 
     # After deleting t2 branch (prune worktree first):
     shutil.rmtree(t2_worktree)
     subprocess.run(["git", "worktree", "prune"], cwd=repo, check=True)
     subprocess.run(["git", "branch", "-D", t2_state.branch], cwd=repo, check=True)
     assert _merged_or_gone(plan, t2_state) is True
+    assert _merge_state(plan, t2_state) == "gone"
 
     # Empty branch or task without branch:
     t1_state.branch = ""
     assert _merged_or_gone(plan, t1_state) is False
+    assert _merge_state(plan, t1_state) is None
