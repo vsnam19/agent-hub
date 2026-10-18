@@ -55,9 +55,10 @@ def _implementer(vstate: TaskState) -> str | None:
     return f"{record['agent']}:{record['model']}"
 
 
-def _reviewers_besides(role: str, implementer: str) -> list[str]:
+def _reviewers_besides(role: str, implementer: str | set[str]) -> list[str]:
     # Compare agent:model only: a link's effort does not make it a different reviewer.
-    return [link for link in load_pool().roles[role].chain if parse_link(link).quota_key != implementer]
+    excluded = {implementer} if isinstance(implementer, str) else set(implementer)
+    return [link for link in load_pool().roles[role].chain if parse_link(link).quota_key not in excluded]
 
 
 def _autocommit(worktree: str, slug: str, task_name: str, job_result: dict) -> str | None:
@@ -652,13 +653,13 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
         return res
 
     pool = load_pool()
-    implementer = _implementer(tstate)
-    if implementer and not _reviewers_besides("review", implementer):
+    if implementers and not _reviewers_besides("review", implementers):
+        names = ", ".join(sorted(implementers))
         return {
             "gate": "ok",
             "review": "failed",
             "job": gate["id"],
-            "reason": f"no reviewer different from {implementer}",
+            "reason": f"no reviewer different from {names}",
         }
 
     review = run_job(
@@ -671,7 +672,7 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
             timeout=pool.timeouts["review"],
             base=base,
             jev=plan.jev,
-            exclude=[implementer] if implementer else [],
+            exclude=sorted(implementers),
         ),
         paths(),
         pool,
@@ -680,7 +681,8 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
     verdict = review.get("verdict") if review["status"] == "ok" else None
     if verdict not in ("approve", "request-changes"):
         verdict = "failed"
-    res = {"gate": "ok", "review": verdict, "job": review["id"], "reason": review.get("error", "")}
+    reason = review.get("reason") or review.get("error", "")
+    res = {"gate": "ok", "review": verdict, "job": review["id"], "reason": reason}
     if review.get("status") == "cancelled":
         res["cancelled"] = True
     return res

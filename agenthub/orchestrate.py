@@ -265,6 +265,8 @@ def run_job(
     adapters = registry()
     # effort is ignored here: the same model at another effort is not an independent reviewer
     excluded = {text.partition("@")[0] for text in args.exclude}
+    if kind == "review":
+        excluded.update(implementers_of(p, args.workdir))
     links = [link for link in args.links if link.quota_key not in excluded]
     for link in links:
         if link.agent not in adapters:
@@ -373,6 +375,8 @@ def run_job(
         "head": None,
         "verdict": None,
     }
+    if not links:
+        record["reason"] = f"all links excluded: {', '.join(sorted(excluded))}" if excluded else "no links"
     job.write_json("result.json", record)
     (on_started or globals()["on_started"])(job.id)
 
@@ -530,6 +534,21 @@ def run_job(
             if status == "ok":
                 status = "scope-violation"
     return _finish(job, record, status or ("failed" if denied_last else "exhausted"), now, started)
+
+
+def implementers_of(p: Paths, workdir: Path | str) -> set[str]:
+    """The agent:model of every job on that resolved work tree with kind implement and status ok or gate-failed."""
+    target = Path(workdir).resolve()
+    jobs = list_jobs(p, 100000)
+    mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == target]
+    return {
+        f"{j['agent']}:{j['model']}"
+        for j in mine
+        if j.get("kind") == "implement"
+        and j.get("status") in ("ok", "gate-failed")
+        and j.get("agent")
+        and j.get("model")
+    }
 
 
 def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:
