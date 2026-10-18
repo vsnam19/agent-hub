@@ -277,7 +277,7 @@ def run_plan(
                     tstate.worktree,
                     "--json",
                 ]
-                if task.agent and not tstate.escalated_from:
+                if task.agent and (tstate.role or task.role) == task.role:
                     argv.extend(["--agent", task.agent])
                 if task.timeout:
                     argv.extend(["--timeout", task.timeout])
@@ -536,7 +536,8 @@ def escalate(tstate: TaskState, task: Task, job_result: dict, job_status: str) -
         return  # cycle guard
 
     cwd = Path(tstate.worktree)
-    subprocess.run(_git_argv("reset", "--hard", tstate.start_ref), cwd=cwd, check=True, capture_output=True)
+    reset_ref = tstate.fix_start if tstate.fix_rounds > 0 and tstate.fix_start else tstate.start_ref
+    subprocess.run(_git_argv("reset", "--hard", reset_ref), cwd=cwd, check=True, capture_output=True)
     subprocess.run(_git_argv("clean", "-fdx"), cwd=cwd, check=True, capture_output=True)
 
     failure = ""
@@ -645,7 +646,10 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
     except ConfigError as e:
         return {**failed, "reason": str(e)}
     if gate["status"] != "ok":
-        return {**failed, "gate": "failed", "job": gate["id"], "reason": f"gate {gate['status']}"}
+        res = {**failed, "gate": "failed", "job": gate["id"], "reason": f"gate {gate['status']}"}
+        if gate["status"] == "cancelled":
+            res["cancelled"] = True
+        return res
 
     pool = load_pool()
     implementer = _implementer(tstate)
@@ -676,7 +680,10 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
     verdict = review.get("verdict") if review["status"] == "ok" else None
     if verdict not in ("approve", "request-changes"):
         verdict = "failed"
-    return {"gate": "ok", "review": verdict, "job": review["id"], "reason": review.get("error", "")}
+    res = {"gate": "ok", "review": verdict, "job": review["id"], "reason": review.get("error", "")}
+    if review.get("status") == "cancelled":
+        res["cancelled"] = True
+    return res
 
 
 def merge_order(plan: Plan) -> list[Task]:
