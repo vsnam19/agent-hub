@@ -39,6 +39,9 @@ def _keyring_env(
 ) -> dict[str, str] | None:
     """agy uses file token storage under SSH; blank SSH vars send it to the keyring when one runs.
     Override with AGENTHUB_AGY_KEYRING=1 (force blank) or 0 (never blank)."""
+    # SSH vars are blanked, not removed, because Invocation.env cannot unset a variable —
+    # this relies on agy's truthiness check and breaks if agy switches to a presence check;
+    # and that the probe result is per call/process as it is.
     forced = environ.get("AGENTHUB_AGY_KEYRING")
     if forced == "1":
         return {"SSH_CONNECTION": "", "SSH_CLIENT": "", "SSH_TTY": ""}

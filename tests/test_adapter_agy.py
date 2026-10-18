@@ -9,6 +9,11 @@ from agenthub.agents.agy import AgyAdapter, _keyring_env, _secret_service_runnin
 from agenthub.process import run
 
 
+@pytest.fixture(autouse=True)
+def mock_secret_service_running(monkeypatch):
+    monkeypatch.setattr("agenthub.agents.agy._secret_service_running", lambda: False)
+
+
 def test_agy_build_implement_argv(tmp_path):
     adapter = AgyAdapter()
     adapter.config = type("C", (), {"binary": "agy"})()
@@ -202,6 +207,42 @@ def test_build_passes_keyring_env(tmp_path, monkeypatch):
 
     inv = adapter.build(req)
     assert inv.env == BLANK_SSH
+
+
+def test_build_never_calls_dbus_send(tmp_path, monkeypatch):
+    monkeypatch.setenv("SSH_CONNECTION", "10.0.0.2 22 10.0.0.1 5000")
+
+    orig_run = subprocess.run
+
+    def fail_on_dbus(cmd, *args, **kwargs):
+        if (isinstance(cmd, (list, tuple)) and any("dbus-send" in str(arg) for arg in cmd)) or "dbus-send" in str(cmd):
+            pytest.fail("build() must not call dbus-send")
+        return orig_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fail_on_dbus)
+    _secret_service_running.cache_clear()
+
+    adapter = AgyAdapter()
+    adapter.config = type("C", (), {"binary": "agy"})()
+
+    brief = tmp_path / "b.md"
+    brief.write_text("hello")
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+
+    req = Request(
+        role="implement",
+        model="m",
+        workdir=tmp_path,
+        brief_path=brief,
+        attempt_dir=attempt,
+        git_common_dir=tmp_path,
+    )
+
+    inv = adapter.build(req)
+    assert inv.argv[0] == "agy"
+    assert (attempt / "brief.md").read_text() == "hello"
+    assert inv.env is None
 
 
 def run_fake(env_sandbox, adapter, scenario, req):
