@@ -146,17 +146,17 @@ def test_plan_review_signal_before_review_starts_no_job(env_sandbox, tmp_path, m
     monkeypatch.setattr(agenthub.planrun, "run_gate_job", fake_run_gate_job)
     monkeypatch.setattr(agenthub.planrun, "run_job", fail_run_job)
 
-    real_implementer = agenthub.planrun._implementer
+    real_load_pool = agenthub.planrun.load_pool
     signal_sent = False
 
-    def fake_implementer(*args, **kwargs):
+    def fake_load_pool(*args, **kwargs):
         nonlocal signal_sent
         if not signal_sent:
             signal_sent = True
             os.kill(os.getpid(), signal.SIGTERM)
-        return real_implementer(*args, **kwargs)
+        return real_load_pool(*args, **kwargs)
 
-    monkeypatch.setattr(agenthub.planrun, "_implementer", fake_implementer)
+    monkeypatch.setattr(agenthub.planrun, "load_pool", fake_load_pool)
 
     rc = main(["plan", "review", str(plan_file)])
     assert rc == 130
@@ -222,14 +222,14 @@ def test_review_task_stop_before_review_job(env_sandbox, tmp_path, monkeypatch):
     def stop_check():
         return stopped
 
-    real_implementer = agenthub.planrun._implementer
+    real_load_pool = agenthub.planrun.load_pool
 
-    def fake_implementer(*args, **kwargs):
+    def fake_load_pool(*args, **kwargs):
         nonlocal stopped
         stopped = True
-        return real_implementer(*args, **kwargs)
+        return real_load_pool(*args, **kwargs)
 
-    monkeypatch.setattr(agenthub.planrun, "_implementer", fake_implementer)
+    monkeypatch.setattr(agenthub.planrun, "load_pool", fake_load_pool)
 
     res = agenthub.planrun.review_task(plan, task, tstate, lambda: datetime.now(timezone.utc), stop=stop_check)
     assert res == {
