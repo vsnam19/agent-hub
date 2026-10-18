@@ -66,6 +66,13 @@ def close(
                             dep_state.reason = f"cascade conflict from {fixed_name}: {files}"
                             approved.discard(dep_name)
                             state.save()
+                        elif outcome.startswith("error:"):
+                            err = outcome.split("error:", 1)[1].strip()
+                            dep_state = state.task(dep_name)
+                            dep_state.status = "blocked"
+                            dep_state.reason = f"cascade failed from {fixed_name}: {err}"
+                            approved.discard(dep_name)
+                            state.save()
             pending_fixed.clear()
 
         made_pending = False
@@ -177,5 +184,10 @@ def close(
         with open(report_path, "a", encoding="utf-8") as f:
             f.write("\n## Built before an upstream fix\n" + "\n".join(stale_lines) + "\n")
 
-    ok = not cancelled and not stale and all(t.name in approved for t in implement_tasks)
+    cascade_blocked = any(
+        state.task(t.name).status == "blocked"
+        and state.task(t.name).reason.startswith(("cascade conflict from ", "cascade failed from "))
+        for t in plan.tasks
+    )
+    ok = not cancelled and not stale and not cascade_blocked and all(t.name in approved for t in implement_tasks)
     return CloseResult(ok=ok, report=report_path, stale=stale, cancelled=cancelled)

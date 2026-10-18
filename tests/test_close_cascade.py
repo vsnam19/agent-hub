@@ -234,3 +234,330 @@ def test_cascade_merges_disjoint_definitions(tmp_path: Path):
     # Verify worktree b is clean and merge commit was made
     status = subprocess.run(["git", "status", "--porcelain"], cwd=wt_b, capture_output=True, text=True)
     assert status.stdout.strip() == ""
+
+
+def test_cascade_reports_git_error_without_commit(tmp_path: Path):
+    repo_dir, wt_a, wt_b, plan, state = _setup_repo_and_worktrees(tmp_path)
+
+    (repo_dir / "file.txt").write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "file.txt"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "init file"], cwd=repo_dir, check=True)
+
+    subprocess.run(["git", "merge", "--no-edit", "master"], cwd=wt_a, check=True)
+    subprocess.run(["git", "merge", "--no-edit", "master"], cwd=wt_b, check=True)
+
+    (wt_a / "file.txt").write_text("fix from a\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "-am", "a fix"], cwd=wt_a, check=True)
+
+    # Dependent worktree b has an uncommitted change to the file the fix touches
+    (wt_b / "file.txt").write_text("dirty in b\n", encoding="utf-8")
+    head_before = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=wt_b, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    outcome = cascade(plan, state, "task-a")
+    assert "task-b" in outcome
+    assert outcome["task-b"].startswith("error: ")
+    assert "overwritten by merge" in outcome["task-b"]
+
+    head_after = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=wt_b, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert head_after == head_before
+
+    # Verify no MERGE_HEAD
+    merge_head = subprocess.run(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=wt_b, capture_output=True)
+    assert merge_head.returncode != 0
+
+
+def test_cascade_refuses_duplicate_keys(tmp_path: Path):
+    repo_dir, wt_a, wt_b, plan, state = _setup_repo_and_worktrees(tmp_path)
+
+    base_code = (
+        "from typing import overload\n\n\n"
+        "@overload\n"
+        "def process(x: int) -> int: ...\n\n\n"
+        "@overload\n"
+        "def process(x: str) -> str: ...\n\n\n"
+        "def process(x: int | str) -> int | str:\n"
+        "    return x\n"
+    )
+    (repo_dir / "typed.py").write_text(base_code, encoding="utf-8")
+    subprocess.run(["git", "add", "typed.py"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "init typed"], cwd=repo_dir, check=True)
+
+    subprocess.run(["git", "merge", "--no-edit", "master"], cwd=wt_a, check=True)
+    subprocess.run(["git", "merge", "--no-edit", "master"], cwd=wt_b, check=True)
+
+    # Task A edits overload
+    a_code = (
+        "from typing import overload\n\n\n"
+        "@overload\n"
+        "def process(x: int) -> int:\n"
+        "    return 1\n\n\n"
+        "@overload\n"
+        "def process(x: str) -> str: ...\n\n\n"
+        "def process(x: int | str) -> int | str:\n"
+        "    return x\n"
+    )
+    (wt_a / "typed.py").write_text(a_code, encoding="utf-8")
+    subprocess.run(["git", "commit", "-am", "a edit overload"], cwd=wt_a, check=True)
+
+    # Task B edits overload differently
+    b_code = (
+        "from typing import overload\n\n\n"
+        "@overload\n"
+        "def process(x: int) -> int:\n"
+        "    return 2\n\n\n"
+        "@overload\n"
+        "def process(x: str) -> str: ...\n\n\n"
+        "def process(x: int | str) -> int | str:\n"
+        "    return x\n"
+    )
+    (wt_b / "typed.py").write_text(b_code, encoding="utf-8")
+    subprocess.run(["git", "commit", "-am", "b edit overload"], cwd=wt_b, check=True)
+
+    outcome = cascade(plan, state, "task-a")
+    assert outcome == {"task-b": "conflict: typed.py"}
+
+    # Merge must be aborted, working tree clean
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=wt_b, capture_output=True, text=True)
+    assert status.stdout.strip() == ""
+
+
+def test_cascade_refuses_unnamed_statement_edits(tmp_path: Path):
+    repo_dir, wt_a, wt_b, plan, state = _setup_repo_and_worktrees(tmp_path)
+
+    base_code = "def main():\n    pass\n\n\nif __name__ == '__main__':\n    print('base')\n    main()\n"
+    (repo_dir / "entry.py").write_text(base_code, encoding="utf-8")
+    subprocess.run(["git", "add", "entry.py"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "init entry"], cwd=repo_dir, check=True)
+
+    subprocess.run(["git", "merge", "--no-edit", "master"], cwd=wt_a, check=True)
+    subprocess.run(["git", "merge", "--no-edit", "master"], cwd=wt_b, check=True)
+
+    # Both sides edit if __name__ == '__main__': differently
+    a_code = "def main():\n    pass\n\n\nif __name__ == '__main__':\n    print('from a')\n    main()\n"
+    (wt_a / "entry.py").write_text(a_code, encoding="utf-8")
+    subprocess.run(["git", "commit", "-am", "a edit entry"], cwd=wt_a, check=True)
+
+    b_code = "def main():\n    pass\n\n\nif __name__ == '__main__':\n    print('from b')\n    main()\n"
+    (wt_b / "entry.py").write_text(b_code, encoding="utf-8")
+    subprocess.run(["git", "commit", "-am", "b edit entry"], cwd=wt_b, check=True)
+
+    outcome = cascade(plan, state, "task-a")
+    assert outcome == {"task-b": "conflict: entry.py"}
+
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=wt_b, capture_output=True, text=True)
+    assert status.stdout.strip() == ""
+    content = (wt_b / "entry.py").read_text(encoding="utf-8")
+    assert content.count("if __name__ == '__main__':") == 1
+    assert "print('from a')" not in content
+    assert "print('from b')" in content
+
+
+def test_cascade_error_blocks_close(tmp_path: Path):
+    repo_dir, wt_a, wt_b, plan, state = _setup_repo_and_worktrees(tmp_path)
+
+    (repo_dir / "mod.py").write_text("def run(): return 0\n", encoding="utf-8")
+    subprocess.run(["git", "add", "mod.py"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "init mod"], cwd=repo_dir, check=True)
+
+    subprocess.run(["git", "merge", "--no-edit", "master"], cwd=wt_a, check=True)
+    subprocess.run(["git", "merge", "--no-edit", "master"], cwd=wt_b, check=True)
+
+    # Task b has uncommitted changes in mod.py so cascade merge will fail with git error
+    (wt_b / "mod.py").write_text("def run(): return 'uncommitted'\n", encoding="utf-8")
+
+    run_calls = 0
+
+    def fake_run() -> int:
+        nonlocal run_calls
+        run_calls += 1
+        if run_calls == 2:
+            (wt_a / "mod.py").write_text("def run(): return 1\n", encoding="utf-8")
+            subprocess.run(["git", "commit", "-am", "fix in a"], cwd=wt_a, check=True)
+            state.task("task-a").status = "done"
+        return 0
+
+    def fake_review(task: Task) -> dict:
+        if task.name == "task-b":
+            return {"gate": "ok", "review": "approve", "job": "job-b", "reason": ""}
+        if task.name == "task-a":
+            if run_calls == 1:
+                return {"gate": "ok", "review": "request-changes", "job": "job-a-1", "reason": "fix needed"}
+            return {"gate": "ok", "review": "approve", "job": "job-a-2", "reason": ""}
+        raise AssertionError(f"unexpected task {task.name}")
+
+    def fake_triage(task: Task) -> dict | None:
+        assert task.name == "task-a"
+        tstate = state.task("task-a")
+        tstate.status = "pending"
+        tstate.fix_rounds += 1
+        return {"status": "fix"}
+
+    def fake_ready(task: Task) -> list[str]:
+        return []
+
+    res = close(
+        plan,
+        state,
+        run=fake_run,
+        review=fake_review,
+        triage=fake_triage,
+        ready=fake_ready,
+        max_rounds=3,
+    )
+
+    assert isinstance(res, CloseResult)
+    assert res.ok is False
+    assert state.task("task-b").status == "blocked"
+    assert state.task("task-b").reason.startswith("cascade failed from task-a: ")
+
+
+def test_astmerge_script_no_merge_in_progress(tmp_path: Path):
+    import sys
+
+    repo_dir = tmp_path / "repo"
+    make_repo(repo_dir, default="master", branch=None)
+    script = Path(__file__).resolve().parent.parent / "scripts" / "astmerge.py"
+
+    pyfile = repo_dir / "mod.py"
+    pyfile.write_text("def foo(): return 1\n", encoding="utf-8")
+
+    res = subprocess.run(
+        [sys.executable, str(script), "mod.py"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 2
+    assert "no merge in progress" in (res.stdout + res.stderr)
+
+
+def test_cascade_refuses_top_level_comments_diff(tmp_path: Path):
+    repo_dir, wt_a, wt_b, plan, state = _setup_repo_and_worktrees(tmp_path)
+
+    base_code = "# Top comment\n\n\ndef compute():\n    return 1\n"
+    (repo_dir / "calc.py").write_text(base_code, encoding="utf-8")
+    subprocess.run(["git", "add", "calc.py"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "init calc"], cwd=repo_dir, check=True)
+
+    subprocess.run(["git", "merge", "--no-edit", "master"], cwd=wt_a, check=True)
+    subprocess.run(["git", "merge", "--no-edit", "master"], cwd=wt_b, check=True)
+
+    # Side A changes top comment
+    a_code = "# Top comment A\n\n\ndef compute():\n    return 1\n"
+    (wt_a / "calc.py").write_text(a_code, encoding="utf-8")
+    subprocess.run(["git", "commit", "-am", "a edit comment"], cwd=wt_a, check=True)
+
+    # Side B changes top comment differently
+    b_code = "# Top comment B\n\n\ndef compute():\n    return 1\n"
+    (wt_b / "calc.py").write_text(b_code, encoding="utf-8")
+    subprocess.run(["git", "commit", "-am", "b edit comment"], cwd=wt_b, check=True)
+
+    outcome = cascade(plan, state, "task-a")
+    assert outcome == {"task-b": "conflict: calc.py"}
+
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=wt_b, capture_output=True, text=True)
+    assert status.stdout.strip() == ""
+
+
+def test_cascade_blocks_close_when_non_implement_task_blocked(tmp_path: Path):
+    repo_dir = tmp_path / "repo"
+    make_repo(repo_dir, default="master", branch=None)
+
+    wt_dir = tmp_path / "worktrees"
+    wt_dir.mkdir()
+
+    wt_a = wt_dir / "task-a"
+    wt_g = wt_dir / "gate-task"
+
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "orch/testslug/task-a", str(wt_a), "master"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "orch/testslug/gate-task", str(wt_g), "master"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+
+    tasks = [
+        Task(name="task-a", role="implement"),
+        Task(name="gate-task", role="gate", depends_on=["task-a"]),
+    ]
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text("{}", encoding="utf-8")
+    plan = Plan(
+        goal="Test non-implement cascade blocked",
+        repo=repo_dir,
+        base="master",
+        slug="testslug",
+        tasks=tasks,
+        path=plan_file,
+    )
+    state = load_or_init(plan)
+    state.task("task-a").status = "done"
+    state.task("task-a").branch = "orch/testslug/task-a"
+    state.task("task-a").worktree = str(wt_a)
+
+    state.task("gate-task").status = "done"
+    state.task("gate-task").branch = "orch/testslug/gate-task"
+    state.task("gate-task").worktree = str(wt_g)
+    state.save()
+
+    (repo_dir / "mod.py").write_text("def run(): return 0\n", encoding="utf-8")
+    subprocess.run(["git", "add", "mod.py"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "init mod"], cwd=repo_dir, check=True)
+
+    subprocess.run(["git", "merge", "--no-edit", "master"], cwd=wt_a, check=True)
+    subprocess.run(["git", "merge", "--no-edit", "master"], cwd=wt_g, check=True)
+
+    (wt_g / "mod.py").write_text("def run(): return 'dirty'\n", encoding="utf-8")
+
+    run_calls = 0
+
+    def fake_run() -> int:
+        nonlocal run_calls
+        run_calls += 1
+        if run_calls == 2:
+            (wt_a / "mod.py").write_text("def run(): return 1\n", encoding="utf-8")
+            subprocess.run(["git", "commit", "-am", "fix in a"], cwd=wt_a, check=True)
+            state.task("task-a").status = "done"
+        return 0
+
+    def fake_review(task: Task) -> dict:
+        assert task.name == "task-a"
+        if run_calls == 1:
+            return {"gate": "ok", "review": "request-changes", "job": "job-a-1", "reason": "fix needed"}
+        return {"gate": "ok", "review": "approve", "job": "job-a-2", "reason": ""}
+
+    def fake_triage(task: Task) -> dict | None:
+        assert task.name == "task-a"
+        tstate = state.task("task-a")
+        tstate.status = "pending"
+        tstate.fix_rounds += 1
+        return {"status": "fix"}
+
+    def fake_ready(task: Task) -> list[str]:
+        return []
+
+    res = close(
+        plan,
+        state,
+        run=fake_run,
+        review=fake_review,
+        triage=fake_triage,
+        ready=fake_ready,
+        max_rounds=3,
+    )
+
+    assert isinstance(res, CloseResult)
+    # Even though task-a is approved and gate-task is not in implement_tasks,
+    # gate-task being blocked by cascade MUST cause res.ok to be False!
+    assert res.ok is False
+    assert state.task("gate-task").status == "blocked"
