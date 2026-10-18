@@ -194,7 +194,7 @@ def review_findings(reply: str) -> list[ReviewFinding]:
     return findings
 
 
-def unparsed_findings(reply: str) -> int:
+def unparsed_findings(reply: str, *, any_shape: bool = False) -> int:
     """The number of bullets in the findings section with indentation 0 that are not findings and not (none)-like
     text."""
     count = 0
@@ -208,7 +208,7 @@ def unparsed_findings(reply: str) -> int:
                     continue
                 if _NONE_LIKE.match(rest):
                     continue
-                if len(_FINDING_SEPARATOR.findall(rest)) >= 2:
+                if any_shape or len(_FINDING_SEPARATOR.findall(rest)) >= 2:
                     count += 1
     return count
 
