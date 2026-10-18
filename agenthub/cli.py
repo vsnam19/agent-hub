@@ -24,7 +24,7 @@ from agenthub.plan import PlanError
 from agenthub.plan import load as load_plan
 from agenthub.planrun import run_plan
 from agenthub.pool import Cooldowns, load_pool, parse_link
-from agenthub.procinfo import is_running, pid_file_dead, read_pid_file, start_time
+from agenthub.procinfo import is_running, live_runner, pid_file_dead, read_pid_file, start_time
 from agenthub.workers import available_skills
 
 WAIT_POLL_S = 1.0
@@ -300,6 +300,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("mcp", help="run the MCP server over stdio")
 
+    hook = sub.add_parser("hook", help="Claude Code session hooks")
+    hook.add_argument("event", choices=["session-start", "stop"], help="hook event name")
+
     return parser
 
 
@@ -321,6 +324,7 @@ def main(argv: list[str] | None = None) -> int:
             "hub": _cmd_hub,
             "skills": _cmd_skills,
             "mcp": _cmd_mcp,
+            "hook": _cmd_hook,
         }[args.command]
         return handler(args)
     except SystemExit as e:  # --help
@@ -1012,27 +1016,7 @@ def _print_trail(trail_file: Path) -> int:
 def _live_runner(plan_dir: Path) -> int | None:
     """Return the recorded runner pid when it is alive and verified (is_running and matching
     start_time, not this process), else None. Unreadable file -> None."""
-    state_file = plan_dir / "state.json"
-    try:
-        data = json.loads(state_file.read_text())
-        if not isinstance(data, dict):
-            return None
-    except (OSError, ValueError):
-        return None
-    runner = data.get("runner")
-    if not isinstance(runner, dict):
-        return None
-    pid = runner.get("pid")
-    recorded = runner.get("start_time")
-    if (
-        isinstance(pid, int)
-        and recorded is not None
-        and pid != os.getpid()
-        and is_running(pid)
-        and start_time(pid) == recorded
-    ):
-        return pid
-    return None
+    return live_runner(plan_dir, exclude_self=True, _is_running=is_running, _start_time=start_time)
 
 
 def _claim_runner(state, plan_dir: Path, plan=None) -> None:
@@ -1597,3 +1581,9 @@ def _cmd_mcp(args) -> int:
 
     run_stdio()
     return 0
+
+
+def _cmd_hook(args) -> int:
+    from agenthub import hooks
+
+    return hooks.main(args.event, sys.stdin, sys.stdout)
