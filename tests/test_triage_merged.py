@@ -4,7 +4,7 @@ from pathlib import Path
 
 import agenthub.planclose
 import agenthub.triagerun
-from agenthub.cli import _merge_state, _merged_or_gone, main
+from agenthub.cli import _merge_state, main
 from agenthub.plan import load as load_plan
 from agenthub.planstate import TaskState, load_or_init
 from tests.gitrepo import make_repo
@@ -233,11 +233,10 @@ def test_merged_or_gone_false_on_git_error(env_sandbox, tmp_path):
     plan = load_plan(plan_file)
     shutil.rmtree(repo)
     tstate = TaskState(status="done", branch="feature", start_ref="master")
-    assert _merged_or_gone(plan, tstate) is False
     assert _merge_state(plan, tstate) is None
 
 
-def test_branch_without_own_commits_not_merged(env_sandbox, tmp_path):
+def test_merge_state_matches_plan_merge(env_sandbox, tmp_path):
     repo = tmp_path / "repo"
     make_repo(repo, branch=None)
     plan_file = make_plan_file(tmp_path, repo)
@@ -258,9 +257,8 @@ def test_branch_without_own_commits_not_merged(env_sandbox, tmp_path):
     t2_state = TaskState(status="done", branch=t2_branch, start_ref=t1_branch)
 
     # t2 tip is an ancestor of plan.base (master) because t1 is in master,
-    # but t2 has no commits of its own (tip == start_ref).
-    assert _merged_or_gone(plan, t2_state) is False
-    assert _merge_state(plan, t2_state) is None
+    # and has no work tree -> "merged" (matches plan merge behaviour)
+    assert _merge_state(plan, t2_state) == "merged"
 
 
 def test_merged_or_gone_helper(env_sandbox, tmp_path):
@@ -278,8 +276,6 @@ def test_merged_or_gone_helper(env_sandbox, tmp_path):
     subprocess.run(["git", "commit", "-m", "t2 commit"], cwd=t2_worktree, check=True)
 
     # Before merge or deletion: both branches exist and are unmerged
-    assert _merged_or_gone(plan, t1_state) is False
-    assert _merged_or_gone(plan, t2_state) is False
     assert _merge_state(plan, t1_state) is None
     assert _merge_state(plan, t2_state) is None
 
@@ -287,8 +283,6 @@ def test_merged_or_gone_helper(env_sandbox, tmp_path):
     subprocess.run(["git", "merge", "--ff-only", t1_state.branch], cwd=repo, check=True)
     t1_worktree = Path(t1_state.worktree)
     shutil.rmtree(t1_worktree)
-    assert _merged_or_gone(plan, t1_state) is True
-    assert _merged_or_gone(plan, t2_state) is False
     assert _merge_state(plan, t1_state) == "merged"
     assert _merge_state(plan, t2_state) is None
 
@@ -296,10 +290,59 @@ def test_merged_or_gone_helper(env_sandbox, tmp_path):
     shutil.rmtree(t2_worktree)
     subprocess.run(["git", "worktree", "prune"], cwd=repo, check=True)
     subprocess.run(["git", "branch", "-D", t2_state.branch], cwd=repo, check=True)
-    assert _merged_or_gone(plan, t2_state) is True
     assert _merge_state(plan, t2_state) == "gone"
 
     # Empty branch or task without branch:
     t1_state.branch = ""
-    assert _merged_or_gone(plan, t1_state) is False
     assert _merge_state(plan, t1_state) is None
+
+
+def test_plan_review_skips_merged_task(env_sandbox, tmp_path, monkeypatch, capsys):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    plan = load_plan(plan_file)
+    repo = Path(plan.repo)
+    t1_branch = state["tasks"]["t1"]["branch"]
+    t2_branch = state["tasks"]["t2"]["branch"]
+    t1_worktree = Path(state["tasks"]["t1"]["worktree"])
+    t2_worktree = Path(state["tasks"]["t2"]["worktree"])
+
+    # Merge t1 into master (plan.base) and remove its worktree
+    subprocess.run(["git", "merge", "--ff-only", t1_branch], cwd=repo, check=True)
+    shutil.rmtree(t1_worktree)
+
+    calls = fake_review(monkeypatch, "approve")
+
+    # Reviewing t1 (which is merged): prints "<task> already merged", not reviewed, exit 0
+    rc = main(["plan", "review", str(plan_file), "--task", "t1"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "t1 already merged" in out
+    assert len(calls) == 0
+
+    # With t2 active and t1 merged: review all
+    rc = main(["plan", "review", str(plan_file)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "t1 already merged" in out
+    assert "t2 gate=" in out
+    assert len(calls) == 1
+
+    # Delete t2 branch before merge (prune worktree first)
+    shutil.rmtree(t2_worktree)
+    subprocess.run(["git", "worktree", "prune"], cwd=repo, check=True)
+    subprocess.run(["git", "branch", "-D", t2_branch], cwd=repo, check=True)
+
+    # Reviewing t2 whose branch is gone: prints "<task> skipped: branch deleted before merge", exit 1
+    rc = main(["plan", "review", str(plan_file), "--task", "t2"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "t2 skipped: branch deleted before merge" in out
+    assert len(calls) == 1  # not reviewed
+
+    # Reviewing all tasks with t1 merged and t2 gone: exit 1
+    rc = main(["plan", "review", str(plan_file)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "t1 already merged" in out
+    assert "t2 skipped: branch deleted before merge" in out
+    assert len(calls) == 1

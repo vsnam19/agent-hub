@@ -1157,21 +1157,7 @@ def _merge_state(plan, tstate) -> str | None:
     except (subprocess.CalledProcessError, OSError):
         return None
 
-    start_ref = getattr(tstate, "start_ref", "")
-    if start_ref and start_ref != plan.base and start_ref != f"refs/heads/{plan.base}":
-        try:
-            start_commit = guards._run_git(repo, "rev-parse", "--verify", "--quiet", f"{start_ref}^{{commit}}")
-            tip = guards._run_git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
-            if tip == start_commit:
-                return None
-        except (subprocess.CalledProcessError, OSError):
-            pass
-
     return "merged"
-
-
-def _merged_or_gone(plan, tstate) -> bool:
-    return _merge_state(plan, tstate) is not None
 
 
 def _check_plan_skills(plan) -> None:
@@ -1269,7 +1255,16 @@ def _cmd_plan(args) -> int:
 
             all_approved = True
             for task in tasks:
-                result = review_task(plan, task, state.task(task.name), _now)
+                tstate = state.task(task.name)
+                mstate = _merge_state(plan, tstate)
+                if mstate == "merged":
+                    print(_safe(f"{task.name} already merged"))
+                    continue
+                if mstate == "gone":
+                    print(_safe(f"{task.name} skipped: branch deleted before merge"))
+                    all_approved = False
+                    continue
+                result = review_task(plan, task, tstate, _now)
                 if result.get("up_to_date"):
                     print(_safe(f"{task.name} up to date (review job={result['job']})"))
                     continue
