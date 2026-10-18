@@ -13,6 +13,7 @@ class Outcome(StrEnum):
     QUOTA = "quota"
     AUTH = "auth"
     MODEL_UNAVAILABLE = "model-unavailable"
+    TRANSIENT = "transient"
     EMPTY = "empty"
     TIMEOUT = "timeout"
     FAILED = "failed"

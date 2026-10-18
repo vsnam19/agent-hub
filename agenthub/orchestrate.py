@@ -39,7 +39,7 @@ EXIT = {
 GATE_TIMEOUT_S = 600
 REPO_CONFIG = Path(".agent-hub") / "config.toml"
 
-FALLBACK = (Outcome.QUOTA, Outcome.AUTH, Outcome.MODEL_UNAVAILABLE)
+FALLBACK = (Outcome.QUOTA, Outcome.AUTH, Outcome.MODEL_UNAVAILABLE, Outcome.TRANSIENT)
 TERMINAL = {Outcome.EMPTY: "empty", Outcome.TIMEOUT: "timeout", Outcome.FAILED: "failed"}
 
 
@@ -464,6 +464,8 @@ def run_job(
             denied_last = False
             if cl.outcome == Outcome.QUOTA:
                 cooldowns.set(link, cl.reset_at or (now() + pool.quota_cooldown))
+            elif cl.outcome == Outcome.TRANSIENT:
+                cooldowns.set(link, now() + timedelta(minutes=3))
 
             if read_only and guards.fingerprint(repo) != before:
                 status = "modified-tree"
