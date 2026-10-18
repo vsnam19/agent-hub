@@ -62,7 +62,7 @@ def test_load_pool_default_only(monkeypatch, tmp_path):
     assert pool.roles["implement"].chain == [
         "claude:haiku",
         "agy:claude-sonnet-4-6",
-        "agy:gemini-3.1-pro-high",
+        "agy:gemini-3.8-flash-high",
         "codex:gpt-5.6-terra",
     ]
     assert pool.timeouts["review"] == timedelta(minutes=20)
@@ -84,7 +84,7 @@ chain = ["x:y"]
     assert pool.roles["review"].chain == [
         "agy:claude-opus-4-6-thinking",
         "codex:gpt-5.6-terra",
-        "agy:gemini-3.1-pro-high",
+        "agy:gemini-3.8-flash-high",
         "claude:sonnet",
     ]
 

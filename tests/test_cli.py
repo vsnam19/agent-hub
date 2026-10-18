@@ -127,7 +127,7 @@ def test_pool_json(env_sandbox, capsys):
     assert entry["link"] == "codex:gpt-5.6-terra"
     assert entry["installed"] is True and entry["version"] == "codex 9.9.9"
     assert entry["cooldown_until"] is not None
-    other = next(e for e in data["roles"]["review"]["chain"] if e["link"] == "agy:gemini-3.1-pro-high")
+    other = next(e for e in data["roles"]["review"]["chain"] if e["link"] == "agy:gemini-3.8-flash-high")
     assert other["cooldown_until"] is None
 
 

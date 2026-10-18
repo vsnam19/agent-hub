@@ -10,7 +10,7 @@ chain = ["gwen:qwen3.5-9b-4bit", "claude:haiku"]
 [roles.implement]
 kind = "implement"
 escalate = "implement-hard"
-chain = ["claude:haiku", "agy:claude-sonnet-4-6", "agy:gemini-3.1-pro-high", "codex:gpt-5.6-terra"]
+chain = ["claude:haiku", "agy:claude-sonnet-4-6", "agy:gemini-3.8-flash-high", "codex:gpt-5.6-terra"]
 
 [roles.implement-hard]
 kind = "implement"
@@ -18,7 +18,7 @@ chain = ["agy:claude-opus-4-6-thinking", "agy:claude-sonnet-4-6", "codex:gpt-5.6
 
 [roles.review]
 kind = "review"
-chain = ["agy:claude-opus-4-6-thinking", "codex:gpt-5.6-terra", "agy:gemini-3.1-pro-high", "claude:sonnet"]
+chain = ["agy:claude-opus-4-6-thinking", "codex:gpt-5.6-terra", "agy:gemini-3.8-flash-high", "claude:sonnet"]
 
 [roles.techlead]
 kind = "plan"
