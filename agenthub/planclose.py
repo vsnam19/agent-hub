@@ -4,6 +4,7 @@ from typing import Callable
 
 from agenthub import planreport
 from agenthub.plan import Plan, Task
+from agenthub.planrun import merge_order
 from agenthub.planstate import State
 
 
@@ -25,11 +26,19 @@ def close(
     ready: Callable[[Task], list[str]],
     stop: Callable[[], bool] = lambda: False,
     max_rounds: int = 3,
+    cascade: Callable[[Plan, State, str], dict[str, str]] | None = None,
 ) -> CloseResult:
+    if cascade is None:
+        from agenthub.cascade import cascade as default_cascade
+
+        cascade = default_cascade
+
     reviews: dict[str, dict] = {}
     approved: set[str] = set()
     rejected_once: set[str] = set()
     fixed_tasks: set[str] = set()
+    pending_fixed: set[str] = set()
+    cascaded: dict[str, set[str]] = {}
 
     implement_tasks = [t for t in plan.tasks if (t.kind or t.role) == "implement"]
 
@@ -39,6 +48,32 @@ def close(
         if rc == 130:
             cancelled = True
             break
+
+        if pending_fixed:
+            ordered_fixed = [t.name for t in merge_order(plan) if t.name in pending_fixed]
+            for fixed_name in ordered_fixed:
+                tstate = state.task(fixed_name)
+                if tstate.status == "done":
+                    cascade_results = cascade(plan, state, fixed_name)
+                    for dep_name, outcome in cascade_results.items():
+                        if outcome == "merged":
+                            approved.discard(dep_name)
+                            cascaded.setdefault(dep_name, set()).add(fixed_name)
+                        elif outcome.startswith("conflict:"):
+                            files = outcome.split("conflict:", 1)[1].strip()
+                            dep_state = state.task(dep_name)
+                            dep_state.status = "blocked"
+                            dep_state.reason = f"cascade conflict from {fixed_name}: {files}"
+                            approved.discard(dep_name)
+                            state.save()
+                        elif outcome.startswith("error:"):
+                            err = outcome.split("error:", 1)[1].strip()
+                            dep_state = state.task(dep_name)
+                            dep_state.status = "blocked"
+                            dep_state.reason = f"cascade failed from {fixed_name}: {err}"
+                            approved.discard(dep_name)
+                            state.save()
+            pending_fixed.clear()
 
         made_pending = False
         needs_rereview = False
@@ -102,6 +137,9 @@ def close(
                             made_pending = True
                             rejected_once.discard(task.name)
                             fixed_tasks.add(task.name)
+                            pending_fixed.add(task.name)
+                            for dep_name in cascaded:
+                                cascaded[dep_name].discard(task.name)
             else:
                 tstate.status = "blocked"
                 reason = r.get("reason") or ""
@@ -129,9 +167,10 @@ def close(
     stale: dict[str, list[str]] = {}
     for task in implement_tasks:
         if task.name in approved:
-            upstream_fixed = sorted(get_transitive_deps(task.name) & fixed_tasks)
-            if upstream_fixed:
-                stale[task.name] = upstream_fixed
+            upstream_fixed = get_transitive_deps(task.name) & fixed_tasks
+            uncascaded = sorted(upstream_fixed - cascaded.get(task.name, set()))
+            if uncascaded:
+                stale[task.name] = uncascaded
 
     report_path = planreport.write_report(plan, state, reviews, max_rounds)
     if stale:
@@ -145,5 +184,10 @@ def close(
         with open(report_path, "a", encoding="utf-8") as f:
             f.write("\n## Built before an upstream fix\n" + "\n".join(stale_lines) + "\n")
 
-    ok = not cancelled and not stale and all(t.name in approved for t in implement_tasks)
+    cascade_blocked = any(
+        state.task(t.name).status == "blocked"
+        and state.task(t.name).reason.startswith(("cascade conflict from ", "cascade failed from "))
+        for t in plan.tasks
+    )
+    ok = not cancelled and not stale and not cascade_blocked and all(t.name in approved for t in implement_tasks)
     return CloseResult(ok=ok, report=report_path, stale=stale, cancelled=cancelled)
