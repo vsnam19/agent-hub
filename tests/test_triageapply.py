@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 from agenthub.planstate import TaskState
@@ -424,3 +425,45 @@ def test_gate_failure_brief_unchanged(tmp_path: Path):
     assert fix_file.is_file()
     assert fix_file.read_text() == "## Goal\nFix gate failure without findings"
     assert tstate.reason == "## Goal\nFix gate failure without findings"
+
+
+def test_fix_round_records_fix_start(tmp_path: Path):
+    plan_dir = tmp_path / "plan"
+    plan_dir.mkdir()
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(worktree), "config", "user.name", "Tester"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "config", "user.email", "test@example.com"], check=True)
+    (worktree / "file.txt").write_text("hello")
+    subprocess.run(["git", "-C", str(worktree), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(worktree), "commit", "-m", "initial commit"], check=True)
+    expected_sha = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    tstate = TaskState(status="running", worktree=str(worktree), fix_rounds=0)
+    finding = TriageFinding(id="F1", severity="high", decision="fix", evidence="foo.py:1")
+    resolution = Resolution(findings=[finding], fix_brief="## Goal\nFix", blocked_reason="")
+
+    result = apply(plan_dir, "task-fix-start", tstate, resolution, "job-review-fix-start")
+
+    assert result["status"] == "fix"
+    assert tstate.fix_start == expected_sha
+
+
+def test_fix_round_clears_escalated_from(tmp_path: Path):
+    plan_dir = tmp_path / "plan"
+    plan_dir.mkdir()
+    tstate = TaskState(status="running", fix_rounds=0, escalated_from="planner", role="director")
+    finding = TriageFinding(id="F1", severity="high", decision="fix", evidence="foo.py:1")
+    resolution = Resolution(findings=[finding], fix_brief="## Goal\nFix", blocked_reason="")
+
+    result = apply(plan_dir, "task-esc", tstate, resolution, "job-review-esc")
+
+    assert result["status"] == "fix"
+    assert tstate.escalated_from == ""
+    assert tstate.role == "director"

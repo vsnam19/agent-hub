@@ -225,3 +225,17 @@ def test_gate_failure_with_fix_brief_starts_round(tmp_path):
     assert (plan.path.parent / "fixes" / "t-1.md").is_file()
     assert (plan.path.parent / "fixes" / "t-1.md").read_text(encoding="utf-8") == fix
     assert (plan.path.parent / "triage.jsonl").is_file()
+
+
+def test_request_changes_without_parsable_findings_blocks(tmp_path):
+    plan, task, tstate, jobs = _setup(tmp_path)
+    review_reply = Path(jobs[0]["reply_path"])
+    review_reply.write_text("## Findings\n- F1: bug in a.py\n\n## Verdict\nrequest-changes\n")
+    calls = []
+    res = triage_task(plan, task, tstate, jobs, "H", NOW, run=_fake(tmp_path, "x", calls=calls))
+    assert res is not None
+    assert res["status"] == "blocked"
+    assert res["reason"] == "review requested changes but no finding could be parsed"
+    assert tstate.status == "blocked"
+    assert tstate.reason == "review requested changes but no finding could be parsed"
+    assert len(calls) == 0

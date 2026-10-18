@@ -31,6 +31,7 @@ class TaskState:
     visited_roles: list[str] = field(default_factory=list)
     fix_rounds: int = 0  # fix rounds this task has had so far
     attempts_base: int = 0  # len(attempts) when the last fix round started
+    fix_start: str = ""  # commit sha where the current fix round starts
 
 
 @dataclass
@@ -68,6 +69,7 @@ class State:
                     "visited_roles": t.visited_roles,
                     "fix_rounds": t.fix_rounds,
                     "attempts_base": t.attempts_base,
+                    "fix_start": t.fix_start,
                 }
                 for name, t in self.tasks.items()
             },
@@ -144,6 +146,7 @@ def load_or_init(plan: Plan) -> State:
                 visited_roles=v.get("visited_roles", []),
                 fix_rounds=v.get("fix_rounds", 0),
                 attempts_base=v.get("attempts_base", 0),
+                fix_start=v.get("fix_start", ""),
             )
 
         state = State(

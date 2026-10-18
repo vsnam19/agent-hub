@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 
 from agenthub.planstate import TaskState
@@ -91,6 +92,20 @@ def apply(
         tstate.reason = fix_text
         tstate.fix_rounds += 1
         tstate.attempts_base = len(tstate.attempts)
+        fix_start = ""
+        if tstate.worktree:
+            try:
+                proc = subprocess.run(
+                    ["git", "-C", tstate.worktree, "rev-parse", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                )
+                if proc.returncode == 0:
+                    fix_start = proc.stdout.strip()
+            except Exception:
+                pass
+        tstate.fix_start = fix_start
+        tstate.escalated_from = ""
 
         return {
             "status": "fix",
