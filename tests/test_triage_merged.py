@@ -6,9 +6,9 @@ import agenthub.planclose
 import agenthub.triagerun
 from agenthub.cli import _merged_or_gone, main
 from agenthub.plan import load as load_plan
-from agenthub.planclose import CloseResult
-from agenthub.planstate import load_or_init
-from tests.test_plan_cli import make_gated_plan_run
+from agenthub.planstate import TaskState, load_or_init
+from tests.gitrepo import make_repo
+from tests.test_plan_cli import fake_review, make_gated_plan_run, make_plan_file
 
 
 def test_triage_ignores_merged_tasks(env_sandbox, tmp_path, monkeypatch, capsys):
@@ -19,6 +19,11 @@ def test_triage_ignores_merged_tasks(env_sandbox, tmp_path, monkeypatch, capsys)
     t2_branch = state["tasks"]["t2"]["branch"]
     t1_worktree = Path(state["tasks"]["t1"]["worktree"])
     t2_worktree = Path(state["tasks"]["t2"]["worktree"])
+
+    # Add a commit to t2 so it has its own commit
+    (t2_worktree / "t2.txt").write_text("t2")
+    subprocess.run(["git", "add", "."], cwd=t2_worktree, check=True)
+    subprocess.run(["git", "commit", "-m", "t2 commit"], cwd=t2_worktree, check=True)
 
     # Merge t1 and t2 branches into master (plan.base)
     subprocess.run(["git", "merge", "--ff-only", t1_branch], cwd=repo, check=True)
@@ -117,37 +122,82 @@ def test_triage_ignores_merged_task_while_triaging_active(env_sandbox, tmp_path,
     assert "t1" not in out
 
 
-def test_close_drops_merged_tasks_from_task_list(env_sandbox, tmp_path, monkeypatch):
-    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+def test_close_keeps_merged_tasks_in_plan(env_sandbox, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "handoff")
+    monkeypatch.setenv("FAKE_AGY_SCENARIO", "handoff")
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "handoff")
+    fake_review(monkeypatch, "approve")
+
+    repo = tmp_path / "repo"
+    make_repo(repo, branch=None)
+    (repo / ".agent-hub").mkdir()
+    (repo / ".agent-hub" / "config.toml").write_text('gates = ["test -f README.md"]\n')
+    (repo / ".gitignore").write_text(".worktrees/\n")
+    subprocess.run(["git", "add", ".agent-hub", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "repo gates"], cwd=repo, check=True)
+
+    plan_file = make_plan_file(tmp_path, repo)
     plan = load_plan(plan_file)
-    repo = Path(plan.repo)
-    t1_branch = state["tasks"]["t1"]["branch"]
-    t1_worktree = Path(state["tasks"]["t1"]["worktree"])
-    t2_worktree = Path(state["tasks"]["t2"]["worktree"])
 
-    # Add a commit to t2 so it is ahead of t1
-    (t2_worktree / "t2.txt").write_text("t2")
-    subprocess.run(["git", "add", "."], cwd=t2_worktree, check=True)
-    subprocess.run(["git", "commit", "-m", "t2 commit"], cwd=t2_worktree, check=True)
-
-    # Merge t1 into master (base) and remove worktree
+    # Create t1 branch with a commit and merge it into master
+    t1_branch = "orch/plan-1/t1"
+    subprocess.run(["git", "checkout", "-b", t1_branch], cwd=repo, check=True)
+    (repo / "t1.txt").write_text("t1")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "t1 commit"], cwd=repo, check=True)
+    subprocess.run(["git", "checkout", "master"], cwd=repo, check=True)
     subprocess.run(["git", "merge", "--ff-only", t1_branch], cwd=repo, check=True)
-    shutil.rmtree(t1_worktree)
 
-    recorded = {}
-
-    def fake_close(p, s, *, run, review, triage, ready, max_rounds=3):
-        recorded["plan_tasks"] = [t.name for t in p.tasks]
-        report_file = plan_file.parent / "report.md"
-        report_file.write_text("done")
-        return CloseResult(ok=True, report=report_file)
-
-    monkeypatch.setattr(agenthub.planclose, "close", fake_close)
+    # Setup state: t1 is done (and merged), t2 is pending (depending on t1)
+    pstate = load_or_init(plan)
+    pstate.tasks["t1"].status = "done"
+    pstate.tasks["t1"].branch = t1_branch
+    pstate.tasks["t1"].start_ref = "master"
+    pstate.tasks["t2"].status = "pending"
+    pstate.save()
 
     rc = main(["plan", "close", str(plan_file)])
     assert rc == 0
-    assert "t1" not in recorded["plan_tasks"]
-    assert "t2" in recorded["plan_tasks"]
+    report_file = plan_file.parent / "report.md"
+    assert report_file.is_file()
+    report_content = report_file.read_text()
+    assert "t1" in report_content
+    assert "t2" in report_content
+
+
+def test_merged_or_gone_false_on_git_error(env_sandbox, tmp_path):
+    repo = tmp_path / "repo"
+    make_repo(repo, branch=None)
+    plan_file = make_plan_file(tmp_path, repo)
+    plan = load_plan(plan_file)
+    shutil.rmtree(repo)
+    tstate = TaskState(status="done", branch="feature", start_ref="master")
+    assert _merged_or_gone(plan, tstate) is False
+
+
+def test_branch_without_own_commits_not_merged(env_sandbox, tmp_path):
+    repo = tmp_path / "repo"
+    make_repo(repo, branch=None)
+    plan_file = make_plan_file(tmp_path, repo)
+    plan = load_plan(plan_file)
+
+    # t1 is merged into master
+    t1_branch = "orch/plan-1/t1"
+    subprocess.run(["git", "checkout", "-b", t1_branch], cwd=repo, check=True)
+    (repo / "t1.txt").write_text("t1")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "t1 commit"], cwd=repo, check=True)
+    subprocess.run(["git", "checkout", "master"], cwd=repo, check=True)
+    subprocess.run(["git", "merge", "--ff-only", t1_branch], cwd=repo, check=True)
+
+    # t2 was started from t1 (start_ref = t1_branch) but made no commits of its own
+    t2_branch = "orch/plan-1/t2"
+    subprocess.run(["git", "branch", t2_branch, t1_branch], cwd=repo, check=True)
+    t2_state = TaskState(status="done", branch=t2_branch, start_ref=t1_branch)
+
+    # t2 tip is an ancestor of plan.base (master) because t1 is in master,
+    # but t2 has no commits of its own (tip == start_ref).
+    assert _merged_or_gone(plan, t2_state) is False
 
 
 def test_merged_or_gone_helper(env_sandbox, tmp_path):

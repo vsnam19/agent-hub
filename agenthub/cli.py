@@ -1141,18 +1141,33 @@ def _merged_or_gone(plan, tstate) -> bool:
     if not branch:
         return False
     ref = branch if branch.startswith("refs/heads/") else f"refs/heads/{branch}"
-    branch_name = branch.removeprefix("refs/heads/")
+    repo = Path(plan.repo)
     try:
-        guards._run_git(Path(plan.repo), "rev-parse", "--verify", "--quiet", ref)
-    except (subprocess.CalledProcessError, OSError):
-        return True
+        guards._run_git(repo, "show-ref", "--verify", "--quiet", ref)
+    except subprocess.CalledProcessError as e:
+        return e.returncode == 1
+    except OSError:
+        return False
+
     if tstate.worktree and Path(tstate.worktree).is_dir():
         return False
+
     try:
-        guards._run_git(Path(plan.repo), "merge-base", "--is-ancestor", branch_name, plan.base)
-        return True
+        guards._run_git(repo, "merge-base", "--is-ancestor", ref, plan.base)
     except (subprocess.CalledProcessError, OSError):
         return False
+
+    start_ref = getattr(tstate, "start_ref", "")
+    if start_ref and start_ref != plan.base and start_ref != f"refs/heads/{plan.base}":
+        try:
+            start_commit = guards._run_git(repo, "rev-parse", "--verify", "--quiet", f"{start_ref}^{{commit}}")
+            tip = guards._run_git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+            if tip == start_commit:
+                return False
+        except (subprocess.CalledProcessError, OSError):
+            pass
+
+    return True
 
 
 def _check_plan_skills(plan) -> None:
@@ -1420,11 +1435,6 @@ def _cmd_plan(args) -> int:
             state = load_or_init(plan)
             _claim_runner(state, plan_dir, plan=plan)
             try:
-                plan.tasks = [
-                    t
-                    for t in plan.tasks
-                    if not (state.task(t.name).status == "done" and _merged_or_gone(plan, state.task(t.name)))
-                ]
 
                 def spawn(argv: list[str], log: Path) -> subprocess.Popen:
                     f = open(log, "wb")
@@ -1434,7 +1444,10 @@ def _cmd_plan(args) -> int:
                     return run_plan(plan, state, spawn, args.max_parallel)
 
                 def review(task):
-                    return review_task(plan, task, state.task(task.name), _now)
+                    tstate = state.task(task.name)
+                    if _merged_or_gone(plan, tstate):
+                        return {"gate": "ok", "review": "approve", "job": "-", "reason": "already merged"}
+                    return review_task(plan, task, tstate, _now)
 
                 def triage(task):
                     tstate = state.task(task.name)
@@ -1454,6 +1467,8 @@ def _cmd_plan(args) -> int:
 
                 def ready(task):
                     tstate = state.task(task.name)
+                    if _merged_or_gone(plan, tstate):
+                        return []
                     head, err = _task_head(tstate)
                     if err:
                         return [err]
