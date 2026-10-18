@@ -1140,6 +1140,54 @@ def _task_head(tstate) -> tuple[str | None, str | None]:
         return None, f"cannot read HEAD: {tstate.worktree}"
 
 
+def _merge_state(plan, tstate, jobs=None) -> str | None:
+    branch = getattr(tstate, "branch", "")
+    if not branch:
+        return None
+    ref = branch if branch.startswith("refs/heads/") else f"refs/heads/{branch}"
+    repo = Path(plan.repo)
+    try:
+        guards._run_git(repo, "show-ref", "--verify", "--quiet", ref)
+    except subprocess.CalledProcessError as e:
+        if e.returncode != 1:
+            return None
+        target_worktree = getattr(tstate, "worktree", "")
+        if not target_worktree:
+            return "gone"
+        target_norm = str(Path(target_worktree).expanduser().absolute())
+        if jobs is None:
+            jobs = list_jobs(paths(), ALL_JOBS)
+        for j in jobs:
+            w = j.get("workdir")
+            if not w or not isinstance(w, (str, Path)):
+                continue
+            try:
+                if str(Path(w).expanduser().absolute()) != target_norm:
+                    continue
+            except Exception:
+                continue
+            head = j.get("head")
+            if isinstance(head, str) and head:
+                try:
+                    guards._run_git(repo, "merge-base", "--is-ancestor", head, plan.base)
+                    return "merged"
+                except (subprocess.CalledProcessError, OSError):
+                    return "gone"
+        return "gone"
+    except OSError:
+        return None
+
+    if tstate.worktree and Path(tstate.worktree).is_dir():
+        return None
+
+    try:
+        guards._run_git(repo, "merge-base", "--is-ancestor", ref, plan.base)
+    except (subprocess.CalledProcessError, OSError):
+        return None
+
+    return "merged"
+
+
 def _check_plan_skills(plan) -> None:
     known_skills = available_skills(paths().config_dir) if any(t.skills for t in plan.tasks) else {}
     for task in plan.tasks:
@@ -1242,9 +1290,25 @@ def _cmd_plan(args) -> int:
 
             old_sigint = signal.signal(signal.SIGINT, _handle_signal)
             old_sigterm = signal.signal(signal.SIGTERM, _handle_signal)
+            jobs = list_jobs(paths(), ALL_JOBS)
             try:
                 for task in tasks:
-                    result = review_task(plan, task, state.task(task.name), _now, stop=lambda: interrupted)
+                    tstate = state.task(task.name)
+                    mstate = _merge_state(plan, tstate, jobs=jobs)
+                    if mstate == "merged":
+                        print(_safe(f"{task.name} already merged"))
+                        if interrupted:
+                            print("cancelled", file=sys.stderr)
+                            return 130
+                        continue
+                    if mstate == "gone":
+                        print(_safe(f"{task.name} skipped: branch deleted before merge"))
+                        all_approved = False
+                        if interrupted:
+                            print("cancelled", file=sys.stderr)
+                            return 130
+                        continue
+                    result = review_task(plan, task, tstate, _now, stop=lambda: interrupted)
                     if interrupted or result.get("cancelled"):
                         print(_safe(f"{task.name} gate={result['gate']} review={result['review']} job={result['job']}"))
                         if result["reason"]:
@@ -1290,6 +1354,7 @@ def _cmd_plan(args) -> int:
                         if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"
                     ]
                     jobs = list_jobs(paths(), ALL_JOBS)
+                    tasks = [t for t in tasks if not _merge_state(plan, state.task(t.name), jobs=jobs)]
                     triaged_count = 0
                     skipped_count = 0
                     any_blocked = False
@@ -1431,7 +1496,18 @@ def _cmd_plan(args) -> int:
                     return run_plan(plan, state, spawn, args.max_parallel)
 
                 def review(task):
-                    return review_task(plan, task, state.task(task.name), _now)
+                    tstate = state.task(task.name)
+                    mstate = _merge_state(plan, tstate)
+                    if mstate == "merged":
+                        return {"gate": "ok", "review": "approve", "job": "-", "reason": "already merged"}
+                    if mstate == "gone":
+                        return {
+                            "gate": "failed",
+                            "review": "failed",
+                            "job": "-",
+                            "reason": "branch deleted before merge",
+                        }
+                    return review_task(plan, task, tstate, _now)
 
                 def triage(task):
                     tstate = state.task(task.name)
@@ -1451,6 +1527,8 @@ def _cmd_plan(args) -> int:
 
                 def ready(task):
                     tstate = state.task(task.name)
+                    if _merge_state(plan, tstate) == "merged":
+                        return []
                     head, err = _task_head(tstate)
                     if err:
                         return [err]
