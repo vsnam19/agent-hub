@@ -13,7 +13,7 @@ from agenthub import guards
 from agenthub.config import ConfigError, load_pool, paths
 from agenthub.guards import _git_argv
 from agenthub.jobs import list_jobs
-from agenthub.orchestrate import RunArgs, _passed_gate, readiness, run_gate_job, run_job
+from agenthub.orchestrate import RunArgs, _passed_gate, implementers, readiness, run_gate_job, run_job
 from agenthub.plan import Plan, Task
 from agenthub.planstate import AttemptState, State, TaskState
 from agenthub.pool import parse_link
@@ -55,9 +55,10 @@ def _implementer(vstate: TaskState) -> str | None:
     return f"{record['agent']}:{record['model']}"
 
 
-def _reviewers_besides(role: str, implementer: str) -> list[str]:
+def _reviewers_besides(role: str, implementer: str | set[str]) -> list[str]:
     # Compare agent:model only: a link's effort does not make it a different reviewer.
-    return [link for link in load_pool().roles[role].chain if parse_link(link).quota_key != implementer]
+    excluded = {implementer} if isinstance(implementer, str) else set(implementer)
+    return [link for link in load_pool().roles[role].chain if parse_link(link).quota_key not in excluded]
 
 
 def _autocommit(worktree: str, slug: str, task_name: str, job_result: dict) -> str | None:
@@ -611,14 +612,16 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
         return {**failed, "reason": "work tree is not clean; commit before review"}
 
     head = guards.head(repo)
+    # The branch the task was created from: the plan base, or its dependency's branch.
+    base = tstate.start_ref or plan.base
     jobs = list_jobs(paths(), 100000)
+    impl = implementers(jobs, repo.root)
     mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == repo.root.resolve()]
     on_head = [j for j in mine if j.get("kind") == "review" and j.get("status") == "ok" and j.get("head") == head]
 
     def who(j: dict) -> str:
         return f"{j.get('agent')}:{j.get('model')}"
 
-    implementers = {who(j) for j in mine if j.get("kind") == "implement" and j.get("status") in ("ok", "gate-failed")}
     task_gated = any(
         j.get("kind") == "gate"
         and _passed_gate(j, head)
@@ -630,12 +633,10 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
         and task_gated
         and on_head
         and on_head[0]["verdict"] == "approve"
-        and who(on_head[0]) not in implementers
+        and who(on_head[0]) not in impl
     ):
         return {"gate": "ok", "review": "approve", "job": on_head[0]["id"], "reason": "", "up_to_date": True}
 
-    # The branch the task was created from: the plan base, or its dependency's branch.
-    base = tstate.start_ref or plan.base
     try:
         since = guards._run_git(repo.root, "merge-base", "HEAD", base)
     except subprocess.CalledProcessError:
@@ -652,13 +653,13 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
         return res
 
     pool = load_pool()
-    implementer = _implementer(tstate)
-    if implementer and not _reviewers_besides("review", implementer):
+    if impl and not _reviewers_besides("review", impl):
+        names = ", ".join(sorted(impl))
         return {
             "gate": "ok",
             "review": "failed",
             "job": gate["id"],
-            "reason": f"no reviewer different from {implementer}",
+            "reason": f"no reviewer different from {names}",
         }
 
     review = run_job(
@@ -671,7 +672,7 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
             timeout=pool.timeouts["review"],
             base=base,
             jev=plan.jev,
-            exclude=[implementer] if implementer else [],
+            exclude=sorted(impl),
         ),
         paths(),
         pool,
@@ -680,7 +681,8 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
     verdict = review.get("verdict") if review["status"] == "ok" else None
     if verdict not in ("approve", "request-changes"):
         verdict = "failed"
-    res = {"gate": "ok", "review": verdict, "job": review["id"], "reason": review.get("error", "")}
+    reason = review.get("error") or review.get("reason", "")
+    res = {"gate": "ok", "review": verdict, "job": review["id"], "reason": reason}
     if review.get("status") == "cancelled":
         res["cancelled"] = True
     return res
@@ -722,14 +724,14 @@ def _merge_reviewer(jobs: list[dict], workdir: Path, head: str) -> str:
         return f"{j.get('agent')}:{j.get('model')}"
 
     mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == workdir.resolve()]
-    implementers = {who(j) for j in mine if j.get("kind") == "implement" and j.get("status") in ("ok", "gate-failed")}
+    impl = implementers(jobs, workdir)
     for j in mine:
         if (
             j.get("kind") == "review"
             and j.get("status") == "ok"
             and j.get("verdict") == "approve"
             and j.get("head") == head
-            and who(j) not in implementers
+            and who(j) not in impl
         ):
             return who(j)
     return "?"
