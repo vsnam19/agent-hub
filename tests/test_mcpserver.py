@@ -232,11 +232,11 @@ def test_wait_job_clamps_timeout(env_sandbox, repo, monkeypatch):
     assert clamp_timeout(0) == 1
     assert clamp_timeout(-10) == 1
     assert clamp_timeout(50) == 50
-    assert clamp_timeout(300) == 300
-    assert clamp_timeout(301) == 300
-    assert clamp_timeout(1000) == 300
+    assert clamp_timeout(300) == 100
+    assert clamp_timeout(301) == 100
+    assert clamp_timeout(1000) == 100
     assert clamp_timeout("2s") == 2
-    assert clamp_timeout("10m") == 300
+    assert clamp_timeout("10m") == 100
 
     p = paths()
     job = new_job(p, "implement", datetime.now(timezone.utc))
@@ -1406,8 +1406,8 @@ def test_plan_wait_bounded(env_sandbox, repo, tmp_path, monkeypatch):
     assert clamp_timeout(0) == 1
     assert clamp_timeout(-10) == 1
     assert clamp_timeout(50) == 50
-    assert clamp_timeout(300) == 300
-    assert clamp_timeout(500) == 300
+    assert clamp_timeout(300) == 100
+    assert clamp_timeout(500) == 100
 
     monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "slow")
     monkeypatch.setenv("FAKE_AGY_SCENARIO", "slow")

@@ -91,6 +91,9 @@ def show_job_data(job_id: str, p: Paths | None = None) -> dict[str, Any]:
     return job.read_json("result.json")
 
 
+MAX_WAIT_S = 100
+
+
 def clamp_timeout(timeout_s: Any) -> int:
     if isinstance(timeout_s, bool):
         raise UsageError(f"timeout cannot be boolean: {timeout_s}")
@@ -110,7 +113,7 @@ def clamp_timeout(timeout_s: Any) -> int:
         val = 60
     else:
         raise UsageError(f"invalid timeout type: {type(timeout_s).__name__}")
-    return max(1, min(300, val))
+    return max(1, min(MAX_WAIT_S, val))
 
 
 def validate_run_args(
@@ -1305,7 +1308,10 @@ def build_server() -> "MCPServer":
 
     @server.tool(
         name="wait_job",
-        description="Wait for a job to finish, bounded by timeout_s (at most 300s)",
+        description=(
+            f"Wait for a job to finish, bounded by timeout_s (at most {MAX_WAIT_S}s); "
+            "returns state running when not finished — call again while running"
+        ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
     async def wait_job_tool(
@@ -1349,7 +1355,10 @@ def build_server() -> "MCPServer":
 
     @server.tool(
         name="plan_wait",
-        description="Wait for a plan to finish, bounded by timeout_s (at most 300s)",
+        description=(
+            f"Wait for a plan to finish, bounded by timeout_s (at most {MAX_WAIT_S}s); "
+            "returns state running when not finished — call again while running"
+        ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
     async def plan_wait_tool(
@@ -1360,7 +1369,10 @@ def build_server() -> "MCPServer":
 
     @server.tool(
         name="plan_review_wait",
-        description="Wait for a plan review to finish, bounded by timeout_s (at most 300s)",
+        description=(
+            f"Wait for a plan review to finish, bounded by timeout_s (at most {MAX_WAIT_S}s); "
+            "returns state running when not finished — call again while running"
+        ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
     async def plan_review_wait_tool(
