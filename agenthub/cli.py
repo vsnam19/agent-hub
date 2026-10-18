@@ -959,6 +959,37 @@ def _print_trail(trail_file: Path) -> int:
     return 0
 
 
+def _load_tasks(tasks_data: dict):
+    from agenthub.planstate import AttemptState, TaskState
+
+    tasks_state = {}
+    for k, v in tasks_data.items():
+        attempts = [
+            AttemptState(
+                job=a["job"],
+                status=a["status"],
+                exit_code=a["exit_code"],
+                gate_touched=a.get("gate_touched", []),
+            )
+            for a in v.get("attempts", [])
+        ]
+        tasks_state[k] = TaskState(
+            status=v.get("status", "pending"),
+            attempts=attempts,
+            worktree=v.get("worktree", ""),
+            branch=v.get("branch", ""),
+            start_ref=v.get("start_ref", ""),
+            reason=v.get("reason", ""),
+            handoff=v.get("handoff", ""),
+            role=v.get("role", ""),
+            escalated_from=v.get("escalated_from", ""),
+            visited_roles=v.get("visited_roles", []),
+            fix_rounds=v.get("fix_rounds", 0),
+            attempts_base=v.get("attempts_base", 0),
+        )
+    return tasks_state
+
+
 def _claim_runner(state, plan_dir: Path) -> None:
     """Record this process as the plan's runner with its start time, so `plan cancel` can verify it.
     Refuses if another verified runner process is still running.
@@ -966,6 +997,11 @@ def _claim_runner(state, plan_dir: Path) -> None:
     with open(plan_dir / "runner.lock", "a") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
+            state_path = getattr(state, "_path", None)
+            if state_path is not None and Path(state_path).is_file():
+                data = json.loads(Path(state_path).read_text())
+                state.runner = data.get("runner", {})
+                state.tasks = _load_tasks(data.get("tasks", {}))
             runner = state.runner or {}
             pid = runner.get("pid")
             recorded = runner.get("start_time")
@@ -1194,44 +1230,50 @@ def _cmd_plan(args) -> int:
             raise UsageError("state.json not found")
         state = load_or_init(plan)
         _claim_runner(state, plan_dir)
-        tasks = [t for t in plan.tasks if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"]
-        jobs = list_jobs(paths(), ALL_JOBS)
-        triaged_count = 0
-        skipped_count = 0
-        any_blocked = False
-        for task in tasks:
-            tstate = state.task(task.name)
-            if not tstate.worktree:
-                print(_safe(f"{task.name} skipped: no work tree recorded"))
-                skipped_count += 1
-                continue
-            head, problem = _task_head(tstate)
-            if problem:
-                print(_safe(f"{task.name} skipped: {problem}"))
-                skipped_count += 1
-                continue
-            result = triagerun.triage_task(plan, task, tstate, jobs, head, _now)
-            if result is None:
-                continue
-            triaged_count += 1
-            state.save()
-            if result.get("status") == "blocked":
-                any_blocked = True
-                print(_safe(f"{task.name} blocked: {result.get('reason', '')}"))
-            else:
-                counts = result.get("counts") or {}
-                fix = counts.get("fix", 0)
-                reject = counts.get("reject", 0)
-                blocked = counts.get("blocked", 0)
-                brief_part = f" brief={result['fix_path']}" if result.get("fix_path") else ""
-                print(_safe(f"{task.name} fix={fix} reject={reject} blocked={blocked}{brief_part}"))
-        if skipped_count > 0:
-            print(_safe(f"skipped {skipped_count} task(s)"))
-            return 1
-        if triaged_count == 0:
-            print(_safe("nothing to triage"))
-            return 0
-        return 1 if any_blocked else 0
+        try:
+            tasks = [t for t in plan.tasks if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"]
+            jobs = list_jobs(paths(), ALL_JOBS)
+            triaged_count = 0
+            skipped_count = 0
+            any_blocked = False
+            for task in tasks:
+                tstate = state.task(task.name)
+                if not tstate.worktree:
+                    print(_safe(f"{task.name} skipped: no work tree recorded"))
+                    skipped_count += 1
+                    continue
+                head, problem = _task_head(tstate)
+                if problem:
+                    print(_safe(f"{task.name} skipped: {problem}"))
+                    skipped_count += 1
+                    continue
+                result = triagerun.triage_task(plan, task, tstate, jobs, head, _now)
+                if result is None:
+                    continue
+                triaged_count += 1
+                state.save()
+                if result.get("status") == "blocked":
+                    any_blocked = True
+                    print(_safe(f"{task.name} blocked: {result.get('reason', '')}"))
+                else:
+                    counts = result.get("counts") or {}
+                    fix = counts.get("fix", 0)
+                    reject = counts.get("reject", 0)
+                    blocked = counts.get("blocked", 0)
+                    brief_part = f" brief={result['fix_path']}" if result.get("fix_path") else ""
+                    print(_safe(f"{task.name} fix={fix} reject={reject} blocked={blocked}{brief_part}"))
+            if skipped_count > 0:
+                print(_safe(f"skipped {skipped_count} task(s)"))
+                return 1
+            if triaged_count == 0:
+                print(_safe("nothing to triage"))
+                return 0
+            return 1 if any_blocked else 0
+        finally:
+            if isinstance(state.runner, dict) and state.runner.get("pid") == os.getpid():
+                state.runner = {}
+                state.save()
+                (plan_dir / "runner.pid").unlink(missing_ok=True)
 
     elif args.plan_command == "merge":
         from agenthub.planrun import merge_order, merge_target_problem, merge_task
