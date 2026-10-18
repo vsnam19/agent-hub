@@ -1240,8 +1240,11 @@ def _cmd_plan(args) -> int:
             old_sigterm = signal.signal(signal.SIGTERM, _handle_signal)
             try:
                 for task in tasks:
-                    result = review_task(plan, task, state.task(task.name), _now)
+                    result = review_task(plan, task, state.task(task.name), _now, stop=lambda: interrupted)
                     if interrupted or result.get("cancelled"):
+                        print(_safe(f"{task.name} gate={result['gate']} review={result['review']} job={result['job']}"))
+                        if result["reason"]:
+                            print(_safe(result["reason"]), file=sys.stderr)
                         print("cancelled", file=sys.stderr)
                         return 130
                     if result.get("up_to_date"):
