@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import agenthub.triagerun
-from agenthub.cli import _task_head, main
+from agenthub.cli import UsageError, _claim_runner, _task_head, main
 from agenthub.guards import GuardError, inspect
 from agenthub.plan import load as load_plan
 from agenthub.planstate import load_or_init
@@ -234,16 +234,23 @@ def test_triage_claims_runner(env_sandbox, tmp_path, monkeypatch):
     recorded_time = 77777
     monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: recorded_time if pid == recorded_pid else None)
 
-    monkeypatch.setattr(agenthub.triagerun, "triage_task", lambda *args, **kwargs: None)
+    triage_calls = 0
+
+    def fake_triage(plan, task, tstate, jobs, head, now):
+        nonlocal triage_calls
+        triage_calls += 1
+        saved_state = json.loads(state_file.read_text())
+        assert saved_state["runner"] == {"pid": recorded_pid, "start_time": recorded_time}
+        runner_pid_file = plan_file.parent / "runner.pid"
+        assert runner_pid_file.is_file()
+        assert json.loads(runner_pid_file.read_text()) == {"pid": recorded_pid, "start_time": recorded_time}
+        return None
+
+    monkeypatch.setattr(agenthub.triagerun, "triage_task", fake_triage)
 
     rc = main(["plan", "triage", str(plan_file)])
     assert rc == 0
-
-    saved_state = json.loads(state_file.read_text())
-    assert saved_state["runner"] == {"pid": recorded_pid, "start_time": recorded_time}
-    runner_pid_file = plan_file.parent / "runner.pid"
-    assert runner_pid_file.is_file()
-    assert json.loads(runner_pid_file.read_text()) == {"pid": recorded_pid, "start_time": recorded_time}
+    assert triage_calls > 0
 
     # If the recorded runner is already this process, triage succeeds and claims it again
     rc2 = main(["plan", "triage", str(plan_file)])
@@ -269,12 +276,21 @@ def test_zombie_runner_is_not_alive(env_sandbox, tmp_path, monkeypatch):
         lambda pid: recorded_time if pid == zombie_pid else (my_start_time if pid == my_pid else None),
     )
     monkeypatch.setattr(agenthub.cli, "is_running", lambda pid: False if pid == zombie_pid else True)
-    monkeypatch.setattr(agenthub.triagerun, "triage_task", lambda *args, **kwargs: None)
+
+    triage_calls = 0
+
+    def fake_triage(plan, task, tstate, jobs, head, now):
+        nonlocal triage_calls
+        triage_calls += 1
+        saved_state = json.loads(state_file.read_text())
+        assert saved_state["runner"] == {"pid": my_pid, "start_time": my_start_time}
+        return None
+
+    monkeypatch.setattr(agenthub.triagerun, "triage_task", fake_triage)
 
     rc = main(["plan", "triage", str(plan_file)])
     assert rc == 0
-    saved_state = json.loads(state_file.read_text())
-    assert saved_state["runner"] == {"pid": my_pid, "start_time": my_start_time}
+    assert triage_calls > 0
 
 
 def test_claim_uses_lock_file(env_sandbox, tmp_path, monkeypatch):
@@ -465,3 +481,132 @@ def test_plan_run_refuses_live_runner(env_sandbox, tmp_path, monkeypatch, capsys
 
     saved_state = json.loads(state_file.read_text())
     assert saved_state["runner"] == {"pid": other_pid, "start_time": 12345}
+
+
+def test_claim_rereads_runner_under_lock(env_sandbox, tmp_path, monkeypatch):
+    plan_file, _state = make_gated_plan_run(env_sandbox, tmp_path)
+    plan_dir = plan_file.parent
+    state_file = plan_dir / "state.json"
+
+    p = load_plan(plan_file)
+    s = load_or_init(p)
+
+    # In-memory state object holds a dead runner
+    s.runner = {"pid": 99999, "start_time": 11111}
+
+    # On disk, state.json names a live verified runner
+    live_pid = os.getpid() + 1000
+    live_start = 22222
+    disk_data = json.loads(state_file.read_text())
+    disk_data["runner"] = {"pid": live_pid, "start_time": live_start}
+    state_file.write_text(json.dumps(disk_data))
+
+    monkeypatch.setattr(agenthub.cli, "is_running", lambda pid: True if pid == live_pid else False)
+    monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: live_start if pid == live_pid else None)
+
+    with pytest.raises(UsageError, match=f"plan runner {live_pid} is still running; wait or cancel it first"):
+        _claim_runner(s, plan_dir, plan=p)
+
+
+def test_claim_refreshes_tasks_from_disk(env_sandbox, tmp_path, monkeypatch):
+    plan_file, _state = make_gated_plan_run(env_sandbox, tmp_path)
+    plan_dir = plan_file.parent
+    state_file = plan_dir / "state.json"
+
+    p = load_plan(plan_file)
+    s = load_or_init(p)
+
+    # In-memory state has task t1 with fix_rounds=0
+    assert s.tasks["t1"].fix_rounds == 0
+
+    # On disk, update task t1 to fix_rounds=3 and status="pending"
+    disk_data = json.loads(state_file.read_text())
+    disk_data["tasks"]["t1"]["fix_rounds"] = 3
+    disk_data["tasks"]["t1"]["status"] = "pending"
+    disk_data["runner"] = {}
+    state_file.write_text(json.dumps(disk_data))
+
+    my_pid = os.getpid()
+    my_time = 77777
+    monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: my_time if pid == my_pid else None)
+    monkeypatch.setattr(agenthub.cli, "is_running", lambda pid: True if pid == my_pid else False)
+
+    _claim_runner(s, plan_dir, plan=p)
+
+    assert s.tasks["t1"].fix_rounds == 3
+    assert s.tasks["t1"].status == "pending"
+
+    # Verify state on disk has the refreshed tasks and the claimed runner
+    saved = json.loads(state_file.read_text())
+    assert saved["tasks"]["t1"]["fix_rounds"] == 3
+    assert saved["runner"] == {"pid": my_pid, "start_time": my_time}
+
+
+def test_claim_without_plan_checks_state_as_given(env_sandbox, tmp_path, monkeypatch):
+    plan_file, _state = make_gated_plan_run(env_sandbox, tmp_path)
+    plan_dir = plan_file.parent
+    state_file = plan_dir / "state.json"
+
+    p = load_plan(plan_file)
+    s = load_or_init(p)
+
+    # In-memory state object holds an empty runner
+    s.runner = {}
+
+    # On disk, state.json names a live runner
+    live_pid = os.getpid() + 1000
+    live_start = 22222
+    disk_data = json.loads(state_file.read_text())
+    disk_data["runner"] = {"pid": live_pid, "start_time": live_start}
+    state_file.write_text(json.dumps(disk_data))
+
+    my_pid = os.getpid()
+    my_time = 77777
+    monkeypatch.setattr(agenthub.cli, "is_running", lambda pid: True)
+    monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: my_time if pid == my_pid else live_start)
+
+    # Without plan=..., checks s.runner as given, ignoring disk state
+    _claim_runner(s, plan_dir)
+    assert s.runner == {"pid": my_pid, "start_time": my_time}
+
+
+def test_triage_releases_runner_claim(env_sandbox, tmp_path, monkeypatch):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    state_file = plan_file.parent / "state.json"
+    plan_dir = plan_file.parent
+
+    recorded_pid = os.getpid()
+    recorded_time = 77777
+    monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: recorded_time if pid == recorded_pid else None)
+
+    claimed_during_triage = None
+
+    def fake_triage(plan, task, tstate, jobs, head, now):
+        nonlocal claimed_during_triage
+        disk_state = json.loads(state_file.read_text())
+        claimed_during_triage = disk_state.get("runner")
+        return None
+
+    monkeypatch.setattr(agenthub.triagerun, "triage_task", fake_triage)
+
+    rc = main(["plan", "triage", str(plan_file)])
+    assert rc == 0
+    assert claimed_during_triage == {"pid": recorded_pid, "start_time": recorded_time}
+
+    # After triage finishes, claim is released
+    saved_state = json.loads(state_file.read_text())
+    assert saved_state["runner"] == {}
+    assert not (plan_dir / "runner.pid").is_file()
+
+    # Also releases on error
+    def failing_triage(plan, task, tstate, jobs, head, now):
+        raise RuntimeError("simulated triage crash")
+
+    monkeypatch.setattr(agenthub.triagerun, "triage_task", failing_triage)
+
+    with pytest.raises(RuntimeError, match="simulated triage crash"):
+        main(["plan", "triage", str(plan_file)])
+
+    saved_state_after_error = json.loads(state_file.read_text())
+    assert saved_state_after_error["runner"] == {}
+    assert not (plan_dir / "runner.pid").is_file()

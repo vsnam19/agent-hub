@@ -966,13 +966,20 @@ def _print_trail(trail_file: Path) -> int:
     return 0
 
 
-def _claim_runner(state, plan_dir: Path) -> None:
+def _claim_runner(state, plan_dir: Path, plan=None) -> None:
     """Record this process as the plan's runner with its start time, so `plan cancel` can verify it.
     Refuses if another verified runner process is still running.
-    The pid also goes to `runner.pid`, which still names the runner when state.json cannot be read."""
+    The pid also goes to `runner.pid`, which still names the runner when state.json cannot be read.
+    Callers should pass `plan` to refresh runner and task state under the lock."""
     with open(plan_dir / "runner.lock", "a") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
+            if plan is not None:
+                from agenthub.planstate import load_or_init
+
+                fresh = load_or_init(plan)
+                state.runner = fresh.runner
+                state.tasks = fresh.tasks
             runner = state.runner or {}
             pid = runner.get("pid")
             recorded = runner.get("start_time")
@@ -1083,7 +1090,7 @@ def _cmd_plan(args) -> int:
         _check_plan_skills(plan)
 
         state = load_or_init(plan)
-        _claim_runner(state, plan_dir)
+        _claim_runner(state, plan_dir, plan=plan)
 
         def spawn(argv: list[str], log: Path) -> subprocess.Popen:
             f = open(log, "wb")
@@ -1204,45 +1211,51 @@ def _cmd_plan(args) -> int:
         if not state_file.is_file():
             raise UsageError("state.json not found")
         state = load_or_init(plan)
-        _claim_runner(state, plan_dir)
-        tasks = [t for t in plan.tasks if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"]
-        jobs = list_jobs(paths(), ALL_JOBS)
-        triaged_count = 0
-        skipped_count = 0
-        any_blocked = False
-        for task in tasks:
-            tstate = state.task(task.name)
-            if not tstate.worktree:
-                print(_safe(f"{task.name} skipped: no work tree recorded"))
-                skipped_count += 1
-                continue
-            head, problem = _task_head(tstate)
-            if problem:
-                print(_safe(f"{task.name} skipped: {problem}"))
-                skipped_count += 1
-                continue
-            result = triagerun.triage_task(plan, task, tstate, jobs, head, _now)
-            if result is None:
-                continue
-            triaged_count += 1
-            state.save()
-            if result.get("status") == "blocked":
-                any_blocked = True
-                print(_safe(f"{task.name} blocked: {result.get('reason', '')}"))
-            else:
-                counts = result.get("counts") or {}
-                fix = counts.get("fix", 0)
-                reject = counts.get("reject", 0)
-                blocked = counts.get("blocked", 0)
-                brief_part = f" brief={result['fix_path']}" if result.get("fix_path") else ""
-                print(_safe(f"{task.name} fix={fix} reject={reject} blocked={blocked}{brief_part}"))
-        if skipped_count > 0:
-            print(_safe(f"skipped {skipped_count} task(s)"))
-            return 1
-        if triaged_count == 0:
-            print(_safe("nothing to triage"))
-            return 0
-        return 1 if any_blocked else 0
+        _claim_runner(state, plan_dir, plan=plan)
+        try:
+            tasks = [t for t in plan.tasks if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"]
+            jobs = list_jobs(paths(), ALL_JOBS)
+            triaged_count = 0
+            skipped_count = 0
+            any_blocked = False
+            for task in tasks:
+                tstate = state.task(task.name)
+                if not tstate.worktree:
+                    print(_safe(f"{task.name} skipped: no work tree recorded"))
+                    skipped_count += 1
+                    continue
+                head, problem = _task_head(tstate)
+                if problem:
+                    print(_safe(f"{task.name} skipped: {problem}"))
+                    skipped_count += 1
+                    continue
+                result = triagerun.triage_task(plan, task, tstate, jobs, head, _now)
+                if result is None:
+                    continue
+                triaged_count += 1
+                state.save()
+                if result.get("status") == "blocked":
+                    any_blocked = True
+                    print(_safe(f"{task.name} blocked: {result.get('reason', '')}"))
+                else:
+                    counts = result.get("counts") or {}
+                    fix = counts.get("fix", 0)
+                    reject = counts.get("reject", 0)
+                    blocked = counts.get("blocked", 0)
+                    brief_part = f" brief={result['fix_path']}" if result.get("fix_path") else ""
+                    print(_safe(f"{task.name} fix={fix} reject={reject} blocked={blocked}{brief_part}"))
+            if skipped_count > 0:
+                print(_safe(f"skipped {skipped_count} task(s)"))
+                return 1
+            if triaged_count == 0:
+                print(_safe("nothing to triage"))
+                return 0
+            return 1 if any_blocked else 0
+        finally:
+            if isinstance(state.runner, dict) and state.runner.get("pid") == os.getpid():
+                state.runner = {}
+                state.save()
+                (plan_dir / "runner.pid").unlink(missing_ok=True)
 
     elif args.plan_command == "merge":
         from agenthub.planrun import merge_order, merge_target_problem, merge_task
