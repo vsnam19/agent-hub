@@ -441,7 +441,7 @@ def _findings_of(reply: str) -> tuple[list[tuple[str, str, str]], int]:
             where_str = ""
             claim = remainder.strip()
         found.append((item.severity, where_str, claim))
-    return found, triage.unparsed_findings(reply)
+    return found, triage.unparsed_findings(reply, any_shape=True)
 
 
 def _mine_transcripts(root: Path, extract: Extract, since: datetime) -> None:
