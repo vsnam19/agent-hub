@@ -1230,16 +1230,34 @@ def _cmd_plan(args) -> int:
                 return 1
 
             all_approved = True
-            for task in tasks:
-                result = review_task(plan, task, state.task(task.name), _now)
-                if result.get("up_to_date"):
-                    print(_safe(f"{task.name} up to date (review job={result['job']})"))
-                    continue
-                all_approved = all_approved and result["review"] == "approve"
-                print(_safe(f"{task.name} gate={result['gate']} review={result['review']} job={result['job']}"))
-                if result["reason"]:
-                    print(_safe(result["reason"]), file=sys.stderr)
-            return 0 if all_approved else 1
+            interrupted = False
+
+            def _handle_signal(signum, frame):
+                nonlocal interrupted
+                interrupted = True
+
+            old_sigint = signal.signal(signal.SIGINT, _handle_signal)
+            old_sigterm = signal.signal(signal.SIGTERM, _handle_signal)
+            try:
+                for task in tasks:
+                    result = review_task(plan, task, state.task(task.name), _now, stop=lambda: interrupted)
+                    if interrupted or result.get("cancelled"):
+                        print(_safe(f"{task.name} gate={result['gate']} review={result['review']} job={result['job']}"))
+                        if result["reason"]:
+                            print(_safe(result["reason"]), file=sys.stderr)
+                        print("cancelled", file=sys.stderr)
+                        return 130
+                    if result.get("up_to_date"):
+                        print(_safe(f"{task.name} up to date (review job={result['job']})"))
+                        continue
+                    all_approved = all_approved and result["review"] == "approve"
+                    print(_safe(f"{task.name} gate={result['gate']} review={result['review']} job={result['job']}"))
+                    if result["reason"]:
+                        print(_safe(result["reason"]), file=sys.stderr)
+                return 0 if all_approved else 1
+            finally:
+                signal.signal(signal.SIGINT, old_sigint)
+                signal.signal(signal.SIGTERM, old_sigterm)
 
         return _run_with_result(result_path, _do_review)
 
