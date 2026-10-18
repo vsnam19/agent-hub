@@ -959,49 +959,20 @@ def _print_trail(trail_file: Path) -> int:
     return 0
 
 
-def _load_tasks(tasks_data: dict):
-    from agenthub.planstate import AttemptState, TaskState
-
-    tasks_state = {}
-    for k, v in tasks_data.items():
-        attempts = [
-            AttemptState(
-                job=a["job"],
-                status=a["status"],
-                exit_code=a["exit_code"],
-                gate_touched=a.get("gate_touched", []),
-            )
-            for a in v.get("attempts", [])
-        ]
-        tasks_state[k] = TaskState(
-            status=v.get("status", "pending"),
-            attempts=attempts,
-            worktree=v.get("worktree", ""),
-            branch=v.get("branch", ""),
-            start_ref=v.get("start_ref", ""),
-            reason=v.get("reason", ""),
-            handoff=v.get("handoff", ""),
-            role=v.get("role", ""),
-            escalated_from=v.get("escalated_from", ""),
-            visited_roles=v.get("visited_roles", []),
-            fix_rounds=v.get("fix_rounds", 0),
-            attempts_base=v.get("attempts_base", 0),
-        )
-    return tasks_state
-
-
-def _claim_runner(state, plan_dir: Path) -> None:
+def _claim_runner(state, plan_dir: Path, plan=None) -> None:
     """Record this process as the plan's runner with its start time, so `plan cancel` can verify it.
     Refuses if another verified runner process is still running.
-    The pid also goes to `runner.pid`, which still names the runner when state.json cannot be read."""
+    The pid also goes to `runner.pid`, which still names the runner when state.json cannot be read.
+    Callers should pass `plan` to refresh runner and task state under the lock."""
     with open(plan_dir / "runner.lock", "a") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
-            state_path = getattr(state, "_path", None)
-            if state_path is not None and Path(state_path).is_file():
-                data = json.loads(Path(state_path).read_text())
-                state.runner = data.get("runner", {})
-                state.tasks = _load_tasks(data.get("tasks", {}))
+            if plan is not None:
+                from agenthub.planstate import load_or_init
+
+                fresh = load_or_init(plan)
+                state.runner = fresh.runner
+                state.tasks = fresh.tasks
             runner = state.runner or {}
             pid = runner.get("pid")
             recorded = runner.get("start_time")
@@ -1108,7 +1079,7 @@ def _cmd_plan(args) -> int:
                     raise UsageError(f"task {task.name}: unknown skill {skill}: {skills_hint(known_skills)}")
 
         state = load_or_init(plan)
-        _claim_runner(state, plan_dir)
+        _claim_runner(state, plan_dir, plan=plan)
 
         def spawn(argv: list[str], log: Path) -> subprocess.Popen:
             f = open(log, "wb")
@@ -1229,7 +1200,7 @@ def _cmd_plan(args) -> int:
         if not state_file.is_file():
             raise UsageError("state.json not found")
         state = load_or_init(plan)
-        _claim_runner(state, plan_dir)
+        _claim_runner(state, plan_dir, plan=plan)
         try:
             tasks = [t for t in plan.tasks if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"]
             jobs = list_jobs(paths(), ALL_JOBS)

@@ -505,7 +505,7 @@ def test_claim_rereads_runner_under_lock(env_sandbox, tmp_path, monkeypatch):
     monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: live_start if pid == live_pid else None)
 
     with pytest.raises(UsageError, match=f"plan runner {live_pid} is still running; wait or cancel it first"):
-        _claim_runner(s, plan_dir)
+        _claim_runner(s, plan_dir, plan=p)
 
 
 def test_claim_refreshes_tasks_from_disk(env_sandbox, tmp_path, monkeypatch):
@@ -531,7 +531,7 @@ def test_claim_refreshes_tasks_from_disk(env_sandbox, tmp_path, monkeypatch):
     monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: my_time if pid == my_pid else None)
     monkeypatch.setattr(agenthub.cli, "is_running", lambda pid: True if pid == my_pid else False)
 
-    _claim_runner(s, plan_dir)
+    _claim_runner(s, plan_dir, plan=p)
 
     assert s.tasks["t1"].fix_rounds == 3
     assert s.tasks["t1"].status == "pending"
@@ -540,6 +540,34 @@ def test_claim_refreshes_tasks_from_disk(env_sandbox, tmp_path, monkeypatch):
     saved = json.loads(state_file.read_text())
     assert saved["tasks"]["t1"]["fix_rounds"] == 3
     assert saved["runner"] == {"pid": my_pid, "start_time": my_time}
+
+
+def test_claim_without_plan_checks_state_as_given(env_sandbox, tmp_path, monkeypatch):
+    plan_file, _state = make_gated_plan_run(env_sandbox, tmp_path)
+    plan_dir = plan_file.parent
+    state_file = plan_dir / "state.json"
+
+    p = load_plan(plan_file)
+    s = load_or_init(p)
+
+    # In-memory state object holds an empty runner
+    s.runner = {}
+
+    # On disk, state.json names a live runner
+    live_pid = os.getpid() + 1000
+    live_start = 22222
+    disk_data = json.loads(state_file.read_text())
+    disk_data["runner"] = {"pid": live_pid, "start_time": live_start}
+    state_file.write_text(json.dumps(disk_data))
+
+    my_pid = os.getpid()
+    my_time = 77777
+    monkeypatch.setattr(agenthub.cli, "is_running", lambda pid: True)
+    monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: my_time if pid == my_pid else live_start)
+
+    # Without plan=..., checks s.runner as given, ignoring disk state
+    _claim_runner(s, plan_dir)
+    assert s.runner == {"pid": my_pid, "start_time": my_time}
 
 
 def test_triage_releases_runner_claim(env_sandbox, tmp_path, monkeypatch):
