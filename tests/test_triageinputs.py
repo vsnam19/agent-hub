@@ -454,3 +454,100 @@ def test_job_ids_exclude_triaged_review(tmp_path: Path):
     assert "job-rev-triaged" not in inputs.job_ids
     assert "job-rev-older" in inputs.job_ids
     assert inputs.job_ids == {"job-impl-1", "job-impl-2", "job-rev-older"}
+
+
+def test_running_gate_not_triaged(tmp_path: Path):
+    workdir = tmp_path / "wt"
+    workdir.mkdir()
+    head = "sha-gate-running"
+
+    jobs = [
+        {
+            "id": "job-gate-running",
+            "kind": "gate",
+            "status": "running",
+            "workdir": str(workdir),
+            "head": head,
+        },
+        {
+            "id": "job-impl-1",
+            "kind": "implement",
+            "status": "ok",
+            "workdir": str(workdir),
+            "head": head,
+            "agent": "codex",
+            "model": "gpt-5",
+        },
+    ]
+
+    inputs = collect(jobs, workdir, head)
+    assert inputs is None
+
+
+def test_cancelled_gate_not_triaged(tmp_path: Path):
+    workdir = tmp_path / "wt"
+    workdir.mkdir()
+    head = "sha-gate-cancelled"
+
+    jobs = [
+        {
+            "id": "job-gate-cancelled",
+            "kind": "gate",
+            "status": "cancelled",
+            "workdir": str(workdir),
+            "head": head,
+        },
+        {
+            "id": "job-impl-1",
+            "kind": "implement",
+            "status": "ok",
+            "workdir": str(workdir),
+            "head": head,
+            "agent": "codex",
+            "model": "gpt-5",
+        },
+    ]
+
+    inputs = collect(jobs, workdir, head)
+    assert inputs is None
+
+
+def test_undecodable_reply_does_not_crash(tmp_path: Path):
+    workdir = tmp_path / "wt"
+    workdir.mkdir()
+    head = "sha-rev-undecodable"
+
+    job_dir = tmp_path / "jobs" / "job-rev-undecodable"
+    attempt_dir = job_dir / "attempts" / "1-agy-m"
+    attempt_dir.mkdir(parents=True)
+    reply_file = attempt_dir / "reply.md"
+    reply_file.write_bytes(b"## Findings\n- high \x80\xff invalid utf-8\n\n## Verdict\nrequest-changes\n")
+
+    jobs = [
+        {
+            "id": "job-rev-undecodable",
+            "kind": "review",
+            "status": "ok",
+            "verdict": "request-changes",
+            "reply_path": str(reply_file),
+            "workdir": str(workdir),
+            "head": head,
+            "agent": "claude",
+            "model": "sonnet",
+        },
+        {
+            "id": "job-impl-1",
+            "kind": "implement",
+            "status": "ok",
+            "workdir": str(workdir),
+            "head": head,
+            "agent": "agy",
+            "model": "sonnet",
+        },
+    ]
+
+    inputs = collect(jobs, workdir, head)
+    assert inputs is not None
+    assert isinstance(inputs, TriageInputs)
+    assert inputs.review_job == "job-rev-undecodable"
+    assert "\ufffd" in inputs.review_reply

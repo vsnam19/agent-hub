@@ -45,7 +45,7 @@ def collect(jobs: list[dict], workdir: Path, head: str) -> TriageInputs | None:
         if reply_path:
             p = Path(reply_path)
             try:
-                review_reply = p.read_text()
+                review_reply = p.read_text(errors="replace")
                 findings = review_findings(review_reply)
             except OSError:
                 pass
@@ -62,7 +62,7 @@ def collect(jobs: list[dict], workdir: Path, head: str) -> TriageInputs | None:
             job_ids=job_ids - {review_job},
         )
 
-    if kind == "gate" and status != "ok":
+    if kind == "gate" and status in ("gate-failed", "failed"):
         gate_tail = ""
         for g in newest.get("gate") or []:
             if (g.get("rc") or 0) != 0:
