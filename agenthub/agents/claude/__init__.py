@@ -136,6 +136,20 @@ class ClaudeAdapter(Adapter):
                 reset_at = _reset_from_text(limit_text)
             return Classified(Outcome.QUOTA, reply=reply, reset_at=reset_at, detail=diag)
 
+        if any(
+            x in diag
+            for x in [
+                "can't reach the api server",
+                "eai_again",
+                "enotfound",
+                "econnreset",
+                "econnrefused",
+                "etimedout",
+                "network error",
+            ]
+        ):
+            return Classified(Outcome.TRANSIENT, reply=reply, detail=diag)
+
         if any(x in diag for x in ["invalid api key", "please run /login", "not logged in", "authentication"]):
             return Classified(Outcome.AUTH, reply=reply, detail=diag)
 
