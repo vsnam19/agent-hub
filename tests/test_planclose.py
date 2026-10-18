@@ -696,3 +696,145 @@ def test_transitive_dependent_is_stale(tmp_path: Path):
     assert (
         "- task-3: built before the fix rounds of task-1 (merge carries both; re-review after merge)" in report_content
     )
+
+
+def test_cancelled_review_stops_close(tmp_path: Path):
+    plan, state = _make_plan(tmp_path)
+
+    run_calls = 0
+
+    def fake_run() -> int:
+        nonlocal run_calls
+        run_calls += 1
+        state.task("task-1").status = "done"
+        return 0
+
+    def fake_review(task: Task) -> dict:
+        return {
+            "gate": "failed",
+            "review": "failed",
+            "job": "job-gate-1",
+            "reason": "gate cancelled",
+            "cancelled": True,
+        }
+
+    def fake_triage(task: Task) -> dict | None:
+        raise AssertionError("triage should not be called when review is cancelled")
+
+    def fake_ready(task: Task) -> list[str]:
+        return []
+
+    res = close(
+        plan,
+        state,
+        run=fake_run,
+        review=fake_review,
+        triage=fake_triage,
+        ready=fake_ready,
+    )
+
+    assert isinstance(res, CloseResult)
+    assert res.ok is False
+    assert res.cancelled is True
+    assert res.report == tmp_path / "report.md"
+    assert res.report.is_file()
+    assert run_calls == 1
+    assert state.task("task-1").status == "done"
+    assert state.task("task-1").reason == ""
+
+
+def test_cancelled_triage_stops_close(tmp_path: Path):
+    plan, state = _make_plan(tmp_path)
+
+    run_calls = 0
+    triage_calls = 0
+
+    def fake_run() -> int:
+        nonlocal run_calls
+        run_calls += 1
+        state.task("task-1").status = "done"
+        return 0
+
+    def fake_review(task: Task) -> dict:
+        return {"gate": "ok", "review": "request-changes", "job": "job-rev-1", "reason": "needs fix"}
+
+    def fake_triage(task: Task) -> dict | None:
+        nonlocal triage_calls
+        triage_calls += 1
+        tstate = state.task(task.name)
+        tstate.status = "blocked"
+        tstate.reason = "triage job cancelled"
+        return {"status": "blocked", "reason": "triage job cancelled"}
+
+    def fake_ready(task: Task) -> list[str]:
+        return []
+
+    res = close(
+        plan,
+        state,
+        run=fake_run,
+        review=fake_review,
+        triage=fake_triage,
+        ready=fake_ready,
+    )
+
+    assert isinstance(res, CloseResult)
+    assert res.ok is False
+    assert res.cancelled is True
+    assert res.report == tmp_path / "report.md"
+    assert res.report.is_file()
+    assert run_calls == 1
+    assert triage_calls == 1
+    assert state.task("task-1").status == "done"
+    assert state.task("task-1").reason == ""
+
+
+def test_stop_callable_stops_close(tmp_path: Path):
+    tasks = [
+        Task(name="task-1", role="implement"),
+        Task(name="task-2", role="implement"),
+    ]
+    plan, state = _make_plan(tmp_path, tasks=tasks)
+
+    run_calls = 0
+    reviewed: list[str] = []
+
+    def fake_run() -> int:
+        nonlocal run_calls
+        run_calls += 1
+        state.task("task-1").status = "done"
+        state.task("task-2").status = "done"
+        return 0
+
+    def fake_review(task: Task) -> dict:
+        reviewed.append(task.name)
+        return {"gate": "ok", "review": "approve", "job": f"job-{task.name}", "reason": ""}
+
+    def fake_triage(task: Task) -> dict | None:
+        raise AssertionError("triage should not be called")
+
+    def fake_ready(task: Task) -> list[str]:
+        return []
+
+    def stop_fn() -> bool:
+        return len(reviewed) >= 1
+
+    res = close(
+        plan,
+        state,
+        run=fake_run,
+        review=fake_review,
+        triage=fake_triage,
+        ready=fake_ready,
+        stop=stop_fn,
+    )
+
+    assert isinstance(res, CloseResult)
+    assert res.ok is False
+    assert res.cancelled is True
+    assert res.report == tmp_path / "report.md"
+    assert res.report.is_file()
+    assert run_calls == 1
+    assert reviewed == ["task-1"]
+    assert state.task("task-1").status == "done"
+    assert state.task("task-2").status == "done"

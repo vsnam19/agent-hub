@@ -277,7 +277,7 @@ def run_plan(
                     tstate.worktree,
                     "--json",
                 ]
-                if task.agent and not tstate.escalated_from:
+                if task.agent and (tstate.role or task.role) == task.role:
                     argv.extend(["--agent", task.agent])
                 if task.timeout:
                     argv.extend(["--timeout", task.timeout])
@@ -610,7 +610,10 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
     except ConfigError as e:
         return {**failed, "reason": str(e)}
     if gate["status"] != "ok":
-        return {**failed, "gate": "failed", "job": gate["id"], "reason": f"gate {gate['status']}"}
+        res = {**failed, "gate": "failed", "job": gate["id"], "reason": f"gate {gate['status']}"}
+        if gate["status"] == "cancelled":
+            res["cancelled"] = True
+        return res
 
     pool = load_pool()
     implementer = _implementer(tstate)
@@ -641,7 +644,10 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
     verdict = review.get("verdict") if review["status"] == "ok" else None
     if verdict not in ("approve", "request-changes"):
         verdict = "failed"
-    return {"gate": "ok", "review": verdict, "job": review["id"], "reason": review.get("error", "")}
+    res = {"gate": "ok", "review": verdict, "job": review["id"], "reason": review.get("error", "")}
+    if review.get("status") == "cancelled":
+        res["cancelled"] = True
+    return res
 
 
 def merge_order(plan: Plan) -> list[Task]:
