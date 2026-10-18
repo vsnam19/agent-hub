@@ -3,25 +3,20 @@
 The owner wants the next session to run on its own from a one-word prompt. Do exactly this, without asking, until
 every task is merged or a limit stops you (quota, a decision only the owner can make). Report in Vietnamese.
 
-**State at hand-off:** master `98263dd`+ (E8 merged, D-102), clean: no worktrees, no `orch/*` branches, nothing
-running, nothing pushed. agent-hub v0.10.1 installed (the CLI is an editable install of this repo, so master's code
-runs; the MCP server is the plugin cache 0.10.1 — use the **CLI** for `plan triage/close`).
+**State at hand-off (2026-10-19):** master has plan `followups-1` merged (D-103, 19 tasks, 1207 tests, lint clean),
+no worktrees, no `orch/*` branches, nothing running, nothing pushed. agent-hub v0.10.1 still installed: the new Claude
+Code hooks (`agent-hub hook session-start|stop`, `hooks/hooks.json`) and the 100 s MCP wait cap only reach the plugin
+after a release.
 
-**Progress 2026-10-19 (session cut by claude:opus quota, resets 00:50 +07):** plan.json + 19 briefs written
-(`~/.local/state/agent-hub/plans/followups-1/`), `plan run` done (19/19). Review rounds (round briefs `briefs/*-rN.md`,
-rejections `fixes/*-rejected.md`). **Approved on HEAD:** pool-gemini-id, network-transient, review-excludes-implementers
-(fail-closed rule, D-103 to write), plan-review-signal, wait-timeout-cap, dead-job-helper, cancel-before-announce
-(cascaded), gate-cmd-cancel-test, plan-merge-empty, mcp-server-version, tasksize-dotted-names, flaky-index-lock,
-agy-keyring-lows, skills-weekly-lows, plugin-hooks (needs cascade from hook-cli + re-review). **Open:**
-gateguard-fmt-skip r3 (re-review; rejections in fixes/), hook-cli r2 (re-review), triage-skip-merged r3 and
-close-cascade r2 (fix jobs were running — `agent-hub wait -d .worktrees/followups-1-<task>`, read diff, re-review).
-Decisions to log: implementers = every implement job on the work tree (fail-closed); cascade uses plain git merge
-(astmerge stays manual). Follow-up: real cancel gap between gate stdout creation and `on_start` pgid (review
-20261018-154041-review-09d2 low). Then `scripts/cascade.sh followups-1 plugin-hooks hook-cli`, `ready` all, merge.
+**Current work: none in flight.** Next, in order:
+1. Ask the owner whether to release v0.11.0 (version bump in the 3 manifests, `hub install`, plugin reload) — needed for
+   the hooks. Do not release without the owner.
+2. The owner left `phase-g-audit-prompt.md` (untracked, repo root): Phase G (audit log). Its preconditions are met (E8
+   merged). Ask the owner whether Phase G comes before F6, then follow that prompt.
+3. Otherwise F6 (codex/agy MCP registration via `hub install`), E5 (`plan draft`, with E5 extras in follow-ups), E6,
+   E7 techlead bench. New lows from this plan: `docs/follow-ups.md` "From plan `followups-1`".
 
-**Current work: plan `followups-1`** — spec `docs/superpowers/specs/2026-10-18-followups-1.md` (19 tasks; 18–19 are
-the owner's new Claude Code hooks: SessionStart context and a Stop guard while jobs run — they need a release to
-take effect, so after merging them ask the owner whether to release).
+The steps below describe how `followups-1` was run; reuse them for the next plan (new slug, new spec).
 
 1. Follow the `agent-hub:orchestrate` skill. Director never codes; briefs from `brief-template.md` with
    Goal / Input / Expected output / Constraints / Gate; gate is `just lint` + `uv run pytest -q`.
