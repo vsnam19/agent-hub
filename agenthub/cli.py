@@ -1136,7 +1136,7 @@ def _task_head(tstate) -> tuple[str | None, str | None]:
         return None, f"cannot read HEAD: {tstate.worktree}"
 
 
-def _merge_state(plan, tstate) -> str | None:
+def _merge_state(plan, tstate, jobs=None) -> str | None:
     branch = getattr(tstate, "branch", "")
     if not branch:
         return None
@@ -1145,7 +1145,31 @@ def _merge_state(plan, tstate) -> str | None:
     try:
         guards._run_git(repo, "show-ref", "--verify", "--quiet", ref)
     except subprocess.CalledProcessError as e:
-        return "gone" if e.returncode == 1 else None
+        if e.returncode != 1:
+            return None
+        target_worktree = getattr(tstate, "worktree", "")
+        if not target_worktree:
+            return "gone"
+        target_norm = str(Path(target_worktree).expanduser().absolute())
+        if jobs is None:
+            jobs = list_jobs(paths(), ALL_JOBS)
+        for j in jobs:
+            w = j.get("workdir")
+            if not w or not isinstance(w, (str, Path)):
+                continue
+            try:
+                if str(Path(w).expanduser().absolute()) != target_norm:
+                    continue
+            except Exception:
+                continue
+            head = j.get("head")
+            if isinstance(head, str) and head:
+                try:
+                    guards._run_git(repo, "merge-base", "--is-ancestor", head, plan.base)
+                    return "merged"
+                except (subprocess.CalledProcessError, OSError):
+                    return "gone"
+        return "gone"
     except OSError:
         return None
 
@@ -1262,10 +1286,11 @@ def _cmd_plan(args) -> int:
 
             old_sigint = signal.signal(signal.SIGINT, _handle_signal)
             old_sigterm = signal.signal(signal.SIGTERM, _handle_signal)
+            jobs = list_jobs(paths(), ALL_JOBS)
             try:
                 for task in tasks:
                     tstate = state.task(task.name)
-                    mstate = _merge_state(plan, tstate)
+                    mstate = _merge_state(plan, tstate, jobs=jobs)
                     if mstate == "merged":
                         print(_safe(f"{task.name} already merged"))
                         if interrupted:
@@ -1324,8 +1349,8 @@ def _cmd_plan(args) -> int:
                         for t in plan.tasks
                         if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"
                     ]
-                    tasks = [t for t in tasks if not _merge_state(plan, state.task(t.name))]
                     jobs = list_jobs(paths(), ALL_JOBS)
+                    tasks = [t for t in tasks if not _merge_state(plan, state.task(t.name), jobs=jobs)]
                     triaged_count = 0
                     skipped_count = 0
                     any_blocked = False

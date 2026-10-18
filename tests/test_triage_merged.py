@@ -1,10 +1,14 @@
 import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import agenthub.planclose
+import agenthub.planrun
 import agenthub.triagerun
 from agenthub.cli import _merge_state, main
+from agenthub.config import paths
+from agenthub.jobs import new_job
 from agenthub.plan import load as load_plan
 from agenthub.planstate import TaskState, load_or_init
 from tests.gitrepo import make_repo
@@ -274,6 +278,20 @@ def test_merged_or_gone_helper(env_sandbox, tmp_path):
     (t2_worktree / "t2.txt").write_text("t2")
     subprocess.run(["git", "add", "."], cwd=t2_worktree, check=True)
     subprocess.run(["git", "commit", "-m", "t2 commit"], cwd=t2_worktree, check=True)
+    t2_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=t2_worktree, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    job = new_job(paths(), "gate", datetime(2026, 10, 19, 1, 0, 0))
+    job.write_json(
+        "result.json",
+        {
+            "id": job.id,
+            "role": "gate",
+            "workdir": str(t2_worktree),
+            "head": t2_head,
+            "status": "ok",
+        },
+    )
 
     # Before merge or deletion: both branches exist and are unmerged
     assert _merge_state(plan, t1_state) is None
@@ -327,6 +345,25 @@ def test_plan_review_skips_merged_task(env_sandbox, tmp_path, monkeypatch, capsy
     assert "t2 gate=" in out
     assert len(calls) == 1
 
+    # Add a commit to t2 so it is ahead of t1, record a job for it, then delete t2 branch before merge
+    (t2_worktree / "t2.txt").write_text("t2")
+    subprocess.run(["git", "add", "."], cwd=t2_worktree, check=True)
+    subprocess.run(["git", "commit", "-m", "t2 commit"], cwd=t2_worktree, check=True)
+    t2_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=t2_worktree, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    job = new_job(paths(), "gate", datetime(2026, 10, 19, 1, 0, 0))
+    job.write_json(
+        "result.json",
+        {
+            "id": job.id,
+            "role": "gate",
+            "workdir": str(t2_worktree),
+            "head": t2_head,
+            "status": "ok",
+        },
+    )
+
     # Delete t2 branch before merge (prune worktree first)
     shutil.rmtree(t2_worktree)
     subprocess.run(["git", "worktree", "prune"], cwd=repo, check=True)
@@ -346,3 +383,170 @@ def test_plan_review_skips_merged_task(env_sandbox, tmp_path, monkeypatch, capsy
     assert "t1 already merged" in out
     assert "t2 skipped: branch deleted before merge" in out
     assert len(calls) == 1
+
+
+def test_branch_deleted_after_merge_is_merged(env_sandbox, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "handoff")
+    monkeypatch.setenv("FAKE_AGY_SCENARIO", "handoff")
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "handoff")
+    fake_review(monkeypatch, "approve")
+    monkeypatch.setattr(agenthub.planrun, "run_plan", lambda *args, **kwargs: None)
+
+    repo = tmp_path / "repo"
+    make_repo(repo, branch=None)
+    (repo / ".agent-hub").mkdir()
+    (repo / ".agent-hub" / "config.toml").write_text('gates = ["test -f README.md"]\n')
+    (repo / ".gitignore").write_text(".worktrees/\n")
+    subprocess.run(["git", "add", ".agent-hub", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "repo gates"], cwd=repo, check=True)
+
+    content = {
+        "goal": "do it",
+        "repo": str(repo),
+        "base": "master",
+        "slug": "plan-1",
+        "tasks": [
+            {"name": "t1", "role": "implement", "brief": "b1.md"},
+        ],
+    }
+    plan_file = make_plan_file(tmp_path, repo, content=content)
+    plan = load_plan(plan_file)
+
+    # Create task branch and work tree
+    t1_branch = "orch/plan-1/t1"
+    t1_worktree = repo / ".worktrees" / "t1"
+    t1_worktree.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "worktree", "add", "-b", t1_branch, str(t1_worktree), "master"], cwd=repo, check=True)
+    (t1_worktree / "t1.txt").write_text("t1 content")
+    subprocess.run(["git", "add", "."], cwd=t1_worktree, check=True)
+    subprocess.run(["git", "commit", "-m", "t1 commit"], cwd=t1_worktree, check=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=t1_worktree, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    # Record job for that work tree with head
+    job = new_job(paths(), "gate", datetime(2026, 10, 19, 0, 0, 0))
+    job.write_json(
+        "result.json",
+        {
+            "id": job.id,
+            "role": "gate",
+            "workdir": str(t1_worktree),
+            "head": head,
+            "status": "ok",
+        },
+    )
+
+    # Merge task branch into master (plan.base)
+    subprocess.run(["git", "merge", "--ff-only", t1_branch], cwd=repo, check=True)
+
+    # Remove branch and work tree like plan merge does
+    shutil.rmtree(t1_worktree)
+    subprocess.run(["git", "worktree", "prune"], cwd=repo, check=True)
+    subprocess.run(["git", "branch", "-D", t1_branch], cwd=repo, check=True)
+
+    pstate = load_or_init(plan)
+    pstate.tasks["t1"].status = "done"
+    pstate.tasks["t1"].branch = t1_branch
+    pstate.tasks["t1"].worktree = str(t1_worktree)
+    pstate.tasks["t1"].start_ref = "master"
+    pstate.save()
+
+    # _merge_state returns "merged"
+    assert _merge_state(plan, pstate.tasks["t1"]) == "merged"
+
+    # plan review prints "already merged" and exits 0
+    rc = main(["plan", "review", str(plan_file)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "t1 already merged" in out
+
+    # plan close approves it
+    rc = main(["plan", "close", str(plan_file)])
+    assert rc == 0
+    report_file = plan_file.parent / "report.md"
+    assert report_file.is_file()
+    report_content = report_file.read_text()
+    assert "- t1: done, fix rounds 0/3, review approve, review job -" in report_content
+    assert "t1: blocked" not in report_content
+
+    end_state = load_or_init(plan)
+    assert end_state.task("t1").status == "done"
+    assert end_state.task("t1").status != "blocked"
+
+
+def test_branch_deleted_unmerged_is_gone(env_sandbox, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "handoff")
+    monkeypatch.setenv("FAKE_AGY_SCENARIO", "handoff")
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "handoff")
+    fake_review(monkeypatch, "approve")
+    monkeypatch.setattr(agenthub.planrun, "run_plan", lambda *args, **kwargs: None)
+
+    repo = tmp_path / "repo"
+    make_repo(repo, branch=None)
+    (repo / ".agent-hub").mkdir()
+    (repo / ".agent-hub" / "config.toml").write_text('gates = ["test -f README.md"]\n')
+    (repo / ".gitignore").write_text(".worktrees/\n")
+    subprocess.run(["git", "add", ".agent-hub", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "repo gates"], cwd=repo, check=True)
+
+    content = {
+        "goal": "do it",
+        "repo": str(repo),
+        "base": "master",
+        "slug": "plan-1",
+        "tasks": [
+            {"name": "t1", "role": "implement", "brief": "b1.md"},
+        ],
+    }
+    plan_file = make_plan_file(tmp_path, repo, content=content)
+    plan = load_plan(plan_file)
+
+    t1_branch = "orch/plan-1/t1"
+    t1_worktree = repo / ".worktrees" / "t1"
+    t1_worktree.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "worktree", "add", "-b", t1_branch, str(t1_worktree), "master"], cwd=repo, check=True)
+    (t1_worktree / "t1.txt").write_text("t1 content")
+    subprocess.run(["git", "add", "."], cwd=t1_worktree, check=True)
+    subprocess.run(["git", "commit", "-m", "t1 commit"], cwd=t1_worktree, check=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=t1_worktree, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    # Record job with head that is NOT merged into master
+    job = new_job(paths(), "implement", datetime(2026, 10, 19, 0, 0, 0))
+    job.write_json(
+        "result.json",
+        {
+            "id": job.id,
+            "role": "implement",
+            "workdir": str(t1_worktree),
+            "head": head,
+            "status": "ok",
+        },
+    )
+
+    # Delete work tree and branch WITHOUT merging into master
+    shutil.rmtree(t1_worktree)
+    subprocess.run(["git", "worktree", "prune"], cwd=repo, check=True)
+    subprocess.run(["git", "branch", "-D", t1_branch], cwd=repo, check=True)
+
+    pstate = load_or_init(plan)
+    pstate.tasks["t1"].status = "done"
+    pstate.tasks["t1"].branch = t1_branch
+    pstate.tasks["t1"].worktree = str(t1_worktree)
+    pstate.tasks["t1"].start_ref = "master"
+    pstate.save()
+
+    assert _merge_state(plan, pstate.tasks["t1"]) == "gone"
+
+    rc = main(["plan", "review", str(plan_file)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "t1 skipped: branch deleted before merge" in out
+
+    rc = main(["plan", "close", str(plan_file)])
+    assert rc != 0
+    end_state = load_or_init(plan)
+    assert end_state.task("t1").status == "blocked"
+    assert "branch deleted before merge" in end_state.task("t1").reason
