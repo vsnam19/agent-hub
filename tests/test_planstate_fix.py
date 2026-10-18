@@ -66,3 +66,49 @@ def test_old_state_file_loads_with_defaults(tmp_path):
 
     assert state.tasks["t"].fix_rounds == 0
     assert state.tasks["t"].attempts_base == 0
+
+
+def test_fix_start_round_trips(tmp_path):
+    assert TaskState().fix_start == ""
+
+    plan = _plan(tmp_path)
+    state = load_or_init(plan)
+    state.tasks["t"].fix_start = "c0ffee1234567890abcdef"
+    state.save()
+
+    reloaded = load_or_init(plan)
+
+    assert reloaded.tasks["t"].fix_start == "c0ffee1234567890abcdef"
+    saved = json.loads((tmp_path / "state.json").read_text())
+    assert saved["tasks"]["t"]["fix_start"] == "c0ffee1234567890abcdef"
+
+
+def test_old_state_without_fix_start_loads(tmp_path):
+    plan = _plan(tmp_path)
+    old = {
+        "slug": "s",
+        "started": "2026-10-14T00:00:00+00:00",
+        "updated": "2026-10-14T00:00:00+00:00",
+        "runner": {},
+        "tasks": {
+            "t": {
+                "status": "pending",
+                "attempts": [],
+                "worktree": "",
+                "branch": "",
+                "start_ref": "",
+                "reason": "",
+                "handoff": "",
+                "role": "",
+                "escalated_from": "",
+                "visited_roles": [],
+                "fix_rounds": 1,
+                "attempts_base": 2,
+            }
+        },
+    }
+    (tmp_path / "state.json").write_text(json.dumps(old))
+
+    state = load_or_init(plan)
+
+    assert state.tasks["t"].fix_start == ""

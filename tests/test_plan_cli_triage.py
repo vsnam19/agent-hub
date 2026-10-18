@@ -1,3 +1,4 @@
+import fcntl
 import json
 import os
 import shutil
@@ -7,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import agenthub.triagerun
-from agenthub.cli import _head_of, main
+from agenthub.cli import _task_head, main
 from agenthub.guards import GuardError, inspect
 from agenthub.plan import load as load_plan
 from agenthub.planstate import load_or_init
@@ -24,7 +25,7 @@ def test_triage_prints_fix_line_and_exits_zero(env_sandbox, tmp_path, monkeypatc
 
     p = load_plan(plan_file)
     s = load_or_init(p)
-    assert _head_of(s.task("t1")) == t1_head
+    assert _task_head(s.task("t1")) == (t1_head, None)
 
     calls = []
 
@@ -114,17 +115,6 @@ def test_triage_nothing_to_do_exits_zero(env_sandbox, tmp_path, monkeypatch, cap
     assert rc == 0
     assert "nothing to triage" in out
     assert len(calls) == 2
-
-    # A task with no worktree is skipped without calling triage_task
-    state_file = plan_file.parent / "state.json"
-    data = json.loads(state_file.read_text())
-    data["tasks"]["t1"]["worktree"] = ""
-    state_file.write_text(json.dumps(data))
-
-    calls.clear()
-    rc2 = main(["plan", "triage", str(plan_file)])
-    assert rc2 == 0
-    assert calls == ["t2"]
 
 
 def test_triage_saves_state(env_sandbox, tmp_path, monkeypatch):
@@ -217,6 +207,7 @@ def test_triage_refuses_live_runner(env_sandbox, tmp_path, monkeypatch, capsys):
     state_file.write_text(json.dumps(data))
 
     monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: 12345 if pid == other_pid else None)
+    monkeypatch.setattr(agenthub.cli, "is_running", lambda pid: True if pid == other_pid else False)
 
     calls = []
     monkeypatch.setattr(agenthub.triagerun, "triage_task", lambda *args, **kwargs: calls.append(1))
@@ -257,6 +248,78 @@ def test_triage_claims_runner(env_sandbox, tmp_path, monkeypatch):
     # If the recorded runner is already this process, triage succeeds and claims it again
     rc2 = main(["plan", "triage", str(plan_file)])
     assert rc2 == 0
+
+
+def test_zombie_runner_is_not_alive(env_sandbox, tmp_path, monkeypatch):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    state_file = plan_file.parent / "state.json"
+
+    zombie_pid = os.getpid() + 1000
+    recorded_time = 12345
+    data = json.loads(state_file.read_text())
+    data["runner"] = {"pid": zombie_pid, "start_time": recorded_time}
+    state_file.write_text(json.dumps(data))
+
+    my_pid = os.getpid()
+    my_start_time = 77777
+
+    monkeypatch.setattr(
+        agenthub.cli,
+        "start_time",
+        lambda pid: recorded_time if pid == zombie_pid else (my_start_time if pid == my_pid else None),
+    )
+    monkeypatch.setattr(agenthub.cli, "is_running", lambda pid: False if pid == zombie_pid else True)
+    monkeypatch.setattr(agenthub.triagerun, "triage_task", lambda *args, **kwargs: None)
+
+    rc = main(["plan", "triage", str(plan_file)])
+    assert rc == 0
+    saved_state = json.loads(state_file.read_text())
+    assert saved_state["runner"] == {"pid": my_pid, "start_time": my_start_time}
+
+
+def test_claim_uses_lock_file(env_sandbox, tmp_path, monkeypatch):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    plan_dir = plan_file.parent
+
+    flock_calls = []
+    orig_flock = fcntl.flock
+
+    def spy_flock(fd, op):
+        flock_calls.append((fd, op))
+        return orig_flock(fd, op)
+
+    monkeypatch.setattr(fcntl, "flock", spy_flock)
+    monkeypatch.setattr(agenthub.triagerun, "triage_task", lambda *args, **kwargs: None)
+
+    rc = main(["plan", "triage", str(plan_file)])
+    assert rc == 0
+
+    lock_file = plan_dir / "runner.lock"
+    assert lock_file.is_file()
+    assert any(op == fcntl.LOCK_EX for _, op in flock_calls)
+
+
+def test_empty_worktree_counts_as_skipped(env_sandbox, tmp_path, monkeypatch, capsys):
+    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+    state_file = plan_file.parent / "state.json"
+    data = json.loads(state_file.read_text())
+    data["tasks"]["t1"]["worktree"] = ""
+    state_file.write_text(json.dumps(data))
+
+    calls = []
+
+    def fake_triage(plan, task, tstate, jobs, head, now):
+        calls.append(task.name)
+        return None
+
+    monkeypatch.setattr(agenthub.triagerun, "triage_task", fake_triage)
+
+    rc = main(["plan", "triage", str(plan_file)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "t1 skipped: no work tree recorded" in out
+    assert calls == ["t2"]
+    assert "skipped 1 task(s)" in out
 
 
 def test_triage_reads_head_without_default_branch(env_sandbox, tmp_path, monkeypatch, capsys):
@@ -389,6 +452,7 @@ def test_plan_run_refuses_live_runner(env_sandbox, tmp_path, monkeypatch, capsys
     state_file.write_text(json.dumps(data))
 
     monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: 12345 if pid == other_pid else None)
+    monkeypatch.setattr(agenthub.cli, "is_running", lambda pid: True if pid == other_pid else False)
 
     run_calls = []
     monkeypatch.setattr(agenthub.cli, "run_plan", lambda *args, **kwargs: run_calls.append(1))

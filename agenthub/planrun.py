@@ -536,7 +536,8 @@ def escalate(tstate: TaskState, task: Task, job_result: dict, job_status: str) -
         return  # cycle guard
 
     cwd = Path(tstate.worktree)
-    subprocess.run(_git_argv("reset", "--hard", tstate.start_ref), cwd=cwd, check=True, capture_output=True)
+    reset_ref = tstate.fix_start if tstate.fix_rounds > 0 and tstate.fix_start else tstate.start_ref
+    subprocess.run(_git_argv("reset", "--hard", reset_ref), cwd=cwd, check=True, capture_output=True)
     subprocess.run(_git_argv("clean", "-fdx"), cwd=cwd, check=True, capture_output=True)
 
     failure = ""
