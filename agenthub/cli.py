@@ -1,4 +1,5 @@
 import argparse
+import fcntl
 import json
 import math
 import os
@@ -22,7 +23,7 @@ from agenthub.plan import PlanError
 from agenthub.plan import load as load_plan
 from agenthub.planrun import run_plan
 from agenthub.pool import Cooldowns, load_pool, parse_link
-from agenthub.procinfo import pid_file_dead, read_pid_file, start_time
+from agenthub.procinfo import is_running, pid_file_dead, read_pid_file, start_time
 from agenthub.workers import available_skills
 
 WAIT_POLL_S = 1.0
@@ -190,6 +191,10 @@ def _build_parser() -> argparse.ArgumentParser:
     plan_review.add_argument("plan_file", metavar="<plan.json>")
     plan_review.add_argument("--task", metavar="NAME", help="review only this task")
     plan_review.add_argument("--result", metavar="FILE", help=argparse.SUPPRESS)
+    plan_triage = plan_sub.add_parser(
+        "triage", help="triage every task that needs it, once (exit 1 when any task is blocked)"
+    )
+    plan_triage.add_argument("plan_file", metavar="<plan.json>")
     plan_merge = plan_sub.add_parser(
         "merge",
         help="merge each done task that agent-hub ready accepts, in dependency order (exit 1 at the first not ready)",
@@ -954,13 +959,58 @@ def _print_trail(trail_file: Path) -> int:
     return 0
 
 
-def _claim_runner(state, plan_dir: Path) -> None:
+def _live_runner(plan_dir: Path) -> int | None:
+    """Return the recorded runner pid when it is alive and verified (is_running and matching
+    start_time, not this process), else None. Unreadable file -> None."""
+    state_file = plan_dir / "state.json"
+    try:
+        data = json.loads(state_file.read_text())
+        if not isinstance(data, dict):
+            return None
+    except (OSError, ValueError):
+        return None
+    runner = data.get("runner")
+    if not isinstance(runner, dict):
+        return None
+    pid = runner.get("pid")
+    recorded = runner.get("start_time")
+    if (
+        isinstance(pid, int)
+        and recorded is not None
+        and pid != os.getpid()
+        and is_running(pid)
+        and start_time(pid) == recorded
+    ):
+        return pid
+    return None
+
+
+def _claim_runner(state, plan_dir: Path, plan=None) -> None:
     """Record this process as the plan's runner with its start time, so `plan cancel` can verify it.
-    The pid also goes to `runner.pid`, which still names the runner when state.json cannot be read."""
-    pid = os.getpid()
-    state.runner = {"pid": pid, "start_time": start_time(pid)}
-    state.save()
-    (plan_dir / "runner.pid").write_text(json.dumps(state.runner))
+    Refuses if another verified runner process is still running.
+    The pid also goes to `runner.pid`, which still names the runner when state.json cannot be read.
+    Callers should pass `plan` to refresh runner and task state under the lock."""
+    with open(plan_dir / "runner.lock", "a") as lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            raise UsageError("plan is busy (triage in progress); try again later") from None
+        try:
+            live = _live_runner(plan_dir)
+            if live is not None:
+                raise UsageError(f"plan runner {live} is still running; wait or cancel it first")
+            if plan is not None:
+                from agenthub.planstate import load_or_init
+
+                fresh = load_or_init(plan)
+                state.runner = fresh.runner
+                state.tasks = fresh.tasks
+            pid = os.getpid()
+            state.runner = {"pid": pid, "start_time": start_time(pid)}
+            state.save()
+            (plan_dir / "runner.pid").write_text(json.dumps(state.runner))
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 def _stop_runner(pid: int | None, recorded: int | None) -> None:
@@ -1022,6 +1072,16 @@ def _cmd_plan_cancel(args, plan_file: Path) -> int:
     return code
 
 
+def _task_head(tstate) -> tuple[str | None, str | None]:
+    """Read a task's HEAD without guards.inspect; returns (head, None) or (None, problem)."""
+    if not tstate.worktree or not Path(tstate.worktree).is_dir():
+        return None, f"work tree missing: {tstate.worktree}"
+    try:
+        return guards._run_git(Path(tstate.worktree), "rev-parse", "HEAD"), None
+    except (subprocess.CalledProcessError, OSError):
+        return None, f"cannot read HEAD: {tstate.worktree}"
+
+
 def _cmd_plan(args) -> int:
     plan_file = Path(args.plan_file).resolve()
     if args.plan_command == "cancel":
@@ -1040,7 +1100,7 @@ def _cmd_plan(args) -> int:
                     raise UsageError(f"task {task.name}: unknown skill {skill}: {skills_hint(known_skills)}")
 
         state = load_or_init(plan)
-        _claim_runner(state, plan_dir)
+        _claim_runner(state, plan_dir, plan=plan)
 
         def spawn(argv: list[str], log: Path) -> subprocess.Popen:
             f = open(log, "wb")
@@ -1153,6 +1213,101 @@ def _cmd_plan(args) -> int:
                     "stderr_tail": stderr_tail,
                 }
                 _atomic_write(result_path, json.dumps(record, indent=2) + "\n")
+
+    elif args.plan_command == "triage":
+        from agenthub import triagerun
+        from agenthub.planstate import load_or_init
+
+        if not state_file.is_file():
+            raise UsageError("state.json not found")
+        with open(plan_dir / "runner.lock", "a") as lock_file:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (BlockingIOError, OSError):
+                raise UsageError("plan is busy (triage in progress); try again later") from None
+            try:
+                live = _live_runner(plan_dir)
+                if live is not None:
+                    raise UsageError(f"plan runner {live} is still running; wait or cancel it first")
+                state = load_or_init(plan)
+                tasks = [
+                    t for t in plan.tasks if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"
+                ]
+                jobs = list_jobs(paths(), ALL_JOBS)
+                triaged_count = 0
+                skipped_count = 0
+                any_blocked = False
+
+                interrupted = False
+
+                def _handle_signal(signum, frame):
+                    nonlocal interrupted
+                    interrupted = True
+
+                old_sigint = signal.signal(signal.SIGINT, _handle_signal)
+                old_sigterm = signal.signal(signal.SIGTERM, _handle_signal)
+                try:
+                    for task in tasks:
+                        tstate = state.task(task.name)
+                        if not tstate.worktree:
+                            print(_safe(f"{task.name} skipped: no work tree recorded"))
+                            skipped_count += 1
+                            if interrupted:
+                                break
+                            continue
+                        head, problem = _task_head(tstate)
+                        if problem:
+                            print(_safe(f"{task.name} skipped: {problem}"))
+                            skipped_count += 1
+                            if interrupted:
+                                break
+                            continue
+                        result = triagerun.triage_task(plan, task, tstate, jobs, head, _now)
+                        if (
+                            result is not None
+                            and result.get("status") == "blocked"
+                            and result.get("reason") == "triage job cancelled"
+                        ):
+                            interrupted = True
+                        if interrupted:
+                            if (
+                                result is not None
+                                and result.get("status") == "blocked"
+                                and result.get("reason") == "triage job cancelled"
+                            ):
+                                tstate.status = "done"
+                                tstate.reason = ""
+                            state.save()
+                            break
+                        if result is None:
+                            continue
+                        triaged_count += 1
+                        state.save()
+                        if result.get("status") == "blocked":
+                            any_blocked = True
+                            print(_safe(f"{task.name} blocked: {result.get('reason', '')}"))
+                        else:
+                            counts = result.get("counts") or {}
+                            fix = counts.get("fix", 0)
+                            reject = counts.get("reject", 0)
+                            blocked = counts.get("blocked", 0)
+                            brief_part = f" brief={result['fix_path']}" if result.get("fix_path") else ""
+                            print(_safe(f"{task.name} fix={fix} reject={reject} blocked={blocked}{brief_part}"))
+                finally:
+                    signal.signal(signal.SIGINT, old_sigint)
+                    signal.signal(signal.SIGTERM, old_sigterm)
+
+                if interrupted:
+                    return 130
+                if skipped_count > 0:
+                    print(_safe(f"skipped {skipped_count} task(s)"))
+                    return 1
+                if triaged_count == 0:
+                    print(_safe("nothing to triage"))
+                    return 0
+                return 1 if any_blocked else 0
+            finally:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
 
     elif args.plan_command == "merge":
         from agenthub.planrun import merge_order, merge_target_problem, merge_task
