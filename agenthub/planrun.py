@@ -460,9 +460,24 @@ def run_plan(
         signal.signal(signal.SIGINT, orig_sigint)
 
 
+def _fix_brief_part(reason: str) -> str:
+    """Return the text before the first line that starts with '## Previous attempt' (stripped),
+    or '' if reason starts with it.
+    """
+    if not reason:
+        return ""
+    lines = reason.splitlines(keepends=True)
+    prefix: list[str] = []
+    for line in lines:
+        if line.startswith("## Previous attempt"):
+            break
+        prefix.append(line)
+    return "".join(prefix).strip()
+
+
 def apply_retry(tstate: TaskState, task: Task, job_status: str, job_result: dict):
     # retries logic (3.4)
-    attempts_so_far = len(tstate.attempts)
+    attempts_so_far = len(tstate.attempts) - tstate.attempts_base
 
     can_retry = False
     note = ""
@@ -498,7 +513,8 @@ def apply_retry(tstate: TaskState, task: Task, job_status: str, job_result: dict
 
     if can_retry and attempts_so_far < task.max_attempts:
         tstate.status = "pending"
-        tstate.reason = note
+        brief = _fix_brief_part(tstate.reason) if tstate.fix_rounds > 0 else ""
+        tstate.reason = f"{brief}\n\n{note}" if brief else note
     else:
         if job_status == "exhausted":
             tstate.status = "blocked"
@@ -535,7 +551,9 @@ def escalate(tstate: TaskState, task: Task, job_result: dict, job_status: str) -
     tstate.escalated_from = current
     tstate.role = target
     tstate.status = "pending"
-    tstate.reason = f"## Previous attempt failed\n{failure}"
+    note = f"## Previous attempt failed\n{failure}"
+    brief = _fix_brief_part(tstate.reason) if tstate.fix_rounds > 0 else ""
+    tstate.reason = f"{brief}\n\n{note}" if brief else note
 
 
 def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], datetime]) -> dict:
