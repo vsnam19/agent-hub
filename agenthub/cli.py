@@ -1136,6 +1136,25 @@ def _task_head(tstate) -> tuple[str | None, str | None]:
         return None, f"cannot read HEAD: {tstate.worktree}"
 
 
+def _merged_or_gone(plan, tstate) -> bool:
+    branch = getattr(tstate, "branch", "")
+    if not branch:
+        return False
+    ref = branch if branch.startswith("refs/heads/") else f"refs/heads/{branch}"
+    branch_name = branch.removeprefix("refs/heads/")
+    try:
+        guards._run_git(Path(plan.repo), "rev-parse", "--verify", "--quiet", ref)
+    except (subprocess.CalledProcessError, OSError):
+        return True
+    if tstate.worktree and Path(tstate.worktree).is_dir():
+        return False
+    try:
+        guards._run_git(Path(plan.repo), "merge-base", "--is-ancestor", branch_name, plan.base)
+        return True
+    except (subprocess.CalledProcessError, OSError):
+        return False
+
+
 def _check_plan_skills(plan) -> None:
     known_skills = available_skills(paths().config_dir) if any(t.skills for t in plan.tasks) else {}
     for task in plan.tasks:
@@ -1267,6 +1286,7 @@ def _cmd_plan(args) -> int:
                         for t in plan.tasks
                         if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"
                     ]
+                    tasks = [t for t in tasks if not _merged_or_gone(plan, state.task(t.name))]
                     jobs = list_jobs(paths(), ALL_JOBS)
                     triaged_count = 0
                     skipped_count = 0
@@ -1400,6 +1420,11 @@ def _cmd_plan(args) -> int:
             state = load_or_init(plan)
             _claim_runner(state, plan_dir, plan=plan)
             try:
+                plan.tasks = [
+                    t
+                    for t in plan.tasks
+                    if not (state.task(t.name).status == "done" and _merged_or_gone(plan, state.task(t.name)))
+                ]
 
                 def spawn(argv: list[str], log: Path) -> subprocess.Popen:
                     f = open(log, "wb")
