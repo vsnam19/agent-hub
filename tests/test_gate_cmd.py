@@ -3,6 +3,8 @@ import os
 import signal
 import subprocess
 import sys
+import time
+from pathlib import Path
 
 import pytest
 
@@ -236,22 +238,44 @@ def test_gate_refuses_only_when_no_gates_anywhere(env_sandbox, repo, capsys):
     assert [g["cmd"] for g in out["gate"]] == ["test -f feature.txt"]
 
 
-def test_gate_job_sigterm_marks_cancelled(env_sandbox, repo, capsys, monkeypatch):
-    set_repo_gates(repo, ["true"])
+def test_gate_job_sigterm_marks_cancelled(env_sandbox, repo):
+    set_repo_gates(repo, ["sleep 30"])
 
-    def sigterm_during_gate(inv, cwd, env, attempt_dir, timeout, on_start):
-        (attempt_dir / "stdout").write_text("")
-        (attempt_dir / "stderr").write_text("")
-        os.kill(os.getpid(), signal.SIGTERM)
-        return process.Ran(rc=-15, timed_out=False, duration_s=0.0, pgid=0)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
 
-    monkeypatch.setattr(process, "run", sigterm_during_gate)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "agenthub", "gate", "-d", str(repo)],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
 
-    rc = main(["gate", "-d", str(repo), "--json"])
+    deadline = time.time() + 10.0
+    result_path = None
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            break
+        gate_jobs = [j for j in list_jobs(paths(), 10) if j.get("kind") == "gate" and j.get("status") == "running"]
+        if gate_jobs:
+            result_path = paths().jobs_dir / gate_jobs[0]["id"] / "result.json"
+            break
+        time.sleep(0.02)
 
-    out = json.loads(capsys.readouterr().out)
-    assert rc == 130
-    assert out["status"] == "cancelled"
+    assert result_path is not None, f"gate job did not enter running status; proc exit code: {proc.poll()}"
+
+    try:
+        proc.send_signal(signal.SIGTERM)
+        proc.communicate(timeout=10.0)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+    assert proc.returncode == 130
+    result_data = json.loads(result_path.read_text())
+    assert result_data["status"] == "cancelled"
+    assert result_data["exit_code"] == 130
     assert [j["status"] for j in list_jobs(paths(), 100) if j["kind"] == "gate"] == ["cancelled"]
 
 
