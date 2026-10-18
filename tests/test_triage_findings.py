@@ -474,3 +474,19 @@ def test_split_severity_shapes():
     assert split_severity("severity low — x") == ("low", "x")
     assert split_severity("`critical` x") == ("high", "x")
     assert split_severity("note — x") == (None, "note — x")
+
+
+def test_unparsed_any_shape():
+    reply = """
+## Findings
+- agenthub/a.py: race in claim
+- Only one separator — note
+- unknown_sev — agenthub/b.py:1 — broken finding
+- high — agenthub/c.py:2 — valid finding
+  - indented sub-bullet should not count
+- (none) — no problem
+* another bullet without separators
+"""
+    assert unparsed_findings(reply) == 1
+    assert unparsed_findings(reply, any_shape=False) == 1
+    assert unparsed_findings(reply, any_shape=True) == 4

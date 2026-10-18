@@ -12,6 +12,7 @@ class CloseResult:
     ok: bool
     report: Path
     stale: dict[str, list[str]] = field(default_factory=dict)
+    cancelled: bool = False
 
 
 def close(
@@ -22,6 +23,7 @@ def close(
     review: Callable[[Task], dict],
     triage: Callable[[Task], dict | None],
     ready: Callable[[Task], list[str]],
+    stop: Callable[[], bool] = lambda: False,
     max_rounds: int = 3,
 ) -> CloseResult:
     reviews: dict[str, dict] = {}
@@ -45,8 +47,19 @@ def close(
             if tstate.status != "done" or task.name in approved:
                 continue
 
+            if stop():
+                cancelled = True
+                break
+
             r = review(task)
             reviews[task.name] = r
+
+            if r.get("cancelled"):
+                cancelled = True
+                tstate.status = "done"
+                tstate.reason = ""
+                state.save()
+                break
 
             if r.get("review") == "approve" and r.get("gate") == "ok":
                 problems = ready(task)
@@ -68,6 +81,12 @@ def close(
                         tstate.status = "blocked"
                         tstate.reason = "triage found nothing to act on"
                         state.save()
+                    elif tr.get("status") == "blocked" and tr.get("reason") == "triage job cancelled":
+                        cancelled = True
+                        tstate.status = "done"
+                        tstate.reason = ""
+                        state.save()
+                        break
                     elif tr.get("status") == "rejected-only":
                         if task.name in rejected_once:
                             tstate.status = "blocked"
@@ -89,6 +108,8 @@ def close(
                 tstate.reason = f"review failed: {reason}"
                 state.save()
 
+        if cancelled:
+            break
         if not (made_pending or needs_rereview):
             break
 
@@ -125,4 +146,4 @@ def close(
             f.write("\n## Built before an upstream fix\n" + "\n".join(stale_lines) + "\n")
 
     ok = not cancelled and not stale and all(t.name in approved for t in implement_tasks)
-    return CloseResult(ok=ok, report=report_path, stale=stale)
+    return CloseResult(ok=ok, report=report_path, stale=stale, cancelled=cancelled)
