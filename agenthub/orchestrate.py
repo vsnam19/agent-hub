@@ -609,23 +609,25 @@ def _touched_problems(findings: list[dict], judges: list[dict]) -> list[str]:
     """Problems with `findings` given the independent reviews of head `judges`: weakening or unjudged ones. A
     weakening judgement counts from any verdict and blocks whatever the other reviews say; a legitimate one only from
     an approval."""
-    weakened: set[tuple[str, str, tuple[int, ...]]] = set()
-    legitimate: set[tuple[str, str, tuple[int, ...]]] = set()
+    weakened: dict[tuple[str, str], set[int]] = {}
+    legitimate: dict[tuple[str, str], set[int]] = {}
     for r in judges:
         for e in r.get("touched_review") or []:
-            key = (e.get("file"), e.get("kind"), tuple(sorted(e.get("lines") or [])))
+            key = (e.get("file"), e.get("kind"))
+            lines = set(e.get("lines") or [])
             if e.get("judgement") == "weakening":
-                weakened.add(key)
-            elif e.get("judgement") == "legitimate" and r["verdict"] == "approve":
-                legitimate.add(key)
+                weakened.setdefault(key, set()).update(lines)
+            elif e.get("judgement") == "legitimate" and r.get("verdict") == "approve":
+                legitimate.setdefault(key, set()).update(lines)
     problems = []
     unjudged = 0
     for f in findings:
-        key = (f["file"], f["kind"], tuple(sorted(f["lines"])))
-        if key in weakened:
+        key = (f["file"], f["kind"])
+        f_lines = set(f.get("lines") or [])
+        if f_lines & weakened.get(key, set()):
             lines = ",".join(str(n) for n in f["lines"])
             problems.append(f"reviewer judged {f['file']} {f['kind']} lines {lines} as weakening")
-        elif key not in legitimate:
+        elif not (f_lines and f_lines.issubset(legitimate.get(key, set()))):
             unjudged += 1
     if unjudged:
         problems.insert(0, f"gate touched: {unjudged} findings not judged by the reviewer")
