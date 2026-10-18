@@ -1243,7 +1243,14 @@ def build_server() -> "MCPServer":
     except (ImportError, ModuleNotFoundError) as e:
         raise ImportError("mcp SDK not installed; install with: uv tool install 'agent-hub[mcp]'") from e
 
-    server = MCPServer("agent-hub")
+    try:
+        import importlib.metadata
+
+        version = importlib.metadata.version("agent-hub")
+    except importlib.metadata.PackageNotFoundError:
+        version = "0.0.0"
+
+    server = MCPServer("agent-hub", version=version)
 
     @server.tool(
         name="pool",
