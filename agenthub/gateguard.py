@@ -157,38 +157,33 @@ def _is_container_eq(cmp: ast.Compare) -> bool:
         len(cmp.ops) == 1
         and isinstance(cmp.ops[0], ast.Eq)
         and len(cmp.comparators) == 1
-        and isinstance(cmp.comparators[0], (ast.Set, ast.List, ast.Tuple, ast.Dict))
+        and isinstance(cmp.comparators[0], (ast.Set, ast.List, ast.Tuple))
     )
 
 
 def _literal_elements(lit: ast.AST) -> list:
     if isinstance(lit, (ast.Set, ast.List, ast.Tuple)):
         return [ast.dump(elt) for elt in lit.elts]
-    if isinstance(lit, ast.Dict):
-        return [
-            (ast.dump(k) if k is not None else None, ast.dump(v)) for k, v in zip(lit.keys, lit.values, strict=True)
-        ]
     return []
 
 
-def _contains_starred_or_none_key(lit: ast.AST) -> bool:
-    if isinstance(lit, (ast.Set, ast.List, ast.Tuple)):
-        return any(isinstance(elt, ast.Starred) for elt in lit.elts)
-    if isinstance(lit, ast.Dict):
-        return any(k is None or isinstance(k, ast.Starred) for k in lit.keys) or any(
-            isinstance(v, ast.Starred) for v in lit.values
-        )
-    return False
-
-
 def _is_literal_superset(base_lit: ast.AST, new_lit: ast.AST) -> bool:
-    if _contains_starred_or_none_key(base_lit) or _contains_starred_or_none_key(new_lit):
+    if not isinstance(base_lit, (ast.Set, ast.List, ast.Tuple)):
         return False
     if type(base_lit) is not type(new_lit):
         return False
-    base_elts = _literal_elements(base_lit)
-    if not base_elts:
+    if not base_lit.elts:
         return False
+    if not all(isinstance(elt, ast.Constant) for elt in base_lit.elts):
+        return False
+    if not all(isinstance(elt, ast.Constant) for elt in new_lit.elts):
+        return False
+    try:
+        if len({elt.value for elt in base_lit.elts}) != len(base_lit.elts):
+            return False
+    except TypeError:
+        return False
+    base_elts = _literal_elements(base_lit)
     new_elts = _literal_elements(new_lit)
     base_counts = Counter(base_elts)
     new_counts = Counter(new_elts)
@@ -215,7 +210,7 @@ def _weakened(base: TestDef, new: TestDef) -> bool:
     _kept_tokens). A nested assertion is kept only by the identical nested one in the same place, never by a statement.
     Containment in
     a larger expression (`x == 1 or True`, `not (x == 1)`) keeps nothing. An identical test is never weakened.
-    A base assertion Compare with one == whose right side is a set/list/tuple/dict literal is kept by a new assertion
+    A base assertion Compare with one == whose right side is a set/list/tuple literal is kept by a new assertion
     in the same place with the same left side whose right literal is a superset."""
     if base.dump == new.dump:
         return False

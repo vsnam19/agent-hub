@@ -93,13 +93,13 @@ def test_grown_expected_set_not_weakening(repo):
     )
     assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
 
-    # Dict literal grown: not weakened
+    # Dict literal grown: weakened (dicts out of scope)
     res = _weaken_test(
         repo,
         "def test_a():\n    assert x == {'a': 1}\n",
         "def test_a():\n    assert x == {'a': 1, 'b': 2}\n",
     )
-    assert res == []
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
 
     # Dict literal shrunk: weakened
     res = _weaken_test(
@@ -213,4 +213,56 @@ def test_dict_unpack_growth_is_weakening(repo):
 
     base = gateguard._test_index(b"def test_a():\n    assert x == {'a': 1}\n")["test_a"]
     new = gateguard._test_index(b"def test_a():\n    assert x == {'a': 1, **x}\n")["test_a"]
+    assert gateguard._weakened(base, new)
+
+
+def test_duplicate_dict_key_growth_is_weakening(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    assert x == {'status': 'ok'}\n",
+        "def test_a():\n    assert x == {'status': 'ok', 'status': 'error'}\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+    base = gateguard._test_index(b"def test_a():\n    assert x == {'status': 'ok'}\n")["test_a"]
+    new = gateguard._test_index(b"def test_a():\n    assert x == {'status': 'ok', 'status': 'error'}\n")["test_a"]
+    assert gateguard._weakened(base, new)
+
+
+def test_dict_growth_is_weakening(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    assert x == {'a': 1}\n",
+        "def test_a():\n    assert x == {'a': 1, 'b': 2}\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+    base = gateguard._test_index(b"def test_a():\n    assert x == {'a': 1}\n")["test_a"]
+    new = gateguard._test_index(b"def test_a():\n    assert x == {'a': 1, 'b': 2}\n")["test_a"]
+    assert gateguard._weakened(base, new)
+
+
+def test_non_constant_element_growth_is_weakening(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    assert x == [1]\n",
+        "def test_a():\n    assert x == [1, x]\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+    base = gateguard._test_index(b"def test_a():\n    assert x == [1]\n")["test_a"]
+    new = gateguard._test_index(b"def test_a():\n    assert x == [1, x]\n")["test_a"]
+    assert gateguard._weakened(base, new)
+
+
+def test_non_distinct_base_constant_growth_is_weakening(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    assert x == [1, 1]\n",
+        "def test_a():\n    assert x == [1, 1, 2]\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+    base = gateguard._test_index(b"def test_a():\n    assert x == [1, 1]\n")["test_a"]
+    new = gateguard._test_index(b"def test_a():\n    assert x == [1, 1, 2]\n")["test_a"]
     assert gateguard._weakened(base, new)
