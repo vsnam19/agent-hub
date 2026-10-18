@@ -70,3 +70,21 @@ a turn. Items:
   check); `_secret_service_running` is cached per process (a keyring started later is missed until restart); the
   existing `run_fake` agy tests call the real `dbus-send` when the test run itself is under SSH — patch the probe in
   an autouse fixture. Low.
+- **Per-branch fixes on stacked plan branches need a cascade** (2026-10-18, E8): fixing review findings on the branch
+  that introduced the code leaves descendants with the old code; their reviews (base `master` for multi-dependency
+  tasks) re-raise the ancestors' findings, and `plan merge` hits conflicts (E8: `agenthub/triage.py` touched by 4
+  stacked branches, `tests/test_mcpserver.py` changed on master meanwhile). The director merged each fixed branch down
+  the DAG with a per-definition 3-way merge script, then re-reviewed every changed head (≈60 review jobs). `plan close`
+  should do this itself: after a fix round, merge the task's branch into its `done` dependents and re-review them
+  (today it only flags them, `CloseResult.stale`). Medium.
+- **`plan triage`/`plan close` count merged tasks as skipped** (2026-10-18): after `plan merge` removes the work trees,
+  `agent-hub plan triage <e8 plan>` prints `skipped 16 task(s)` and exits 1. Tasks whose branch is already merged into
+  the base (or deleted) should be left out silently. Low.
+- **`plan review` lets the fix author approve** (2026-10-18): `review_task` excludes only the task's first implementer;
+  after a fix round by another model (agy Gemini here) the review chain picked that same model, and `ready` refused
+  (`reviewer is the implementer`). Exclude every model that implemented a commit on the branch. Medium.
+- **`test_child_does_not_import_cwd_agenthub` flakes under parallel gates** (2026-10-15): with 4–6 `uv run pytest`
+  gates at once it failed once with `git add` → `index.lock: File exists` in its own temp repo (job
+  20261014-200442-implement-5046); passes alone and on rerun. Low.
+- **Gemini handoff claims** (2026-10-18): job 20261014-232223-implement-c3e1 reported "backwards-compatible aliases"
+  for renamed tests that did not exist. Handoffs remain unverified claims; the director's diff read caught it. Info.

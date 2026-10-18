@@ -1,3 +1,10 @@
+> **Update 2026-10-18 — E8 merged.** All 16 E8 tasks (`plan triage` + `plan close`, D-101/D-102) went through review
+> rounds (agy Gemini fixes, claude:opus reviews), were cascaded down the stacked branches, approved by a model other
+> than the fix author and merged into master through `ready` (not pushed). Master: lint clean, 1105 tests pass. gwen is
+> off (owner); route to agy Gemini first to save Claude tokens. Open items from this round are in `docs/follow-ups.md`
+> (cascade in `plan close`, merged tasks counted as skipped, fix author may review). **Next:** release (version bump,
+> `hub install`, plugin reload) when the owner asks; dogfood `plan close` on a small plan; then F6, E5–E7.
+
 > **Update 2026-10-14, night — deadlock + agy fixes merged; E8 review results on disk.** Merged on master (not
 > pushed): plan `deadlock` (`plan_review` reaps its runner, zombie-aware waits, `plan_wait` → `stalled` on a dead
 > runner) and `fix/agy-ssh-auth` (agy headless works under SSH via the keyring). Released as **v0.10.1** (plugin
