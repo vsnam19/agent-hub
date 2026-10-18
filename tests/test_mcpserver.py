@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,12 +24,14 @@ from agenthub.mcpserver import (
     clamp_timeout,
     gate_start,
     jobs_data,
+    plan_close,
     plan_merge,
     plan_review,
     plan_review_wait,
     plan_review_wait_async,
     plan_run,
     plan_status,
+    plan_triage,
     plan_wait,
     pool_data,
     ready,
@@ -152,6 +155,8 @@ def test_server_lists_tools(env_sandbox):
         "plan_review",
         "plan_review_wait",
         "plan_merge",
+        "plan_triage",
+        "plan_close",
     }
     for name in ["pool", "jobs", "show_job", "wait_job", "ready", "plan_status", "plan_wait", "plan_review_wait"]:
         tool = tool_map[name]
@@ -1752,3 +1757,266 @@ def test_plan_review_wait_detects_zombie_runner(env_sandbox):
         assert res["state"] == "failed"
     finally:
         proc.wait()
+
+
+def test_plan_triage_returns_handle_and_result(env_sandbox, repo, tmp_path, monkeypatch):
+    plan_file = make_plan_file(tmp_path, repo)
+
+    calls = []
+    orig_popen = subprocess.Popen
+
+    done_event = threading.Event()
+
+    class DummyProc:
+        def __init__(self, pid=42424):
+            self.pid = pid
+            self.returncode = 0
+
+        def wait(self):
+            done_event.wait(timeout=2)
+            return 0
+
+    def fake_popen(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if len(cmd) > 5 and cmd[5] == "triage":
+            calls.append({"cmd": cmd, "kwargs": kwargs})
+            return DummyProc()
+        return orig_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    bad_plan = tmp_path / "bad_plan.json"
+    bad_plan.write_text("{}")
+    with pytest.raises(PlanError):
+        plan_triage(str(bad_plan))
+
+    res = plan_triage(str(plan_file))
+    assert "handle" in res
+    handle = res["handle"]
+    assert handle.startswith("triage-plan-1-")
+    assert res == {"handle": handle, "plan": "plan-1", "pid": 42424}
+    assert not (plan_file.parent / "runner.pid").exists()
+    assert len(calls) == 1
+    call = calls[0]
+    expected_result_file = paths().state_dir / "mcp" / "plan-review" / f"{handle}.json"
+    expected_cmd = [
+        sys.executable,
+        "-P",
+        "-m",
+        "agenthub",
+        "plan",
+        "triage",
+        str(plan_file),
+        "--result",
+        str(expected_result_file),
+    ]
+    assert call["cmd"] == expected_cmd
+    assert call["kwargs"]["start_new_session"] is True
+    assert call["kwargs"]["stdin"] == subprocess.DEVNULL
+    assert "PYTHONPATH" in call["kwargs"]["env"]
+
+    # Result wait works with the handle
+    expected_result_file.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "exit_code": 0,
+                "lines": ["t1 fix=1 reject=0 blocked=0"],
+                "stderr_tail": "",
+            }
+        )
+    )
+    done_event.set()
+    wait_res = plan_review_wait(handle, timeout_s=5)
+    assert wait_res["status"] == "ok"
+    assert wait_res["exit_code"] == 0
+    assert wait_res["lines"] == ["t1 fix=1 reject=0 blocked=0"]
+
+    def fail_popen(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if len(cmd) > 5 and cmd[5] == "triage":
+            raise OSError("failed to exec")
+        return orig_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", fail_popen)
+    err_res = plan_triage(str(plan_file))
+    assert "error" in err_res
+    assert "spawn failed: failed to exec" in err_res["error"]
+    assert "handle" in err_res
+
+
+test_plan_triage_spawns_cli_detached = test_plan_triage_returns_handle_and_result
+
+
+def test_plan_close_returns_handle(env_sandbox, repo, tmp_path, monkeypatch):
+    plan_file = make_plan_file(tmp_path, repo)
+
+    calls = []
+    orig_popen = subprocess.Popen
+
+    done_event = threading.Event()
+
+    class DummyProc:
+        def __init__(self, pid=42425):
+            self.pid = pid
+            self.returncode = 0
+
+        def wait(self):
+            done_event.wait(timeout=2)
+            return 0
+
+    def fake_popen(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if len(cmd) > 5 and cmd[5] == "close":
+            calls.append({"cmd": cmd, "kwargs": kwargs})
+            return DummyProc()
+        return orig_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    bad_plan = tmp_path / "bad_plan.json"
+    bad_plan.write_text("{}")
+    with pytest.raises(PlanError):
+        plan_close(str(bad_plan))
+
+    res = plan_close(str(plan_file))
+    assert "handle" in res
+    handle = res["handle"]
+    assert handle.startswith("close-plan-1-")
+    assert res == {"handle": handle, "plan": "plan-1", "pid": 42425}
+    assert not (plan_file.parent / "runner.pid").exists()
+    assert len(calls) == 1
+    result_file = paths().state_dir / "mcp" / "plan-review" / f"{handle}.json"
+    assert calls[0]["cmd"] == [
+        sys.executable,
+        "-P",
+        "-m",
+        "agenthub",
+        "plan",
+        "close",
+        str(plan_file),
+        "--rounds",
+        "3",
+        "--result",
+        str(result_file),
+    ]
+    assert calls[0]["kwargs"]["start_new_session"] is True
+
+    res2 = plan_close(str(plan_file), rounds=5)
+    assert "handle" in res2
+    handle2 = res2["handle"]
+    assert handle2.startswith("close-plan-1-")
+    assert res2 == {"handle": handle2, "plan": "plan-1", "pid": 42425}
+    assert len(calls) == 2
+    result_file2 = paths().state_dir / "mcp" / "plan-review" / f"{handle2}.json"
+    assert calls[1]["cmd"] == [
+        sys.executable,
+        "-P",
+        "-m",
+        "agenthub",
+        "plan",
+        "close",
+        str(plan_file),
+        "--rounds",
+        "5",
+        "--result",
+        str(result_file2),
+    ]
+    assert calls[1]["kwargs"]["start_new_session"] is True
+
+    # Result wait works with close handle
+    result_file.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "exit_code": 0,
+                "lines": ["report.md"],
+                "stderr_tail": "",
+            }
+        )
+    )
+    done_event.set()
+    wait_res = plan_review_wait(handle, timeout_s=5)
+    assert wait_res["status"] == "ok"
+    assert wait_res["exit_code"] == 0
+    assert wait_res["lines"] == ["report.md"]
+
+    def fail_popen(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if len(cmd) > 5 and cmd[5] == "close":
+            raise OSError("exec format error")
+        return orig_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", fail_popen)
+    err_res = plan_close(str(plan_file))
+    assert "error" in err_res
+    assert "spawn failed: exec format error" in err_res["error"]
+    assert "handle" in err_res
+
+
+test_plan_close_passes_rounds = test_plan_close_returns_handle
+
+
+def test_plan_run_refuses_live_runner_without_overwrite(env_sandbox, repo, tmp_path, monkeypatch):
+    from agenthub.procinfo import start_time
+
+    plan_file = make_plan_file(tmp_path, repo)
+    plan_dir = plan_file.parent
+    state_file = plan_dir / "state.json"
+
+    dummy = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
+    try:
+        pid = dummy.pid
+        st = start_time(pid)
+        state_file.write_text(
+            json.dumps(
+                {
+                    "runner": {"pid": pid, "start_time": st},
+                    "tasks": {},
+                }
+            )
+        )
+        old_runner_pid_content = json.dumps({"pid": pid, "start_time": st})
+        (plan_dir / "runner.pid").write_text(old_runner_pid_content)
+
+        spawned = []
+        orig_popen = subprocess.Popen
+
+        def fake_popen(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if len(cmd) > 5 and cmd[5] == "run":
+                spawned.append(cmd)
+            return orig_popen(*args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+        res = plan_run(str(plan_file))
+        assert res == {"error": f"plan runner {pid} is still running; wait or cancel it first"}
+        assert len(spawned) == 0
+        assert (plan_dir / "runner.pid").read_text() == old_runner_pid_content
+    finally:
+        dummy.kill()
+        dummy.wait()
+
+
+def test_plan_close_rejects_bad_rounds(env_sandbox, repo, tmp_path):
+    plan_file = make_plan_file(tmp_path, repo)
+
+    for bad in [0, -1, -5, "3", "bad", True, False, None, 2.5]:
+        with pytest.raises(UsageError):
+            plan_close(str(plan_file), rounds=bad)
+
+
+def test_new_tools_are_registered_and_not_read_only(env_sandbox):
+    server = build_server()
+    tools = asyncio.run(server.list_tools())
+    tool_map = {t.name: t for t in tools}
+
+    assert "plan_triage" in tool_map
+    assert "plan_close" in tool_map
+
+    triage_tool = tool_map["plan_triage"]
+    assert triage_tool.annotations is None or triage_tool.annotations.read_only_hint is not True
+
+    close_tool = tool_map["plan_close"]
+    assert close_tool.annotations is None or close_tool.annotations.read_only_hint is not True

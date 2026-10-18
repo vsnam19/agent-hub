@@ -287,3 +287,39 @@ def test_close_releases_runner_claim(env_sandbox, tmp_path, monkeypatch):
     saved_state_after_error = json.loads(state_file.read_text())
     assert saved_state_after_error["runner"] == {}
     assert not (plan_dir / "runner.pid").is_file()
+
+
+def test_close_writes_result_file(env_sandbox, tmp_path, monkeypatch):
+    import json
+
+    repo = tmp_path / "repo"
+    make_repo(repo)
+    plan_file = make_plan_file(tmp_path, repo)
+    report_file = plan_file.parent / "report.md"
+
+    def fake_close(plan, state, *, run, review, triage, ready, max_rounds=3):
+        return CloseResult(ok=True, report=report_file)
+
+    monkeypatch.setattr(agenthub.planclose, "close", fake_close)
+
+    result_file = tmp_path / "close-result.json"
+    rc = main(["plan", "close", str(plan_file), "--result", str(result_file)])
+    assert rc == 0
+    assert result_file.is_file()
+    data = json.loads(result_file.read_text())
+    assert data["exit_code"] == 0
+    assert data["status"] == "ok"
+    assert isinstance(data["lines"], list)
+    assert data["lines"] == [str(report_file)]
+    assert "stderr_tail" in data
+    assert isinstance(data["stderr_tail"], str)
+
+    # Test error exit (e.g. rounds 0)
+    err_result = tmp_path / "err-result.json"
+    err_rc = main(["plan", "close", str(plan_file), "--rounds", "0", "--result", str(err_result)])
+    assert err_rc == 2
+    assert err_result.is_file()
+    err_data = json.loads(err_result.read_text())
+    assert err_data["exit_code"] == 2
+    assert err_data["status"] == "failed"
+    assert "rounds" in err_data["stderr_tail"]

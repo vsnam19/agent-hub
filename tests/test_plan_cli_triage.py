@@ -711,3 +711,64 @@ def test_cancelled_triage_job_stops_loop(env_sandbox, tmp_path, monkeypatch):
     assert saved["tasks"]["t1"]["status"] == "done"
     assert saved["tasks"]["t1"]["reason"] == ""
     assert saved["tasks"]["t2"]["status"] == "done"
+
+
+def test_triage_writes_result_file(env_sandbox, tmp_path, monkeypatch):
+    plan_file, _state = make_gated_plan_run(env_sandbox, tmp_path)
+
+    def fake_triage(plan, task, tstate, jobs, head, now):
+        if task.name == "t1":
+            return {
+                "task": "t1",
+                "status": "fix",
+                "counts": {"fix": 2, "reject": 1, "blocked": 0},
+                "fix_path": "/path/to/fixes/t1-1.md",
+                "rejected_path": "/path/to/fixes/t1-1-rejected.md",
+                "reason": "",
+            }
+        return {
+            "task": "t2",
+            "status": "rejected-only",
+            "counts": {"fix": 0, "reject": 3, "blocked": 0},
+            "fix_path": "",
+            "rejected_path": "/path/to/fixes/t2-1-rejected.md",
+            "reason": "",
+        }
+
+    monkeypatch.setattr(agenthub.triagerun, "triage_task", fake_triage)
+
+    result_file = tmp_path / "triage-result.json"
+    rc = main(["plan", "triage", str(plan_file), "--result", str(result_file)])
+    assert rc == 0
+    assert result_file.is_file()
+    data = json.loads(result_file.read_text())
+    assert data["exit_code"] == 0
+    assert data["status"] == "ok"
+    assert isinstance(data["lines"], list)
+    assert data["lines"] == [
+        "t1 fix=2 reject=1 blocked=0 brief=/path/to/fixes/t1-1.md",
+        "t2 fix=0 reject=3 blocked=0",
+    ]
+    assert "stderr_tail" in data
+    assert isinstance(data["stderr_tail"], str)
+
+    # Test error exit (e.g. blocked task)
+    def fake_blocked(plan, task, tstate, jobs, head, now):
+        return {
+            "task": task.name,
+            "status": "blocked",
+            "counts": {"fix": 0, "reject": 0, "blocked": 0},
+            "fix_path": "",
+            "rejected_path": "",
+            "reason": "needs director",
+        }
+
+    monkeypatch.setattr(agenthub.triagerun, "triage_task", fake_blocked)
+    err_result = tmp_path / "err-result.json"
+    err_rc = main(["plan", "triage", str(plan_file), "--result", str(err_result)])
+    assert err_rc == 1
+    assert err_result.is_file()
+    err_data = json.loads(err_result.read_text())
+    assert err_data["exit_code"] == 1
+    assert err_data["status"] == "failed"
+    assert any("t1 blocked: needs director" in line for line in err_data["lines"])
