@@ -249,30 +249,51 @@ def test_gate_job_sigterm_marks_cancelled(env_sandbox, repo):
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        start_new_session=True,
     )
 
-    deadline = time.time() + 10.0
-    result_path = None
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            break
-        gate_jobs = [j for j in list_jobs(paths(), 10) if j.get("kind") == "gate" and j.get("status") == "running"]
-        if gate_jobs:
-            result_path = paths().jobs_dir / gate_jobs[0]["id"] / "result.json"
-            break
-        time.sleep(0.02)
-
-    assert result_path is not None, f"gate job did not enter running status; proc exit code: {proc.poll()}"
-
+    stdout, stderr = "", ""
     try:
+        deadline = time.time() + 10.0
+        result_path = None
+        gate_output = None
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                out_bytes, err_bytes = proc.communicate()
+                stdout = out_bytes.decode(errors="replace")
+                stderr = err_bytes.decode(errors="replace")
+                break
+            gate_jobs = [j for j in list_jobs(paths(), 10) if j.get("kind") == "gate" and j.get("status") == "running"]
+            if gate_jobs:
+                job_dir = paths().jobs_dir / gate_jobs[0]["id"]
+                result_path = job_dir / "result.json"
+                output_file = job_dir / "gate" / "1" / "stdout"
+                if output_file.is_file():
+                    gate_output = output_file
+                    break
+            time.sleep(0.02)
+
+        assert result_path is not None, f"gate job did not enter running status; proc exit code: {proc.poll()}"
+        assert gate_output is not None, f"first gate command output file did not appear; proc exit code: {proc.poll()}"
+
         proc.send_signal(signal.SIGTERM)
-        proc.communicate(timeout=10.0)
+        try:
+            out_bytes, err_bytes = proc.communicate(timeout=10.0)
+            stdout = out_bytes.decode(errors="replace")
+            stderr = err_bytes.decode(errors="replace")
+        except subprocess.TimeoutExpired as exc:
+            stdout = (exc.stdout or b"").decode(errors="replace")
+            stderr = (exc.stderr or b"").decode(errors="replace")
+            raise
     finally:
         if proc.poll() is None:
-            proc.kill()
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             proc.wait()
 
-    assert proc.returncode == 130
+    assert proc.returncode == 130, f"proc returncode={proc.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
     result_data = json.loads(result_path.read_text())
     assert result_data["status"] == "cancelled"
     assert result_data["exit_code"] == 130
