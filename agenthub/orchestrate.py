@@ -266,7 +266,7 @@ def run_job(
     # effort is ignored here: the same model at another effort is not an independent reviewer
     excluded = {text.partition("@")[0] for text in args.exclude}
     if kind == "review":
-        excluded.update(implementers_of(p, args.workdir))
+        excluded.update(implementers_of(p, args.workdir, base=args.base))
     links = [link for link in args.links if link.quota_key not in excluded]
     for link in links:
         if link.agent not in adapters:
@@ -536,19 +536,59 @@ def run_job(
     return _finish(job, record, status or ("failed" if denied_last else "exhausted"), now, started)
 
 
-def implementers_of(p: Paths, workdir: Path | str) -> set[str]:
-    """The agent:model of every job on that resolved work tree with kind implement and status ok or gate-failed."""
+def implementers_of(p: Paths, workdir: Path | str, base: str | None = None) -> set[str]:
+    """The agent:model of every job on that resolved work tree with kind implement and status ok or gate-failed.
+    When `base` is given, keep only implement jobs whose `head` is an ancestor-or-equal of the work tree's HEAD
+    and is not a strict ancestor of `merge-base(HEAD, base)` (so a job whose head equals the merge base still counts).
+    Jobs whose `head` is missing or unknown to git are dropped."""
     target = Path(workdir).resolve()
     jobs = list_jobs(p, 100000)
     mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == target]
-    return {
-        f"{j['agent']}:{j['model']}"
-        for j in mine
-        if j.get("kind") == "implement"
-        and j.get("status") in ("ok", "gate-failed")
-        and j.get("agent")
-        and j.get("model")
-    }
+
+    if base is not None:
+        try:
+            head_sha = guards._run_git(target, "rev-parse", "--verify", "HEAD^{commit}")
+            mb_sha = guards._run_git(target, "merge-base", head_sha, base)
+        except (subprocess.CalledProcessError, guards.GuardError, OSError):
+            return set()
+
+        def is_ancestor(a: str, b: str) -> bool:
+            res = subprocess.run(
+                guards._git_argv("merge-base", "--is-ancestor", a, b),
+                cwd=target,
+                capture_output=True,
+                text=True,
+                env=guards._git_env(),
+            )
+            return res.returncode == 0
+
+        cache: dict[str, bool] = {}
+
+    found: set[str] = set()
+    for j in mine:
+        if (
+            j.get("kind") != "implement"
+            or j.get("status") not in ("ok", "gate-failed")
+            or not j.get("agent")
+            or not j.get("model")
+        ):
+            continue
+        if base is not None:
+            j_head = j.get("head")
+            if not j_head or not isinstance(j_head, str):
+                continue
+            keep = cache.get(j_head)
+            if keep is None:
+                try:
+                    j_sha = guards._run_git(target, "rev-parse", "--verify", f"{j_head}^{{commit}}")
+                    keep = is_ancestor(j_sha, head_sha) and (j_sha == mb_sha or not is_ancestor(j_sha, mb_sha))
+                except (subprocess.CalledProcessError, OSError):
+                    keep = False
+                cache[j_head] = keep
+            if not keep:
+                continue
+        found.add(f"{j['agent']}:{j['model']}")
+    return found
 
 
 def readiness(jobs: list[dict], workdir: Path, head: str) -> list[str]:

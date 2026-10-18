@@ -13,7 +13,7 @@ from agenthub import guards
 from agenthub.config import ConfigError, load_pool, paths
 from agenthub.guards import _git_argv
 from agenthub.jobs import list_jobs
-from agenthub.orchestrate import RunArgs, _passed_gate, readiness, run_gate_job, run_job
+from agenthub.orchestrate import RunArgs, _passed_gate, implementers_of, readiness, run_gate_job, run_job
 from agenthub.plan import Plan, Task
 from agenthub.planstate import AttemptState, State, TaskState
 from agenthub.pool import parse_link
@@ -612,6 +612,9 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
         return {**failed, "reason": "work tree is not clean; commit before review"}
 
     head = guards.head(repo)
+    # The branch the task was created from: the plan base, or its dependency's branch.
+    base = tstate.start_ref or plan.base
+    implementers = implementers_of(paths(), repo.root, base)
     jobs = list_jobs(paths(), 100000)
     mine = [j for j in jobs if j.get("workdir") and Path(j["workdir"]).resolve() == repo.root.resolve()]
     on_head = [j for j in mine if j.get("kind") == "review" and j.get("status") == "ok" and j.get("head") == head]
@@ -619,7 +622,6 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
     def who(j: dict) -> str:
         return f"{j.get('agent')}:{j.get('model')}"
 
-    implementers = {who(j) for j in mine if j.get("kind") == "implement" and j.get("status") in ("ok", "gate-failed")}
     task_gated = any(
         j.get("kind") == "gate"
         and _passed_gate(j, head)
@@ -635,8 +637,6 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
     ):
         return {"gate": "ok", "review": "approve", "job": on_head[0]["id"], "reason": "", "up_to_date": True}
 
-    # The branch the task was created from: the plan base, or its dependency's branch.
-    base = tstate.start_ref or plan.base
     try:
         since = guards._run_git(repo.root, "merge-base", "HEAD", base)
     except subprocess.CalledProcessError:
@@ -681,7 +681,7 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
     verdict = review.get("verdict") if review["status"] == "ok" else None
     if verdict not in ("approve", "request-changes"):
         verdict = "failed"
-    reason = review.get("reason") or review.get("error", "")
+    reason = review.get("error") or review.get("reason", "")
     res = {"gate": "ok", "review": verdict, "job": review["id"], "reason": reason}
     if review.get("status") == "cancelled":
         res["cancelled"] = True

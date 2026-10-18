@@ -3,6 +3,7 @@ import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from agenthub import guards
 from agenthub.config import Pool, paths
 from agenthub.jobs import new_job
 from agenthub.orchestrate import RunArgs, implementers_of, run_job
@@ -12,6 +13,7 @@ from agenthub.planstate import AttemptState, TaskState
 from agenthub.pool import parse_link
 
 BRIEF = "## Input\n\nfoo\n\n## Expected output\n\nbar\n"
+_UNSET = object()
 
 
 def now():
@@ -49,9 +51,14 @@ def args_for(
     )
 
 
-def _record_implement_job(p, workdir, agent, model, status="ok", ts_offset=30):
+def _record_implement_job(p, workdir, agent, model, status="ok", ts_offset=30, head=_UNSET):
     t = now() - timedelta(seconds=ts_offset)
     job = new_job(p, "implement", t)
+    if head is _UNSET:
+        try:
+            head = guards.head(guards.inspect(Path(workdir)))
+        except Exception:
+            head = None
     record = {
         "id": job.id,
         "role": "implement",
@@ -66,7 +73,7 @@ def _record_implement_job(p, workdir, agent, model, status="ok", ts_offset=30):
         "changed_files": [],
         "diffstat": "",
         "reply_path": None,
-        "head": None,
+        "head": head,
         "verdict": None,
     }
     job.write_json("result.json", record)
@@ -194,3 +201,128 @@ def test_implementers_of(env_sandbox, repo):
         {"id": j_fail.id, "kind": "implement", "status": "failed", "workdir": str(repo), "agent": "agy", "model": "m4"},
     )
     assert implementers_of(p, repo) == {"agy:m1", "codex:m2"}
+
+
+def test_review_ignores_implementers_of_other_branches(env_sandbox, repo):
+    p = paths()
+    # Create another branch with a commit
+    subprocess.run(["git", "checkout", "-b", "other-branch"], cwd=repo, check=True, env=guards._git_env())
+    (repo / "other.txt").write_text("other\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, env=guards._git_env())
+    subprocess.run(["git", "commit", "-m", "other commit"], cwd=repo, check=True, env=guards._git_env())
+    other_head = guards.head(guards.inspect(repo))
+
+    # Switch back to feat/x
+    subprocess.run(["git", "checkout", "feat/x"], cwd=repo, check=True, env=guards._git_env())
+    (repo / "feature.txt").write_text("feature\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, env=guards._git_env())
+    subprocess.run(["git", "commit", "-m", "feature commit"], cwd=repo, check=True, env=guards._git_env())
+
+    # Record implement job whose head was on other-branch
+    _record_implement_job(p, repo, "agy", "m1", status="ok", ts_offset=40, head=other_head)
+
+    # implementers_of with base="master" should not include agy:m1
+    assert implementers_of(p, repo, base="master") == set()
+
+    # run_job for review with base="master" should not exclude agy:m1
+    review_args = args_for(repo, ["agy:m1"], role="review", base="master")
+    result = run_job(review_args, p, make_pool(), now)
+    assert result["status"] == "ok"
+    assert (result["agent"], result["model"]) == ("agy", "m1")
+    req_json = json.loads((p.jobs_dir / result["id"] / "request.json").read_text())
+    assert "agy:m1" not in req_json["exclude"]
+    assert req_json["links"] == ["agy:m1"]
+
+
+def test_review_ignores_implementers_before_merge_base(env_sandbox, repo):
+    p = paths()
+    # repo starts on feat/x at initial commit. Switch to master first.
+    subprocess.run(["git", "checkout", "master"], cwd=repo, check=True, env=guards._git_env())
+    c0 = guards.head(guards.inspect(repo))
+
+    # Record an implement job at c0
+    _record_implement_job(p, repo, "agy", "m1", status="ok", ts_offset=40, head=c0)
+
+    # Advance master with c1 (making c0 a strict ancestor of master)
+    (repo / "master.txt").write_text("master update\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, env=guards._git_env())
+    subprocess.run(["git", "commit", "-m", "master update"], cwd=repo, check=True, env=guards._git_env())
+
+    # Branch feat/y from master (its merge base with master will be master's HEAD, i.e. c1)
+    subprocess.run(["git", "checkout", "-b", "feat/y"], cwd=repo, check=True, env=guards._git_env())
+    (repo / "feat_y.txt").write_text("work on y\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, env=guards._git_env())
+    subprocess.run(["git", "commit", "-m", "commit on y"], cwd=repo, check=True, env=guards._git_env())
+
+    # c0 is a strict ancestor of merge-base(HEAD, "master")
+    assert implementers_of(p, repo, base="master") == set()
+
+    # run_job for review with base="master" does not exclude agy:m1
+    review_args = args_for(repo, ["agy:m1"], role="review", base="master")
+    result = run_job(review_args, p, make_pool(), now)
+    assert result["status"] == "ok"
+    assert (result["agent"], result["model"]) == ("agy", "m1")
+    req_json = json.loads((p.jobs_dir / result["id"] / "request.json").read_text())
+    assert "agy:m1" not in req_json["exclude"]
+
+
+def test_review_counts_implementer_at_merge_base(env_sandbox, repo):
+    p = paths()
+    # repo starts on feat/x at initial commit, which equals master.
+    mb = guards.head(guards.inspect(repo))
+
+    # Implement job ran at merge base (head == mb)
+    _record_implement_job(p, repo, "agy", "m1", status="ok", ts_offset=40, head=mb)
+
+    # Work committed afterwards on the branch
+    (repo / "work.txt").write_text("branch work\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, env=guards._git_env())
+    subprocess.run(["git", "commit", "-m", "commit branch work"], cwd=repo, check=True, env=guards._git_env())
+
+    # head == merge base, work committed afterwards -> excluded
+    assert implementers_of(p, repo, base="master") == {"agy:m1"}
+
+    # Review chain [agy:m1, claude:m3] skips agy:m1 and runs on claude:m3
+    review_args = args_for(repo, ["agy:m1", "claude:m3"], role="review", base="master")
+    result = run_job(review_args, p, make_pool(), now)
+    assert result["status"] == "ok"
+    assert (result["agent"], result["model"]) == ("claude", "m3")
+    req_json = json.loads((p.jobs_dir / result["id"] / "request.json").read_text())
+    assert "agy:m1" in req_json["exclude"]
+    assert req_json["links"] == ["claude:m3"]
+
+
+def test_plan_review_refusal_error_wins_over_reason(env_sandbox, repo, tmp_path, monkeypatch):
+    hub_cfg = repo / ".agent-hub"
+    hub_cfg.mkdir(exist_ok=True)
+    (hub_cfg / "config.toml").write_text('gates = ["true"]\n')
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, env=guards._git_env())
+    subprocess.run(["git", "commit", "-m", "add repo gates"], cwd=repo, check=True, env=guards._git_env())
+
+    start_commit = guards.head(guards.inspect(repo))
+    (repo / "change.txt").write_text("fixed code\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, env=guards._git_env())
+    subprocess.run(["git", "commit", "-m", "fix change"], cwd=repo, check=True, env=guards._git_env())
+
+    task = Task(name="t1", role="implement", gate=["true"])
+    tstate = TaskState(
+        status="done",
+        role="implement",
+        worktree=str(repo),
+        start_ref=start_commit,
+        attempts=[],
+        fix_rounds=0,
+    )
+    plan = Plan(goal="goal", repo=repo, base="master", slug="test-plan", tasks=[task], path=tmp_path / "plan.json")
+
+    monkeypatch.setattr(
+        "agenthub.planrun.run_job",
+        lambda *args, **kw: {
+            "id": "job-refused",
+            "status": "refused",
+            "error": "refusal: cannot diff",
+            "reason": "all links excluded: agy:m1",
+        },
+    )
+    res = review_task(plan, task, tstate, now)
+    assert res["reason"] == "refusal: cannot diff"
