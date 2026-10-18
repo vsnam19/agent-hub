@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -13,13 +14,24 @@ from agenthub.workers import USER_FILE, _load, _plugins, worker_plugins
 
 HOSTS = ("codex", "agy")
 INSTALLABLE = ("missing", "stale")
+MCP_ROW = "mcp:agent-hub"
+MCP_SERVER_NAME = "agent-hub"
+
+
+def _mcp_bin_path() -> Path:
+    return Path(__file__).resolve().parent.parent / "bin" / "agent-hub"
+
+
+def _mcp_command() -> list[str]:
+    return [str(_mcp_bin_path()), "mcp"]
 
 
 @dataclass(frozen=True)
 class Row:
     host: str
     plugin: str
-    state: str  # current | stale | missing | error | not-a-worker-plugin | host-not-installed | per-run | stray
+    # current | stale | missing | error | disabled | not-a-worker-plugin | host-not-installed | per-run | stray
+    state: str
     installed_version: str | None = None
     source_version: str | None = None
     detail: str = ""
@@ -90,6 +102,8 @@ def status(config_dir: Path, repo_root: Path | None = None) -> list[Row]:
             rows.append(Row(host, by_dir.get(directory, directory.name), "per-run", detail=str(directory)))
     rows.extend(errors)
     rows.extend(_strays(cfg))
+    rows.append(_codex_mcp_row())
+    rows.append(_agy_mcp_row())
     return rows
 
 
@@ -101,7 +115,7 @@ def _repo_root() -> Path:
 
 def plan_install(rows: list[Row], config: HubConfig, hosts: tuple[str, ...] = HOSTS) -> list[list[str]]:
     cmds: list[list[str]] = []
-    todo = [r for r in rows if r.state in INSTALLABLE]
+    todo = [r for r in rows if r.state in INSTALLABLE and r.plugin != MCP_ROW]
     codex_rows = [r for r in todo if r.host == "codex" and "codex" in hosts]
     if codex_rows and config.marketplace_dir is not None and config.marketplace_registered != "failed":
         if config.marketplace_registered is None:
@@ -109,11 +123,20 @@ def plan_install(rows: list[Row], config: HubConfig, hosts: tuple[str, ...] = HO
         for r in codex_rows:
             manifest = config.plugins[r.plugin] / ".codex-plugin" / "plugin.json"
             cmds.append(["codex", "plugin", "add", f"{_manifest_name(manifest) or r.plugin}@{config.marketplace_name}"])
+    mcp_todo = [r for r in rows if r.state in INSTALLABLE and r.plugin == MCP_ROW]
+    bin_cmd = str(_mcp_bin_path())
+    if "codex" in hosts:
+        for r in (r for r in mcp_todo if r.host == "codex"):
+            if r.state == "stale":
+                cmds.append(["codex", "mcp", "remove", MCP_SERVER_NAME])
+            cmds.append(["codex", "mcp", "add", MCP_SERVER_NAME, "--", bin_cmd, "mcp"])
     if "agy" in hosts:
         for r in (r for r in todo if r.host == "agy"):
             directory = str(config.plugins[r.plugin])
             cmds.append(["agy", "plugin", "validate", directory])
             cmds.append(["agy", "plugin", "install", directory])
+        for _r in (r for r in mcp_todo if r.host == "agy"):
+            cmds.append(["agy", "mcp", "add", MCP_SERVER_NAME, bin_cmd, "mcp"])
     return cmds
 
 
@@ -330,3 +353,75 @@ def _strays(cfg: HubConfig) -> list[Row]:
         for d in sorted(skills.iterdir())
         if d.is_dir() and d.name != ".system" and (d.name in exact or d.name.startswith(tuple(prefixes)))
     ]
+
+
+def _codex_mcp_row() -> Row:
+    if not shutil.which("codex"):
+        return Row("codex", MCP_ROW, "host-not-installed", detail="codex is not on PATH")
+    bin_path = _mcp_bin_path()
+    if not bin_path.is_file():
+        return Row("codex", MCP_ROW, "error", detail="no bin/agent-hub next to the agenthub package")
+    proc = _run("codex", "mcp", "list", "--json")
+    if failure := _failure(proc):
+        return Row("codex", MCP_ROW, "error", detail=f"codex mcp list failed: {failure}")
+    try:
+        data = json.loads(proc.stdout)
+        if not isinstance(data, list):
+            return Row("codex", MCP_ROW, "error", detail="codex mcp list output not understood")
+    except (ValueError, TypeError):
+        return Row("codex", MCP_ROW, "error", detail="codex mcp list output not understood")
+    target = next((item for item in data if isinstance(item, dict) and item.get("name") == MCP_SERVER_NAME), None)
+    if target is None:
+        return Row("codex", MCP_ROW, "missing")
+    if target.get("enabled") is False:
+        return Row("codex", MCP_ROW, "disabled")
+    transport = target.get("transport")
+    if not isinstance(transport, dict):
+        return Row("codex", MCP_ROW, "error", detail="codex mcp list output not understood")
+    cmd = transport.get("command") or ""
+    raw_args = transport.get("args")
+    if raw_args is None:
+        args: list[str] = []
+    elif isinstance(raw_args, list):
+        args = [str(a) for a in raw_args]
+    else:
+        args = [str(raw_args)]
+    registered = " ".join([cmd] + args).strip()
+    if cmd == str(bin_path) and args == ["mcp"]:
+        return Row("codex", MCP_ROW, "current")
+    return Row("codex", MCP_ROW, "stale", detail=registered)
+
+
+def _agy_mcp_row() -> Row:
+    if not shutil.which("agy"):
+        return Row("agy", MCP_ROW, "host-not-installed", detail="agy is not on PATH")
+    bin_path = _mcp_bin_path()
+    if not bin_path.is_file():
+        return Row("agy", MCP_ROW, "error", detail="no bin/agent-hub next to the agenthub package")
+    proc = _run("agy", "mcp", "list")
+    if failure := _failure(proc):
+        return Row("agy", MCP_ROW, "error", detail=f"agy mcp list failed: {failure}")
+    out = proc.stdout.strip()
+    if not out or "No MCP servers configured" in out:
+        return Row("agy", MCP_ROW, "missing")
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    if not lines:
+        return Row("agy", MCP_ROW, "missing")
+    header_parts = re.split(r"\s{2,}", lines[0])
+    if not header_parts or "NAME" not in header_parts[0]:
+        return Row("agy", MCP_ROW, "error", detail="agy mcp list output not understood")
+    target = None
+    for line in lines[1:]:
+        parts = re.split(r"\s{2,}", line, maxsplit=3)
+        if len(parts) >= 4 and parts[0] == MCP_SERVER_NAME:
+            target = parts
+            break
+    if target is None:
+        return Row("agy", MCP_ROW, "missing")
+    _name, _type, status_val, cmd_url = target
+    if status_val == "disabled":
+        return Row("agy", MCP_ROW, "disabled")
+    expected = f"{bin_path} mcp"
+    if cmd_url == expected:
+        return Row("agy", MCP_ROW, "current")
+    return Row("agy", MCP_ROW, "stale", detail=cmd_url)

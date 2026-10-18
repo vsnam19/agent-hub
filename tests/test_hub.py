@@ -386,20 +386,24 @@ def _fail_list(monkeypatch, exc):
 def test_status_reports_list_timeout_as_error_row(env, tmp_path, monkeypatch):
     _fail_list(monkeypatch, hub.subprocess.TimeoutExpired(["x"], 30))
     rows = hub.status(env.config, tmp_path / "repo")
-    errors = {r.host: r for r in rows if r.state == "error"}
-    assert errors["codex"].detail == "codex list failed: timed out"
-    assert errors["agy"].detail == "agy list failed: timed out"
-    assert errors["codex"].plugin == "-"
+    errors = {(r.host, r.plugin): r for r in rows if r.state == "error"}
+    assert errors[("codex", "-")].detail == "codex list failed: timed out"
+    assert errors[("agy", "-")].detail == "agy list failed: timed out"
+    assert errors[("codex", "-")].plugin == "-"
+    assert errors[("codex", hub.MCP_ROW)].detail == "codex mcp list failed: timed out"
+    assert errors[("agy", hub.MCP_ROW)].detail == "agy mcp list failed: timed out"
     assert _state(rows, "codex") == "missing"
 
 
 def test_status_reports_unexecutable_tool(env, tmp_path, monkeypatch):
     _fail_list(monkeypatch, PermissionError(13, "denied"))
     rows = hub.status(env.config, tmp_path / "repo")
-    errors = {r.host: r for r in rows if r.state == "error"}
-    assert errors["codex"].detail == "codex list failed: [Errno 13] denied"
-    assert errors["agy"].detail == "agy list failed: [Errno 13] denied"
-    assert "<error>" not in errors["codex"].detail
+    errors = {(r.host, r.plugin): r for r in rows if r.state == "error"}
+    assert errors[("codex", "-")].detail == "codex list failed: [Errno 13] denied"
+    assert errors[("agy", "-")].detail == "agy list failed: [Errno 13] denied"
+    assert errors[("codex", hub.MCP_ROW)].detail == "codex mcp list failed: [Errno 13] denied"
+    assert errors[("agy", hub.MCP_ROW)].detail == "agy mcp list failed: [Errno 13] denied"
+    assert "<error>" not in errors[("codex", "-")].detail
 
 
 def test_install_failure_shows_stdout_when_stderr_empty(env, tmp_path, monkeypatch, capsys):
@@ -421,9 +425,11 @@ def test_status_unparseable_list_is_error(env, tmp_path):
     env.install_fake("codex", FAKE_CODEX.replace('{"installed": ', '{"unexpected": '))
     env.install_fake("agy", FAKE_AGY.replace('{"imports": ', '{"other": '))
     rows = hub.status(env.config, tmp_path / "repo")
-    errors = {r.host: r for r in rows if r.state == "error"}
-    assert errors["codex"].detail == "codex list output not understood"
-    assert errors["agy"].detail == "agy list output not understood"
+    errors = {(r.host, r.plugin): r for r in rows if r.state == "error"}
+    assert errors[("codex", "-")].detail == "codex list output not understood"
+    assert errors[("agy", "-")].detail == "agy list output not understood"
+    assert errors[("codex", hub.MCP_ROW)].detail == "codex mcp list failed: WARNING: noisy"
+    assert errors[("agy", hub.MCP_ROW)].detail == "agy mcp list failed: exit 64"
 
 
 def test_marketplace_list_failure_plans_nothing_for_codex(env, tmp_path, capsys):
