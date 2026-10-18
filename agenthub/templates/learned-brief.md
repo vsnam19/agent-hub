@@ -29,9 +29,9 @@ nothing: zero skills is a valid answer.
    - a `Sources` line with the job ids from the extract it comes from;
    - no secrets, no hooks, no scripts.
 3. For each skill add at least 2 eval cases under `plugins/<plugin>/evals/<skill>-<case>/`: one positive case where
-   the skill should change the answer, one off-topic negative case where it must not apply. Each case has a
-   `prompt.md` and `graders/*.md` files with front matter `type: llm`. Follow the layout of the existing cases in
-   this repository.
+   the skill should change the answer (the positive case must be one the no-plugin baseline fails — state why in the
+   case's `prompt.md`), one off-topic negative case where it must not apply. Each case has a `prompt.md` and
+   `graders/*.md` files with front matter `type: llm`. Follow the layout of the existing cases in this repository.
 4. A candidate that needs a deterministic tool (a query, a computation) that text cannot carry is not a skill: do not
    write code for it. Add a line `MCP proposal: <name> — <what it would do and why text is not enough>` to the Notes
    of your reply.

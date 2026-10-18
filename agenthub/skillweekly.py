@@ -104,13 +104,15 @@ class Report:
         keys = [k for k in self.metrics if k != "findings_per_category"]
         lines += [f"- {k}: {self.metrics[k]} (previous: {self.previous_metrics.get(k, 'n/a')})" for k in keys]
         top = self.metrics.get("findings_per_category") or {}
-        lines += [f"- finding category: {n}× {c}" for c, n in list(top.items())[:5]]
+        lines += [f"- finding category: {n}× {c}" for c, n in [(c, n) for c, n in top.items() if n >= 2][:5]]
+        if "findings_per_category" in self.metrics:
+            lines.append(f"- finding categories seen once: {sum(1 for n in top.values() if n == 1)}")
         for title, items in (
             ("Candidates", self.candidates),
             ("Drafted skills", self.drafted),
             ("Eval scores vs baseline", [f"{k}: {v}" for k, v in self.evals.items()]),
             ("Review verdicts", self.reviews),
-            ("Released", self.released),
+            ("Released" if self.outcome == "released" else "Bumped (not released)", self.released),
             ("MCP proposals", self.proposals),
         ):
             lines += ["", f"## {title}"] + ([f"- {i}" for i in items] or ["- (none)"])
@@ -472,6 +474,7 @@ class _Run:
         return version
 
     def evaluate(self, skills: list[tuple[str, str]]) -> None:
+        failed = []
         for plugin, skill in skills:
             remaining = self.cfg.max_cost_usd - self.spent
             if remaining < 0.01:  # less than a cent left cannot pay for an eval, and is passed as 0.00
@@ -507,10 +510,17 @@ class _Run:
             unknown = " (cost unknown)" if cost is None else ""
             self.report.evals[skill] = f"with {with_mean:.2f} vs without {without_mean:.2f}{unknown}"
             if with_mean < PASS_SCORE or with_mean <= without_mean:
+                failed.append((skill, with_mean, without_mean))
+        if failed:
+            if len(failed) == 1:
+                skill, with_mean, without_mean = failed[0]
                 raise Stop(
                     f"eval of {skill} below baseline: with {with_mean:.2f}, without {without_mean:.2f} "
                     f"(needs ≥ {PASS_SCORE} and above baseline)"
                 )
+            skills_str = ", ".join(s for s, _, _ in failed)
+            details = "; ".join(f"{s}: with {w:.2f}, without {wo:.2f}" for s, w, wo in failed)
+            raise Stop(f"eval of {skills_str} below baseline: {details} (needs ≥ {PASS_SCORE} and above baseline)")
         self.step("eval", "; ".join(f"{k}: {v}" for k, v in self.report.evals.items()))
 
     def review(self, skills: list[tuple[str, str]]) -> None:
