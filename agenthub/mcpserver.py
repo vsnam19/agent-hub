@@ -20,6 +20,7 @@ from agenthub.jobs import get_job, list_jobs
 from agenthub.orchestrate import readiness, skills_hint
 from agenthub.plan import load as load_plan
 from agenthub.pool import Cooldowns, load_pool, parse_link
+from agenthub.procinfo import is_running, pid_file_dead, read_pid_file, start_time
 from agenthub.workers import available_skills
 
 if TYPE_CHECKING:
@@ -481,6 +482,24 @@ def wait_job(
         if result.get("status") != "running":
             return _format_wait_result(result)
 
+        pid_file = target_job.dir / "pid"
+        if pid_file_dead(pid_file):
+            try:
+                result = target_job.read_json("result.json")
+            except (OSError, ValueError):
+                pass
+            if result.get("status") == "running":
+                pid, _ = read_pid_file(pid_file)
+                return _format_wait_result(
+                    {
+                        **result,
+                        "status": "failed",
+                        "exit_code": 1,
+                        "reason": f"job process {pid} is not running; result.json was never finished",
+                    }
+                )
+            return _format_wait_result(result)
+
         time.sleep(0.1)
 
     return {"state": "running"}
@@ -521,6 +540,24 @@ async def wait_job_async(
             continue
 
         if result.get("status") != "running":
+            return _format_wait_result(result)
+
+        pid_file = target_job.dir / "pid"
+        if pid_file_dead(pid_file):
+            try:
+                result = target_job.read_json("result.json")
+            except (OSError, ValueError):
+                pass
+            if result.get("status") == "running":
+                pid, _ = read_pid_file(pid_file)
+                return _format_wait_result(
+                    {
+                        **result,
+                        "status": "failed",
+                        "exit_code": 1,
+                        "reason": f"job process {pid} is not running; result.json was never finished",
+                    }
+                )
             return _format_wait_result(result)
 
         await asyncio.sleep(0.1)
@@ -595,6 +632,11 @@ def plan_run(
             )
     except OSError as e:
         return {"error": f"spawn failed: {e} (log: {log_file})", "log": str(log_file)}
+
+    # Record the new runner now: runner.pid otherwise names the previous runner until the child claims it,
+    # and plan_wait in that window would report a false stalled.
+    with contextlib.suppress(OSError):
+        (plan.path.parent / "runner.pid").write_text(json.dumps({"pid": proc.pid, "start_time": start_time(proc.pid)}))
 
     threading.Thread(target=proc.wait, daemon=True).start()
 
@@ -713,9 +755,7 @@ def plan_review_wait(
 
         pid = info.get("pid")
         if pid:
-            try:
-                os.kill(pid, 0)
-            except OSError:
+            if not is_running(pid):
                 time.sleep(0.1)
                 try:
                     info = json.loads(info_file.read_text())
@@ -788,9 +828,7 @@ async def plan_review_wait_async(
 
         pid = info.get("pid")
         if pid:
-            try:
-                os.kill(pid, 0)
-            except OSError:
+            if not is_running(pid):
                 await asyncio.sleep(0.1)
                 try:
                     info = json.loads(info_file.read_text())
@@ -900,9 +938,41 @@ def plan_review(
         "stdout": str(stdout_file),
         "stderr": str(stderr_file),
     }
-    result_file.write_text(json.dumps(info))
+    # The child may already have written its final result: never clobber it.
+    with contextlib.suppress(FileExistsError):
+        with open(result_file, "x") as f:
+            f.write(json.dumps(info))
+
+    threading.Thread(target=_reap_review, args=(proc, result_file, stderr_file), daemon=True).start()
 
     return {"handle": handle, "plan": plan.slug, "runner_pid": proc.pid}
+
+
+def _reap_review(proc: subprocess.Popen, result_file: Path, stderr_file: Path) -> None:
+    """Reap the review runner; if it died without a final result, record a failure."""
+    proc.wait()
+    info: dict[str, Any] = {}
+    try:
+        loaded = json.loads(result_file.read_text())
+        if isinstance(loaded, dict):
+            info = loaded
+    except (OSError, ValueError):
+        pass
+    if info.get("status") in ("ok", "failed"):
+        return
+    try:
+        tail = stderr_file.read_text(errors="replace")[-2000:]
+    except OSError:
+        tail = ""
+    failed = {
+        "handle": info.get("handle"),
+        "plan": info.get("plan"),
+        "status": "failed",
+        "exit_code": proc.returncode or 1,
+        "lines": [],
+        "stderr_tail": tail or "runner exited without a result",
+    }
+    result_file.write_text(json.dumps(failed))
 
 
 def plan_merge(
@@ -965,6 +1035,50 @@ def plan_merge(
     return {"merged": merged, "stopped_at": stopped_at}
 
 
+def _dead_runner_pid(plan_dir: Path, state_data: dict[str, Any]) -> int | None:
+    """Pid of the recorded plan runner when it is gone or its pid was reused, else None."""
+    runner: Any = None
+    try:
+        runner = json.loads((plan_dir / "runner.pid").read_text())
+    except (OSError, ValueError):
+        pass
+    if not isinstance(runner, dict):
+        runner = state_data.get("runner")
+    if not isinstance(runner, dict):
+        return None
+    pid = runner.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        return None
+    if not is_running(pid):
+        return pid
+    recorded = runner.get("start_time")
+    if isinstance(recorded, int) and not isinstance(recorded, bool) and start_time(pid) != recorded:
+        return pid
+    return None
+
+
+def _plan_stalled(
+    plan_file: Path, plan_dir: Path, state_file: Path, state_data: dict[str, Any], p: Paths
+) -> dict[str, Any] | None:
+    """Stalled result when tasks are unfinished and the runner is dead; None otherwise."""
+    pid = _dead_runner_pid(plan_dir, state_data)
+    if pid is None:
+        return None
+    try:
+        with open(state_file, "r") as f:
+            fresh = json.load(f)
+    except (OSError, ValueError):
+        fresh = state_data
+    tasks_data = fresh.get("tasks", {})
+    if tasks_data and not any(ts.get("status") in ("pending", "running") for ts in tasks_data.values()):
+        return plan_status(plan_path=str(plan_file), trail=False, p=p)
+    return {
+        "state": "stalled",
+        "reason": f"plan runner {pid} is not running; tasks still pending/running",
+        **plan_status(plan_path=str(plan_file), trail=False, p=p),
+    }
+
+
 def plan_wait(
     plan_path: str,
     timeout_s: Any = 60,
@@ -1003,6 +1117,9 @@ def plan_wait(
         tasks_data = state_data.get("tasks", {})
         if tasks_data and not any(ts.get("status") in ("pending", "running") for ts in tasks_data.values()):
             return plan_status(plan_path=str(plan_file), trail=False, p=p)
+        stalled = _plan_stalled(plan_file, plan_dir, state_file, state_data, p)
+        if stalled is not None:
+            return stalled
 
         time.sleep(0.1)
 
@@ -1047,6 +1164,9 @@ async def plan_wait_async(
         tasks_data = state_data.get("tasks", {})
         if tasks_data and not any(ts.get("status") in ("pending", "running") for ts in tasks_data.values()):
             return plan_status(plan_path=str(plan_file), trail=False, p=p)
+        stalled = _plan_stalled(plan_file, plan_dir, state_file, state_data, p)
+        if stalled is not None:
+            return stalled
 
         await asyncio.sleep(0.1)
 

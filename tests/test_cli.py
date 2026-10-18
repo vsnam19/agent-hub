@@ -563,6 +563,31 @@ def test_wait_ignores_record_without_workdir(env_sandbox, repo, tmp_path, monkey
     assert "agent-hub: no job for ." in err
 
 
+def test_wait_reports_dead_process(env_sandbox, repo, capsys):
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+
+    from agenthub.jobs import new_job
+
+    job = new_job(paths(), "implement", datetime.now(timezone.utc))
+    job.write_json(
+        "result.json",
+        {"id": job.id, "role": "implement", "status": "running", "workdir": str(repo.resolve())},
+    )
+    (job.dir / "pid").write_text(json.dumps({"pid": proc.pid, "start_time": 123456}))
+
+    t0 = time.monotonic()
+    ret = main(["wait", "-d", str(repo), "--timeout", "5s"])
+    elapsed = time.monotonic() - t0
+
+    out, err = capsys.readouterr()
+    assert elapsed < 3.0
+    assert ret == 1
+    assert str(proc.pid) in out
+    assert f"job process {proc.pid} is not running; result.json was never finished" in out
+    assert job.read_json("result.json")["status"] == "running"
+
+
 def test_orders_table_lists_rules_and_mechanisms(env_sandbox, repo, capsys):
     user_file = env_sandbox.config / "standing-orders.md"
     user_file.write_text(
