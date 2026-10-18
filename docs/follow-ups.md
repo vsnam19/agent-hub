@@ -120,3 +120,18 @@ a turn. Items:
   no JSON `imports`): `hub status` reports `agy - error: agy list output not understood` and every agy plugin as
   `missing`, so each `hub install` reinstalls them (harmless). Parse the text form (keep the JSON form). Seen at the
   v0.11.0 `hub install --apply` (2026-10-19), where the plugins were in fact installed. Small task, next.
+
+## Deferred from Phase G (2026-10-19, D-109)
+
+- **G3 — worker host events through the adapters** (claude stream-json, codex JSON events, opencode, agy), one host
+  per task, for workers whose host hooks do not fire in headless mode. Trigger: Phase G real check shows worker tool
+  calls missing from `audit show --job`.
+- **G4 — daily audit digest to the owner.** Trigger: after G has run a week on real work.
+- **Scorecard baseline** — next phase after G (D-105), built on the audit events.
+- **Sentry (command/egress enforcement) and credential broker.** Revisit when any of these happens: unattended
+  overnight runs become routine; agents read untrusted content (web pages, external issues) regularly; the repo gets
+  a GitHub remote and pushes become frequent; the audit log shows a dangerous action actually happened. Direction
+  (D-109): no agent above policy, owner signs every policy change, broker is a local deterministic process (not MCP),
+  owner approves the request hash.
+- **Spec-review gate for the techlead.** Revisit after the scorecard baseline exists, so its effect can be measured
+  (fix rounds and spec-caused `blocked` tasks with vs without the gate).
