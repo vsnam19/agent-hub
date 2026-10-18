@@ -186,3 +186,53 @@ def test_close_triage_missing_worktree_blocks(env_sandbox, tmp_path, monkeypatch
         "rejected_path": "",
         "reason": f"cannot read HEAD: {unreadable_dir}",
     }
+
+
+def test_close_rejects_unknown_skill(env_sandbox, tmp_path, capsys):
+    repo = tmp_path / "repo"
+    make_repo(repo)
+    plan_content = {
+        "goal": "do it",
+        "repo": str(repo),
+        "base": "master",
+        "slug": "plan-1",
+        "tasks": [{"name": "t1", "role": "implement", "brief": "b1.md", "skills": ["nope"]}],
+    }
+    plan_file = make_plan_file(tmp_path, repo, plan_content)
+
+    rc = main(["plan", "close", str(plan_file)])
+
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "task t1: unknown skill nope" in err
+    assert not (plan_file.parent / "runner.pid").exists()
+
+
+def test_close_passes_max_parallel(env_sandbox, tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    make_repo(repo)
+    plan_file = make_plan_file(tmp_path, repo)
+    report_file = plan_file.parent / "report.md"
+
+    run_plan_args = []
+
+    def fake_run_plan(plan, state, spawn, max_parallel=None):
+        run_plan_args.append(max_parallel)
+        return 0
+
+    monkeypatch.setattr(agenthub.cli, "run_plan", fake_run_plan)
+
+    def fake_close(plan, state, *, run, review, triage, ready, max_rounds=3):
+        run()
+        return CloseResult(ok=True, report=report_file)
+
+    monkeypatch.setattr(agenthub.planclose, "close", fake_close)
+
+    rc = main(["plan", "close", str(plan_file), "--max-parallel", "4"])
+    assert rc == 0
+    assert run_plan_args == [4]
+
+    run_plan_args.clear()
+    rc_default = main(["plan", "close", str(plan_file)])
+    assert rc_default == 0
+    assert run_plan_args == [None]

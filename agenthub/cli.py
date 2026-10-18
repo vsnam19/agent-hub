@@ -207,6 +207,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     plan_close.add_argument("plan_file", metavar="<plan.json>")
     plan_close.add_argument("--rounds", type=int, default=3, help="max triage fix rounds per task (default: 3)")
+    plan_close.add_argument("--max-parallel", type=int, metavar="N")
     plan_cancel = plan_sub.add_parser("cancel", help="stop the plan's runner and its running jobs")
     plan_cancel.add_argument("plan_file", metavar="<plan.json>")
     plan_cancel.add_argument("-d", "--dir", default=".", dest="workdir", help="repository the caller runs from")
@@ -1060,14 +1061,12 @@ def _task_head(tstate) -> tuple[str | None, str | None]:
         return None, f"cannot read HEAD: {tstate.worktree}"
 
 
-def _task_head(tstate) -> tuple[str | None, str | None]:
-    """Read a task's HEAD without guards.inspect; returns (head, None) or (None, problem)."""
-    if not tstate.worktree or not Path(tstate.worktree).is_dir():
-        return None, f"work tree missing: {tstate.worktree}"
-    try:
-        return guards._run_git(Path(tstate.worktree), "rev-parse", "HEAD"), None
-    except (subprocess.CalledProcessError, OSError):
-        return None, f"cannot read HEAD: {tstate.worktree}"
+def _check_plan_skills(plan) -> None:
+    known_skills = available_skills(paths().config_dir) if any(t.skills for t in plan.tasks) else {}
+    for task in plan.tasks:
+        for skill in task.skills:
+            if skill not in known_skills:
+                raise UsageError(f"task {task.name}: unknown skill {skill}: {skills_hint(known_skills)}")
 
 
 def _cmd_plan(args) -> int:
@@ -1081,11 +1080,7 @@ def _cmd_plan(args) -> int:
     if args.plan_command == "run":
         from agenthub.planstate import load_or_init
 
-        known_skills = available_skills(paths().config_dir) if any(t.skills for t in plan.tasks) else {}
-        for task in plan.tasks:
-            for skill in task.skills:
-                if skill not in known_skills:
-                    raise UsageError(f"task {task.name}: unknown skill {skill}: {skills_hint(known_skills)}")
+        _check_plan_skills(plan)
 
         state = load_or_init(plan)
         _claim_runner(state, plan_dir)
@@ -1291,6 +1286,8 @@ def _cmd_plan(args) -> int:
         if args.rounds < 1:
             raise UsageError("--rounds must be >= 1")
 
+        _check_plan_skills(plan)
+
         from agenthub import triagerun
         from agenthub.planclose import close
         from agenthub.planrun import review_task
@@ -1304,7 +1301,7 @@ def _cmd_plan(args) -> int:
             return subprocess.Popen(argv, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
 
         def run():
-            return run_plan(plan, state, spawn)
+            return run_plan(plan, state, spawn, args.max_parallel)
 
         def review(task):
             return review_task(plan, task, state.task(task.name), _now)
