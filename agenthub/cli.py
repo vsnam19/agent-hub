@@ -201,6 +201,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     plan_merge.add_argument("plan_file", metavar="<plan.json>")
     plan_merge.add_argument("--into", metavar="BRANCH", help="branch to merge into (default: the plan's base)")
+    plan_close = plan_sub.add_parser(
+        "close",
+        help="close a plan by running, reviewing, and triaging until ready or blocked, then write a report",
+    )
+    plan_close.add_argument("plan_file", metavar="<plan.json>")
+    plan_close.add_argument("--rounds", type=int, default=3, help="max triage fix rounds per task (default: 3)")
+    plan_close.add_argument("--max-parallel", type=int, metavar="N")
     plan_cancel = plan_sub.add_parser("cancel", help="stop the plan's runner and its running jobs")
     plan_cancel.add_argument("plan_file", metavar="<plan.json>")
     plan_cancel.add_argument("-d", "--dir", default=".", dest="workdir", help="repository the caller runs from")
@@ -1013,6 +1020,14 @@ def _claim_runner(state, plan_dir: Path, plan=None) -> None:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
+def _release_runner(state, plan_dir: Path) -> None:
+    """Release this process's runner claim if still held."""
+    if isinstance(state.runner, dict) and state.runner.get("pid") == os.getpid():
+        state.runner = {}
+        state.save()
+        (plan_dir / "runner.pid").unlink(missing_ok=True)
+
+
 def _stop_runner(pid: int | None, recorded: int | None) -> None:
     """SIGTERM the plan's runner when its start time verifies; say so either way."""
     if _terminate_verified(pid, recorded):
@@ -1082,6 +1097,14 @@ def _task_head(tstate) -> tuple[str | None, str | None]:
         return None, f"cannot read HEAD: {tstate.worktree}"
 
 
+def _check_plan_skills(plan) -> None:
+    known_skills = available_skills(paths().config_dir) if any(t.skills for t in plan.tasks) else {}
+    for task in plan.tasks:
+        for skill in task.skills:
+            if skill not in known_skills:
+                raise UsageError(f"task {task.name}: unknown skill {skill}: {skills_hint(known_skills)}")
+
+
 def _cmd_plan(args) -> int:
     plan_file = Path(args.plan_file).resolve()
     if args.plan_command == "cancel":
@@ -1093,11 +1116,7 @@ def _cmd_plan(args) -> int:
     if args.plan_command == "run":
         from agenthub.planstate import load_or_init
 
-        known_skills = available_skills(paths().config_dir) if any(t.skills for t in plan.tasks) else {}
-        for task in plan.tasks:
-            for skill in task.skills:
-                if skill not in known_skills:
-                    raise UsageError(f"task {task.name}: unknown skill {skill}: {skills_hint(known_skills)}")
+        _check_plan_skills(plan)
 
         state = load_or_init(plan)
         _claim_runner(state, plan_dir, plan=plan)
@@ -1346,6 +1365,68 @@ def _cmd_plan(args) -> int:
                 print(_safe(f"{task.name} merge failed: {result['reason']}", sys.stderr), file=sys.stderr)
                 return 1
         return 0
+
+    elif args.plan_command == "close":
+        if args.rounds < 1:
+            raise UsageError("--rounds must be >= 1")
+
+        _check_plan_skills(plan)
+
+        from agenthub import triagerun
+        from agenthub.planclose import close
+        from agenthub.planrun import review_task
+        from agenthub.planstate import load_or_init
+
+        state = load_or_init(plan)
+        _claim_runner(state, plan_dir, plan=plan)
+        try:
+
+            def spawn(argv: list[str], log: Path) -> subprocess.Popen:
+                f = open(log, "wb")
+                return subprocess.Popen(argv, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+
+            def run():
+                return run_plan(plan, state, spawn, args.max_parallel)
+
+            def review(task):
+                return review_task(plan, task, state.task(task.name), _now)
+
+            def triage(task):
+                tstate = state.task(task.name)
+                head, err = _task_head(tstate)
+                if err:
+                    tstate.status = "blocked"
+                    tstate.reason = err
+                    return {
+                        "task": task.name,
+                        "status": "blocked",
+                        "counts": {"fix": 0, "reject": 0, "blocked": 0},
+                        "fix_path": "",
+                        "rejected_path": "",
+                        "reason": err,
+                    }
+                return triagerun.triage_task(plan, task, tstate, list_jobs(paths(), 100000), head, _now)
+
+            def ready(task):
+                tstate = state.task(task.name)
+                head, err = _task_head(tstate)
+                if err:
+                    return [err]
+                return readiness(list_jobs(paths(), 100000), Path(tstate.worktree), head)
+
+            result = close(
+                plan,
+                state,
+                run=run,
+                review=review,
+                triage=triage,
+                ready=ready,
+                max_rounds=args.rounds,
+            )
+            print(_safe(str(result.report)))
+            return 0 if result.ok else 1
+        finally:
+            _release_runner(state, plan_dir)
 
     elif args.plan_command == "wait":
         import argparse
