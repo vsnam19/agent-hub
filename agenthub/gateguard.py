@@ -175,6 +175,8 @@ def _is_literal_superset(base_lit: ast.AST, new_lit: ast.AST) -> bool:
     if type(base_lit) is not type(new_lit):
         return False
     base_elts = _literal_elements(base_lit)
+    if not base_elts:
+        return False
     new_elts = _literal_elements(new_lit)
     base_counts = Counter(base_elts)
     new_counts = Counter(new_elts)
@@ -189,14 +191,10 @@ def _keeps_by_superset(base_cmp: ast.Compare, new_cmp: ast.Compare) -> bool:
     return _is_literal_superset(base_cmp.comparators[0], new_cmp.comparators[0])
 
 
-def _assertion_compares(node: ast.AST | None) -> list[ast.Compare]:
-    if not isinstance(node, ast.Assert):
-        return []
-    if isinstance(node.test, ast.Compare):
-        return [node.test]
-    if isinstance(node.test, ast.BoolOp) and isinstance(node.test.op, ast.And):
-        return [v for v in node.test.values if isinstance(v, ast.Compare)]
-    return []
+def _single_compare(node: ast.AST | None) -> ast.Compare | None:
+    if isinstance(node, ast.Assert) and isinstance(node.test, ast.Compare):
+        return node.test
+    return None
 
 
 def _weakened(base: TestDef, new: TestDef) -> bool:
@@ -221,43 +219,39 @@ def _weakened(base: TestDef, new: TestDef) -> bool:
 
     still_unmatched = []
     for place, key, nested, base_node in unmatched:
+        if not nested and pool[("direct", key)]:
+            pool[("direct", key)] -= 1
+        else:
+            still_unmatched.append((place, key, nested, base_node))
+
+    for place, _key, nested, base_node in still_unmatched:
         matched = False
-        base_cmps = _assertion_compares(base_node)
-        if base_cmps and any(_is_container_eq(c) for c in base_cmps):
-            for base_cmp in base_cmps:
-                if not _is_container_eq(base_cmp):
+        base_cmp = _single_compare(base_node)
+        if base_cmp is not None and _is_container_eq(base_cmp):
+            for new_place, new_node, new_nested in new.raw_asserts:
+                if new_place != place or new_nested != nested:
                     continue
-                for new_place, new_node, new_nested in new.raw_asserts:
-                    if new_place != place or new_nested != nested:
-                        continue
-                    new_cmps = _assertion_compares(new_node)
-                    if any(_keeps_by_superset(base_cmp, nc) for nc in new_cmps):
-                        key_new = _assertion_key(new_node)
-                        token_placed = ("placed", new_place, key_new)
-                        token_direct = ("direct", key_new)
-                        token_nested = ("nested", new_place, key_new)
-                        if nested and pool[token_nested] > 0:
-                            pool[token_nested] -= 1
+                new_cmp = _single_compare(new_node)
+                if new_cmp is not None and _keeps_by_superset(base_cmp, new_cmp):
+                    key_new = _assertion_key(new_node)
+                    token_placed = ("placed", new_place, key_new)
+                    token_direct = ("direct", key_new)
+                    token_nested = ("nested", new_place, key_new)
+                    if nested and pool[token_nested] > 0:
+                        pool[token_nested] -= 1
+                        matched = True
+                        break
+                    elif not nested:
+                        if pool[token_placed] > 0:
+                            pool[token_placed] -= 1
                             matched = True
                             break
-                        elif not nested:
-                            if pool[token_placed] > 0:
-                                pool[token_placed] -= 1
-                                matched = True
-                                break
-                            elif pool[token_direct] > 0:
-                                pool[token_direct] -= 1
-                                matched = True
-                                break
-                if matched:
-                    break
+                        elif pool[token_direct] > 0:
+                            pool[token_direct] -= 1
+                            matched = True
+                            break
         if not matched:
-            still_unmatched.append((nested, key))
-
-    for nested, key in still_unmatched:
-        if nested or not pool[("direct", key)]:
             return True
-        pool[("direct", key)] -= 1
     return False
 
 

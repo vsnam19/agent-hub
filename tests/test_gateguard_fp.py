@@ -143,3 +143,37 @@ def test_weakened_edge_cases():
     # Different operator (!=)
     new_op = gateguard._test_index(b"def test_foo():\n    assert set(x) != {'a', 'b', 'c'}\n")["test_foo"]
     assert gateguard._weakened(base, new_op)
+
+
+def test_and_chain_grown_literal_still_weakening(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    assert result == [1] and status == 0\n",
+        "def test_a():\n    assert result == [1, 2]\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+    base = gateguard._test_index(b"def test_a():\n    assert result == [1] and status == 0\n")["test_a"]
+    new = gateguard._test_index(b"def test_a():\n    assert result == [1, 2]\n")["test_a"]
+    assert gateguard._weakened(base, new)
+
+
+def test_empty_expected_literal_grown_is_weakening(repo):
+    res = _weaken_test(
+        repo,
+        "def test_a():\n    assert errors == []\n",
+        "def test_a():\n    assert errors == ['boom']\n",
+    )
+    assert res == [{"file": "test_k.py", "kind": "assert-removed", "lines": [2]}]
+
+    base = gateguard._test_index(b"def test_a():\n    assert errors == []\n")["test_a"]
+    new = gateguard._test_index(b"def test_a():\n    assert errors == ['boom']\n")["test_a"]
+    assert gateguard._weakened(base, new)
+
+
+def test_superset_does_not_steal_token_from_exact_direct_match():
+    base_src = "def test_a():\n    if cond:\n        assert x == [1, 2]\n    assert x == [1]\n"
+    new_src = "def test_a():\n    assert x == [1, 2]\n    assert x == [1, 4]\n"
+    base = gateguard._test_index(base_src.encode("utf-8"))["test_a"]
+    new = gateguard._test_index(new_src.encode("utf-8"))["test_a"]
+    assert not gateguard._weakened(base, new)
