@@ -1263,6 +1263,12 @@ def _cmd_plan(args) -> int:
                                 break
                             continue
                         result = triagerun.triage_task(plan, task, tstate, jobs, head, _now)
+                        if (
+                            result is not None
+                            and result.get("status") == "blocked"
+                            and result.get("reason") == "triage job cancelled"
+                        ):
+                            interrupted = True
                         if interrupted:
                             if (
                                 result is not None

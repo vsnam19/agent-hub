@@ -681,3 +681,33 @@ def test_triage_stops_on_signal(env_sandbox, tmp_path, monkeypatch):
     assert saved["tasks"]["t1"]["status"] == "done"
     assert saved["tasks"]["t1"]["reason"] == ""
     assert saved["tasks"]["t2"]["status"] == "done"
+
+
+def test_cancelled_triage_job_stops_loop(env_sandbox, tmp_path, monkeypatch):
+    plan_file, _state = make_gated_plan_run(env_sandbox, tmp_path)
+    state_file = plan_file.parent / "state.json"
+
+    triage_calls = []
+
+    def fake_triage(plan, task, tstate, jobs, head, now):
+        triage_calls.append(task.name)
+        if task.name == "t1":
+            tstate.status = "blocked"
+            tstate.reason = "triage job cancelled"
+            return {
+                "task": task.name,
+                "status": "blocked",
+                "reason": "triage job cancelled",
+            }
+        return None
+
+    monkeypatch.setattr(agenthub.triagerun, "triage_task", fake_triage)
+
+    rc = main(["plan", "triage", str(plan_file)])
+    assert rc == 130
+    assert triage_calls == ["t1"]
+
+    saved = json.loads(state_file.read_text())
+    assert saved["tasks"]["t1"]["status"] == "done"
+    assert saved["tasks"]["t1"]["reason"] == ""
+    assert saved["tasks"]["t2"]["status"] == "done"
