@@ -186,3 +186,45 @@ def test_implementer_has_handoff_headings():
     for heading in ("## Status", "## What I did", "## Verification"):
         assert heading in body, f"implementer must end with {heading}"
     assert "inconclusive" in body
+
+
+def test_plugin_hooks_manifest():
+    hooks_path = REPO_ROOT / "hooks" / "hooks.json"
+    assert hooks_path.exists(), "hooks/hooks.json must exist"
+    with open(hooks_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    assert "hooks" in data
+    hooks = data["hooks"]
+
+    # SessionStart hook
+    assert "SessionStart" in hooks
+    session_start_entries = hooks["SessionStart"]
+    assert len(session_start_entries) == 1
+    session_start = session_start_entries[0]
+    assert session_start.get("matcher") == "startup|resume|clear|compact"
+    assert len(session_start.get("hooks", [])) == 1
+    ss_hook = session_start["hooks"][0]
+    assert ss_hook.get("type") == "command"
+    assert ss_hook.get("command") == "${CLAUDE_PLUGIN_ROOT}/bin/agent-hub hook session-start"
+    assert ss_hook.get("timeout") == 10
+
+    # Stop hook
+    assert "Stop" in hooks
+    stop_entries = hooks["Stop"]
+    assert len(stop_entries) == 1
+    stop = stop_entries[0]
+    assert len(stop.get("hooks", [])) == 1
+    stop_hook = stop["hooks"][0]
+    assert stop_hook.get("type") == "command"
+    assert stop_hook.get("command") == "${CLAUDE_PLUGIN_ROOT}/bin/agent-hub hook stop"
+    assert stop_hook.get("timeout") == 10
+
+    # README documentation
+    readme_text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "## Claude Code hooks" in readme_text
+    assert "SessionStart" in readme_text
+    assert "Stop" in readme_text
+    assert "20 blocks" in readme_text
+    assert "disableAllHooks" in readme_text
+    assert "/plugin" in readme_text
