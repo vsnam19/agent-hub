@@ -1,4 +1,5 @@
 import argparse
+import fcntl
 import json
 import math
 import os
@@ -22,7 +23,7 @@ from agenthub.plan import PlanError
 from agenthub.plan import load as load_plan
 from agenthub.planrun import run_plan
 from agenthub.pool import Cooldowns, load_pool, parse_link
-from agenthub.procinfo import start_time
+from agenthub.procinfo import is_running, pid_file_dead, read_pid_file, start_time
 from agenthub.workers import available_skills
 
 WAIT_POLL_S = 1.0
@@ -837,11 +838,7 @@ def _cmd_show(args) -> int:
 
 def _read_pid_file(path: Path) -> tuple[int | None, int | None]:
     """Return (pid, start_time) from the JSON pid file; a legacy plain int is unverifiable."""
-    try:
-        data = json.loads(path.read_text())
-        return int(data["pid"]), int(data["start_time"])
-    except (OSError, ValueError, TypeError, KeyError):
-        return None, None
+    return read_pid_file(path)
 
 
 def _read_result(job) -> dict:
@@ -934,6 +931,22 @@ def _cmd_wait(args) -> int:
                 _emit(_summary(result))
             return result.get("exit_code", 1)
 
+        pid_file = target_job.dir / "pid"
+        if pid_file_dead(pid_file):
+            try:
+                result = target_job.read_json("result.json")
+            except (OSError, ValueError):
+                pass
+            if result.get("status") == "running":
+                pid, _ = read_pid_file(pid_file)
+                print(_safe(f"job process {pid} is not running; result.json was never finished"))
+                return 1
+            if args.json:
+                print(json.dumps(result, indent=2))
+            else:
+                _emit(_summary(result))
+            return result.get("exit_code", 1)
+
         time.sleep(WAIT_POLL_S)
 
     print(_safe(f"still running: {target_job.id}"))
@@ -956,15 +969,26 @@ def _claim_runner(state, plan_dir: Path) -> None:
     """Record this process as the plan's runner with its start time, so `plan cancel` can verify it.
     Refuses if another verified runner process is still running.
     The pid also goes to `runner.pid`, which still names the runner when state.json cannot be read."""
-    runner = state.runner or {}
-    pid = runner.get("pid")
-    recorded = runner.get("start_time")
-    if isinstance(pid, int) and recorded is not None and pid != os.getpid() and start_time(pid) == recorded:
-        raise UsageError(f"plan runner {pid} is still running; wait or cancel it first")
-    pid = os.getpid()
-    state.runner = {"pid": pid, "start_time": start_time(pid)}
-    state.save()
-    (plan_dir / "runner.pid").write_text(json.dumps(state.runner))
+    with open(plan_dir / "runner.lock", "a") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            runner = state.runner or {}
+            pid = runner.get("pid")
+            recorded = runner.get("start_time")
+            if (
+                isinstance(pid, int)
+                and recorded is not None
+                and pid != os.getpid()
+                and is_running(pid)
+                and start_time(pid) == recorded
+            ):
+                raise UsageError(f"plan runner {pid} is still running; wait or cancel it first")
+            pid = os.getpid()
+            state.runner = {"pid": pid, "start_time": start_time(pid)}
+            state.save()
+            (plan_dir / "runner.pid").write_text(json.dumps(state.runner))
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 def _stop_runner(pid: int | None, recorded: int | None) -> None:
@@ -1026,9 +1050,14 @@ def _cmd_plan_cancel(args, plan_file: Path) -> int:
     return code
 
 
-def _head_of(tstate) -> str:
-    """The HEAD commit sha of a task state's work tree."""
-    return guards.head(guards.inspect(Path(tstate.worktree)))
+def _task_head(tstate) -> tuple[str | None, str | None]:
+    """Read a task's HEAD without guards.inspect; returns (head, None) or (None, problem)."""
+    if not tstate.worktree or not Path(tstate.worktree).is_dir():
+        return None, f"work tree missing: {tstate.worktree}"
+    try:
+        return guards._run_git(Path(tstate.worktree), "rev-parse", "HEAD"), None
+    except (subprocess.CalledProcessError, OSError):
+        return None, f"cannot read HEAD: {tstate.worktree}"
 
 
 def _task_head(tstate) -> tuple[str | None, str | None]:
@@ -1189,16 +1218,12 @@ def _cmd_plan(args) -> int:
         for task in tasks:
             tstate = state.task(task.name)
             if not tstate.worktree:
-                continue
-            wt_path = Path(tstate.worktree)
-            if not wt_path.is_dir():
-                print(_safe(f"{task.name} skipped: work tree missing: {tstate.worktree}"))
+                print(_safe(f"{task.name} skipped: no work tree recorded"))
                 skipped_count += 1
                 continue
-            try:
-                head = guards._run_git(wt_path, "rev-parse", "HEAD")
-            except (subprocess.CalledProcessError, OSError):
-                print(_safe(f"{task.name} skipped: cannot read HEAD: {tstate.worktree}"))
+            head, problem = _task_head(tstate)
+            if problem:
+                print(_safe(f"{task.name} skipped: {problem}"))
                 skipped_count += 1
                 continue
             result = triagerun.triage_task(plan, task, tstate, jobs, head, _now)

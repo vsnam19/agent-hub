@@ -15,6 +15,9 @@ from agenthub.cli import UsageError, main
 from agenthub.config import ConfigError, Paths, paths
 from agenthub.jobs import get_job, list_jobs, new_job
 from agenthub.mcpserver import (
+    _dead_runner_pid,
+    _plan_stalled,
+    _reap_review,
     _spawn_detached,
     build_server,
     clamp_timeout,
@@ -344,6 +347,34 @@ def test_wait_job_running_before_result(env_sandbox, repo):
     assert res_done["status"] == "ok"
     assert res_done["job_id"] == job.id
     assert res_done["state"] == "ok"
+
+
+def test_wait_job_reports_dead_process(env_sandbox, repo):
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+
+    p = paths()
+    job = new_job(p, "implement", datetime.now(timezone.utc))
+    job.write_json("result.json", {"id": job.id, "status": "running", "workdir": str(repo)})
+    (job.dir / "pid").write_text(json.dumps({"pid": proc.pid, "start_time": 123456}))
+
+    t0 = time.monotonic()
+    res = wait_job(job_id=job.id, timeout_s=5)
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 3.0
+    assert res["status"] == "failed"
+    assert res["state"] == "failed"
+    assert res["exit_code"] == 1
+    assert str(proc.pid) in res["reason"]
+    assert res["reason"] == f"job process {proc.pid} is not running; result.json was never finished"
+    assert job.read_json("result.json")["status"] == "running"
+
+    res_async = asyncio.run(wait_job_async(job_id=job.id, timeout_s=5))
+    assert res_async["status"] == "failed"
+    assert res_async["state"] == "failed"
+    assert res_async["exit_code"] == 1
+    assert res_async["reason"] == f"job process {proc.pid} is not running; result.json was never finished"
 
 
 def git_head(repo):
@@ -1199,6 +1230,40 @@ def test_plan_run_returns_at_once(env_sandbox, repo, tmp_path, monkeypatch):
             pass
 
 
+def test_plan_run_records_runner_pid_before_return(env_sandbox, repo, tmp_path, monkeypatch):
+    from agenthub.procinfo import start_time
+
+    real_popen = subprocess.Popen
+    children = []
+
+    def fake_popen(cmd, **kwargs):
+        if "agenthub" not in cmd:
+            return real_popen(cmd, **kwargs)
+        child = real_popen([sys.executable, "-c", "import time; time.sleep(5)"], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    plan_file = make_plan_file(tmp_path, repo)
+    plan_dir = plan_file.parent
+    dead = real_popen(["true"])
+    dead.wait()
+    (plan_dir / "runner.pid").write_text(json.dumps({"pid": dead.pid, "start_time": 1}))
+    assert _dead_runner_pid(plan_dir, {}) == dead.pid
+
+    try:
+        res = plan_run(str(plan_file))
+        runner_pid = res["runner_pid"]
+        assert runner_pid == children[0].pid
+        recorded = json.loads((plan_dir / "runner.pid").read_text())
+        assert recorded == {"pid": runner_pid, "start_time": start_time(runner_pid)}
+        assert _dead_runner_pid(plan_dir, {}) is None
+    finally:
+        for child in children:
+            child.kill()
+            child.wait()
+
+
 def test_plan_status_matches_cli(env_sandbox, repo, tmp_path):
     plan_file = make_plan_file(tmp_path, repo)
 
@@ -1246,6 +1311,63 @@ def test_plan_status_matches_cli(env_sandbox, repo, tmp_path):
     res_cli_trail = run_cli_plan(env_sandbox, plan_file, "status", extra_args=["--trail"])
     assert res_cli_trail.returncode == 0
     assert "task started" in res_cli_trail.stdout
+
+
+def _stalled_plan(env_sandbox, repo, tmp_path, runner):
+    plan_file = make_plan_file(tmp_path, repo)
+    plan_dir = plan_file.parent
+    (plan_dir / "state.json").write_text(json.dumps({"tasks": {"t1": {"status": "running"}}}))
+    (plan_dir / "runner.pid").write_text(json.dumps(runner))
+    return plan_file
+
+
+def test_plan_wait_stalled_when_runner_dead(env_sandbox, repo, tmp_path):
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    plan_file = _stalled_plan(env_sandbox, repo, tmp_path, {"pid": proc.pid, "start_time": 1})
+    t0 = time.monotonic()
+    res = plan_wait(str(plan_file), timeout_s=5)
+    assert time.monotonic() - t0 < 3
+    assert res["state"] == "stalled"
+    assert str(proc.pid) in res["reason"]
+
+
+def test_plan_wait_running_when_runner_alive(env_sandbox, repo, tmp_path):
+    from agenthub.procinfo import start_time
+
+    plan_file = _stalled_plan(env_sandbox, repo, tmp_path, {"pid": os.getpid(), "start_time": start_time(os.getpid())})
+    assert plan_wait(str(plan_file), timeout_s=1)["state"] == "running"
+
+
+def test_plan_wait_stalled_when_pid_reused(env_sandbox, repo, tmp_path):
+    from agenthub.procinfo import start_time
+
+    plan_file = _stalled_plan(
+        env_sandbox, repo, tmp_path, {"pid": os.getpid(), "start_time": start_time(os.getpid()) + 1}
+    )
+    res = plan_wait(str(plan_file), timeout_s=5)
+    assert res["state"] == "stalled"
+    assert str(os.getpid()) in res["reason"]
+
+
+@pytest.mark.parametrize("runner", [{"pid": os.getpid()}, {"pid": os.getpid(), "start_time": None}])
+def test_plan_wait_running_when_start_time_missing(env_sandbox, repo, tmp_path, runner):
+    plan_file = _stalled_plan(env_sandbox, repo, tmp_path, runner)
+    assert plan_wait(str(plan_file), timeout_s=1)["state"] == "running"
+
+
+def test_plan_stalled_when_tasks_empty(env_sandbox, repo, tmp_path):
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    plan_file = make_plan_file(tmp_path, repo)
+    plan_dir = plan_file.parent
+    state_file = plan_dir / "state.json"
+    state_file.write_text(json.dumps({"tasks": {}}))
+    runner = {"pid": proc.pid, "start_time": 1}
+    (plan_dir / "runner.pid").write_text(json.dumps(runner))
+    res = _plan_stalled(plan_file, plan_dir, state_file, {"tasks": {}}, paths())
+    assert res is not None
+    assert res["state"] == "stalled"
 
 
 def test_plan_wait_bounded(env_sandbox, repo, tmp_path, monkeypatch):
@@ -1578,3 +1700,55 @@ def test_plan_merge_tool_is_destructive_and_merges_ready(env_sandbox, tmp_path, 
     assert res2["stopped_at"]["task"] == "t1"
     assert res2["stopped_at"]["status"] == "not-ready"
     assert len(res2["stopped_at"]["problems"]) > 0
+
+
+def _review_files(handle):
+    d = paths().state_dir / "mcp" / "plan-review"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{handle}.json", d / f"{handle}.stderr"
+
+
+def test_reap_review_marks_dead_runner_failed(env_sandbox):
+    handle = "review-x-1"
+    result_file, stderr_file = _review_files(handle)
+    result_file.write_text(json.dumps({"handle": handle, "plan": "x", "pid": 1, "status": "running"}))
+    with open(stderr_file, "w") as err:
+        proc = subprocess.Popen(["sh", "-c", "echo boom >&2; exit 3"], stderr=err)
+    _reap_review(proc, result_file, stderr_file)
+    data = json.loads(result_file.read_text())
+    assert data["status"] == "failed"
+    assert data["exit_code"] == 3
+    assert data["lines"] == []
+    assert "boom" in data["stderr_tail"]
+    assert data["handle"] == handle
+    res = plan_review_wait(handle, timeout_s=2)
+    assert res["state"] == "failed"
+
+
+def test_reap_review_keeps_finished_result(env_sandbox):
+    handle = "review-x-2"
+    result_file, stderr_file = _review_files(handle)
+    original = {"status": "ok", "exit_code": 0, "lines": ["x"], "stderr_tail": ""}
+    result_file.write_text(json.dumps(original))
+    stderr_file.write_text("")
+    proc = subprocess.Popen(["true"])
+    _reap_review(proc, result_file, stderr_file)
+    assert json.loads(result_file.read_text()) == original
+
+
+def test_plan_review_wait_detects_zombie_runner(env_sandbox):
+    handle = "review-x-3"
+    result_file, _ = _review_files(handle)
+    proc = subprocess.Popen(["true"])
+    try:
+        result_file.write_text(json.dumps({"handle": handle, "plan": "x", "pid": proc.pid, "status": "running"}))
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            text = Path(f"/proc/{proc.pid}/stat").read_text()
+            if text[text.rfind(")") + 1 :].split()[0] == "Z":
+                break
+            time.sleep(0.02)
+        res = plan_review_wait(handle, timeout_s=3)
+        assert res["state"] == "failed"
+    finally:
+        proc.wait()
