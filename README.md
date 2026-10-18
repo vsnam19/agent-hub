@@ -225,6 +225,17 @@ While running, `wait_job`, `plan_wait` and `plan_review_wait` return status `"ru
 
 Only `plan_merge` is destructive (`destructiveHint=True`) because it modifies git branches and checkouts by merging ready tasks. All other tools are read-only (`readOnlyHint=True`) or start detached background jobs.
 
+## Claude Code hooks
+
+When installed as a Claude Code plugin, `agent-hub` registers two lifecycle hooks (`hooks/hooks.json`):
+
+- `SessionStart` (triggered on `startup`, `resume`, `clear`, `compact`): checks for in-flight work in the repository (alive background jobs, active or unmerged plans, and any autopilot resume protocol in `docs/next-phase.md`) and injects it as context for the session. If nothing is running, it remains silent.
+- `Stop`: guards against ending turns while detached background jobs or plan runners are still actively running in the repository, blocking the exit and reminding you to wait with `agent-hub wait -d <wt>` or `agent-hub plan wait <plan>`. To prevent hanging sessions indefinitely, the Stop guard gives up after 20 blocks.
+
+To turn them off:
+- Disable the plugin with `/plugin` disable in Claude Code.
+- Alternatively, disable hooks in Claude Code settings (`settings.json`) by setting `"disableAllHooks": true` or removing the entries in settings.
+
 ## Exit codes
 
 | Exit | Status | Meaning |
