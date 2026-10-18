@@ -1004,3 +1004,20 @@ def test_severity_prefix_word_not_a_file():
     found, _ = skillmine._findings_of(reply)
     assert found == [("low", "agenthub/a.py", "leak")]
     assert found[0][1] != "low"
+
+
+def test_malformed_bullet_counted_unparsed(tmp_path):
+    reply = review_reply(
+        "- agenthub/a.py: race in claim",
+        "- high — agenthub/b.py:1 — valid finding",
+        "- something without severity",
+    )
+    make_job(tmp_path / "state", "20261010-100000-review-aaaa", reply=reply)
+
+    found, unparsed = skillmine._findings_of(reply)
+    assert len(found) == 1
+    assert unparsed == 2
+
+    extract = run_mine(tmp_path)
+    assert extract.unparsed_findings == 2
+    assert skillmine.metrics(extract)["unparsed_findings"] == 2
