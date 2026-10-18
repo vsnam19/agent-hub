@@ -52,6 +52,8 @@ def triage_task(
     inputs = triageinputs.collect(jobs, worktree, head)
     if inputs is None:
         return None
+    if inputs.review_job and not inputs.findings:
+        return _blocked(task, tstate, "review requested changes but no finding could be parsed")
 
     plan_dir = plan.path.parent
     task_brief = task.brief.read_text() if task.brief and task.brief.is_file() else ""
