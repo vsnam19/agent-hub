@@ -829,6 +829,9 @@ def plan_status(
 
     res: dict[str, Any] = {"plan": plan.slug, "tasks": tasks}
 
+    report_file = plan_dir / "report.md"
+    res["report"] = report_file.read_text(encoding="utf-8") if report_file.is_file() else ""
+
     if trail:
         trail_file = plan_dir / "decisions.tsv"
         if not trail_file.is_file():

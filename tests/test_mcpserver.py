@@ -1375,6 +1375,33 @@ def test_plan_stalled_when_tasks_empty(env_sandbox, repo, tmp_path):
     assert res["state"] == "stalled"
 
 
+def test_plan_status_includes_report_text(env_sandbox, repo, tmp_path):
+    plan_file = make_plan_file(tmp_path, repo)
+    plan_dir = plan_file.parent
+    (plan_dir / "state.json").write_text(json.dumps({"tasks": {}}))
+    report_text = "# Plan report: plan-1\n\n## Tasks\n- t1: done\n"
+    (plan_dir / "report.md").write_text(report_text, encoding="utf-8")
+
+    res = plan_status(str(plan_file))
+
+    assert res["report"] == report_text
+    assert res["plan"] == "plan-1"
+    assert "trail" not in res
+
+
+def test_plan_status_report_empty_when_absent(env_sandbox, repo, tmp_path):
+    plan_file = make_plan_file(tmp_path, repo)
+    plan_dir = plan_file.parent
+    (plan_dir / "state.json").write_text(json.dumps({"tasks": {}}))
+    assert not (plan_dir / "report.md").exists()
+
+    res = plan_status(str(plan_file))
+
+    assert res["report"] == ""
+    assert res["plan"] == "plan-1"
+    assert len(res["tasks"]) == 2
+
+
 def test_plan_wait_bounded(env_sandbox, repo, tmp_path, monkeypatch):
     assert clamp_timeout(0) == 1
     assert clamp_timeout(-10) == 1
