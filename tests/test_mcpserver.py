@@ -382,16 +382,41 @@ def test_wait_job_reports_dead_process(env_sandbox, repo):
     assert res_async["reason"] == f"job process {proc.pid} is not running; result.json was never finished"
 
 
+def _git_run_with_retry(
+    cmd: list[str],
+    cwd: Path | str,
+    retries: int = 5,
+    delay: float = 0.05,
+) -> subprocess.CompletedProcess:
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
+    full_cmd = ["git", "-c", "core.fsmonitor=false", *cmd]
+    for attempt in range(retries + 1):
+        res = subprocess.run(
+            full_cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        if res.returncode == 0:
+            return res
+        if "index.lock" in res.stderr and attempt < retries:
+            time.sleep(delay)
+            continue
+        res.check_returncode()
+    return res
+
+
 def git_head(repo):
-    res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True)
+    res = _git_run_with_retry(["rev-parse", "HEAD"], cwd=repo)
     return res.stdout.strip()
 
 
 def set_repo_gates(repo, gates):
     (repo / ".agent-hub").mkdir(exist_ok=True)
     (repo / ".agent-hub" / "config.toml").write_text(f"gates = {json.dumps(gates)}\n")
-    subprocess.run(["git", "add", ".agent-hub"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "repo gates"], cwd=repo, check=True)
+    _git_run_with_retry(["add", ".agent-hub"], cwd=repo)
+    _git_run_with_retry(["commit", "-q", "-m", "repo gates"], cwd=repo)
 
 
 def add_job_record(
