@@ -593,7 +593,13 @@ def rejected_context(plan_dir: Path, task_name: str) -> str:
     return f"{heading}\n" + "\n".join(lines) + "\n"
 
 
-def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], datetime]) -> dict:
+def review_task(
+    plan: Plan,
+    task: Task,
+    tstate: TaskState,
+    now: Callable[[], datetime],
+    stop: Callable[[], bool] = lambda: False,
+) -> dict:
     """Gate the committed HEAD of a done task, then run the plan's review role on it, unless HEAD is already up to
     date (the work tree is clean, readiness passes, a passing gate job on HEAD covers every command of task.gate, and
     the newest ok review of HEAD is an independent approval). A failed gate skips the review. Returns
@@ -641,6 +647,9 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
     except subprocess.CalledProcessError:
         return {**failed, "reason": f"no merge base of HEAD and {base}"}
 
+    if stop():
+        return {**failed, "reason": "cancelled", "cancelled": True}
+
     try:
         gate = run_gate_job(paths(), repo, task.gate, base, since, now)
     except ConfigError as e:
@@ -659,6 +668,15 @@ def review_task(plan: Plan, task: Task, tstate: TaskState, now: Callable[[], dat
             "review": "failed",
             "job": gate["id"],
             "reason": f"no reviewer different from {implementer}",
+        }
+
+    if stop():
+        return {
+            **failed,
+            "gate": "ok",
+            "job": gate["id"],
+            "reason": "cancelled",
+            "cancelled": True,
         }
 
     review = run_job(

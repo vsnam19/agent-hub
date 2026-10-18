@@ -1254,25 +1254,49 @@ def _cmd_plan(args) -> int:
                 return 1
 
             all_approved = True
-            for task in tasks:
-                tstate = state.task(task.name)
-                mstate = _merge_state(plan, tstate)
-                if mstate == "merged":
-                    print(_safe(f"{task.name} already merged"))
-                    continue
-                if mstate == "gone":
-                    print(_safe(f"{task.name} skipped: branch deleted before merge"))
-                    all_approved = False
-                    continue
-                result = review_task(plan, task, tstate, _now)
-                if result.get("up_to_date"):
-                    print(_safe(f"{task.name} up to date (review job={result['job']})"))
-                    continue
-                all_approved = all_approved and result["review"] == "approve"
-                print(_safe(f"{task.name} gate={result['gate']} review={result['review']} job={result['job']}"))
-                if result["reason"]:
-                    print(_safe(result["reason"]), file=sys.stderr)
-            return 0 if all_approved else 1
+            interrupted = False
+
+            def _handle_signal(signum, frame):
+                nonlocal interrupted
+                interrupted = True
+
+            old_sigint = signal.signal(signal.SIGINT, _handle_signal)
+            old_sigterm = signal.signal(signal.SIGTERM, _handle_signal)
+            try:
+                for task in tasks:
+                    tstate = state.task(task.name)
+                    mstate = _merge_state(plan, tstate)
+                    if mstate == "merged":
+                        print(_safe(f"{task.name} already merged"))
+                        if interrupted:
+                            print("cancelled", file=sys.stderr)
+                            return 130
+                        continue
+                    if mstate == "gone":
+                        print(_safe(f"{task.name} skipped: branch deleted before merge"))
+                        all_approved = False
+                        if interrupted:
+                            print("cancelled", file=sys.stderr)
+                            return 130
+                        continue
+                    result = review_task(plan, task, tstate, _now, stop=lambda: interrupted)
+                    if interrupted or result.get("cancelled"):
+                        print(_safe(f"{task.name} gate={result['gate']} review={result['review']} job={result['job']}"))
+                        if result["reason"]:
+                            print(_safe(result["reason"]), file=sys.stderr)
+                        print("cancelled", file=sys.stderr)
+                        return 130
+                    if result.get("up_to_date"):
+                        print(_safe(f"{task.name} up to date (review job={result['job']})"))
+                        continue
+                    all_approved = all_approved and result["review"] == "approve"
+                    print(_safe(f"{task.name} gate={result['gate']} review={result['review']} job={result['job']}"))
+                    if result["reason"]:
+                        print(_safe(result["reason"]), file=sys.stderr)
+                return 0 if all_approved else 1
+            finally:
+                signal.signal(signal.SIGINT, old_sigint)
+                signal.signal(signal.SIGTERM, old_sigterm)
 
         return _run_with_result(result_path, _do_review)
 
