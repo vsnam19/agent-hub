@@ -45,7 +45,10 @@ def cascade(plan: Plan, state: State, task_name: str) -> dict[str, str]:
     dependents = [
         t
         for t in ordered
-        if t.name != task_name and task_name in get_transitive_deps(t.name) and state.task(t.name).status == "done"
+        if t.name != task_name
+        and (t.kind or t.role) == "implement"
+        and task_name in get_transitive_deps(t.name)
+        and state.task(t.name).status == "done"
     ]
 
     for dep in dependents:

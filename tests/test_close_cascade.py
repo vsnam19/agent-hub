@@ -457,7 +457,8 @@ def test_cascade_blocks_close_when_non_implement_task_blocked(tmp_path: Path):
     state.task("task-a").branch = "orch/testslug/task-a"
     state.task("task-a").worktree = str(wt_a)
 
-    state.task("gate-task").status = "done"
+    state.task("gate-task").status = "blocked"
+    state.task("gate-task").reason = "cascade failed from task-a: merge error"
     state.task("gate-task").branch = "orch/testslug/gate-task"
     state.task("gate-task").worktree = str(wt_g)
     state.save()
@@ -468,8 +469,6 @@ def test_cascade_blocks_close_when_non_implement_task_blocked(tmp_path: Path):
 
     subprocess.run(["git", "merge", "--no-edit", "master"], cwd=wt_a, check=True)
     subprocess.run(["git", "merge", "--no-edit", "master"], cwd=wt_g, check=True)
-
-    (wt_g / "mod.py").write_text("def run(): return 'dirty'\n", encoding="utf-8")
 
     run_calls = 0
 
@@ -513,3 +512,65 @@ def test_cascade_blocks_close_when_non_implement_task_blocked(tmp_path: Path):
     # gate-task being blocked by cascade MUST cause res.ok to be False!
     assert res.ok is False
     assert state.task("gate-task").status == "blocked"
+
+
+def test_cascade_skips_non_implement_dependents(tmp_path: Path):
+    repo_dir = tmp_path / "repo"
+    make_repo(repo_dir, default="master", branch=None)
+
+    wt_dir = tmp_path / "worktrees"
+    wt_dir.mkdir()
+
+    tasks = [
+        Task(name="task-a", role="implement"),
+        Task(name="task-impl", role="implement", depends_on=["task-a"]),
+        Task(name="task-gate", role="gate", depends_on=["task-a"]),
+        Task(name="task-review", role="review", depends_on=["task-a"]),
+        Task(name="task-kind-impl", role="custom", kind="implement", depends_on=["task-a"]),
+        Task(name="task-kind-gate", role="implement", kind="gate", depends_on=["task-a"]),
+    ]
+
+    for t in tasks:
+        wt = wt_dir / t.name
+        subprocess.run(
+            ["git", "worktree", "add", "-b", f"orch/testslug/{t.name}", str(wt), "master"],
+            cwd=repo_dir,
+            check=True,
+            capture_output=True,
+        )
+
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text("{}", encoding="utf-8")
+    plan = Plan(
+        goal="Test cascade skips non-implement",
+        repo=repo_dir,
+        base="master",
+        slug="testslug",
+        tasks=tasks,
+        path=plan_file,
+    )
+    state = load_or_init(plan)
+    for t in tasks:
+        state.task(t.name).status = "done"
+        state.task(t.name).branch = f"orch/testslug/{t.name}"
+        state.task(t.name).worktree = str(wt_dir / t.name)
+    state.save()
+
+    wt_a = wt_dir / "task-a"
+    (wt_a / "a.txt").write_text("from a\n", encoding="utf-8")
+    subprocess.run(["git", "add", "a.txt"], cwd=wt_a, check=True)
+    subprocess.run(["git", "commit", "-m", "commit in a"], cwd=wt_a, check=True)
+
+    outcome = cascade(plan, state, "task-a")
+    assert "task-impl" in outcome
+    assert outcome["task-impl"] == "merged"
+    assert "task-kind-impl" in outcome
+    assert outcome["task-kind-impl"] == "merged"
+    assert "task-gate" not in outcome
+    assert "task-review" not in outcome
+    assert "task-kind-gate" not in outcome
+    assert (wt_dir / "task-impl" / "a.txt").read_text(encoding="utf-8") == "from a\n"
+    assert (wt_dir / "task-kind-impl" / "a.txt").read_text(encoding="utf-8") == "from a\n"
+    assert not (wt_dir / "task-gate" / "a.txt").exists()
+    assert not (wt_dir / "task-review" / "a.txt").exists()
+    assert not (wt_dir / "task-kind-gate" / "a.txt").exists()
