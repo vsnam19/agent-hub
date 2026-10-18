@@ -1,6 +1,6 @@
 # Follow-ups
 
-Open items found by reviews and runs, not yet scheduled. Small, well-specified ones suit `implement-small` (gwen) on a
+Open items found by reviews and runs, not yet scheduled. Audited against master on 2026-10-18: struck-through items are fixed. Small, well-specified ones suit `implement-small` (gwen) on a
 small repository, or `implement` here (D-079).
 
 | Found | Item | Source |
@@ -17,14 +17,14 @@ small repository, or `implement` here (D-079).
 | 2026-10-13 | First real `skills weekly` (report `~/.local/state/agent-hub/skills/2026-10-13/report.md`, branch `learned/2026-10-13` kept in agent-plugins): stopped correctly at eval (gate-before-review: with 1.00 = without 1.00). Small tasks: (1) report lists bumped versions under "Released" although nothing was released → "bumped (not released)"; (2) 189 unparsed findings — parse `- **medium**: \`file:line\` …` and similar formats; (3) drop the 1× categories from metrics, show groups; (4) drafting brief: each skill's positive eval case must be one the no-plugin baseline fails (state it in the case), and eval every drafted skill before deciding; (5) MCP proposal `ast-guard` for the owner | weekly 2026-10-13 |
 | 2026-10-13 | `agent-hub run --role review -d <wt>` does not skip links that implemented the work tree (only plan mode passes `--exclude`); `ready` catches it afterwards ("reviewer is the implementer"), wasting a review. Small task: a review job excludes every implementer of the work tree by default (`agent:model`, effort ignored) | plan merge on plan-close-fix2 |
 | 2026-10-14 | Phase F lows (review on `orch/phasef-fix10/gate-pid`, approve): (1) `run_gate_job`/`run_job` announce before `with _Cancel()` installs SIGTERM handlers — a cancel in that gap kills without `_finish`; (2) `_finish` read-check-write of `result.json` is not atomic against a fallback cancel write; (3) `tests/test_gate_cmd.py` cancel test sends SIGTERM to the pytest process itself and reads capsys from a thread — flaky risk, rewrite with a child process. Small tasks for the techlead loop (E8) | Phase F review |
-| 2026-10-14 | Phase F F4/F5 lows (review on `orch/phasef2-fix3/mcp-manifest`, approve): `plan_review` parent "running" write races the child's `--result` write; `plan_review` child not reaped (no wait thread, unlike `plan_run`); `plan_merge` with no done tasks returns the same shape as "nothing left" while the CLI exits 1; `plan_wait` needs non-empty tasks and does not detect a dead runner. Small tasks for E8 | Phase F review |
+| 2026-10-14 | Phase F F4/F5 lows (review on `orch/phasef2-fix3/mcp-manifest`, approve): ~~`plan_review` parent "running" write races the child's `--result` write; `plan_review` child not reaped; `plan_wait` does not detect a dead runner~~ (fixed: plan `deadlock`, E8 `_spawn_result_cli` writes the info file with `open(..., "x")`); still open: `plan_merge` with no done tasks returns the same shape as "nothing left" while the CLI exits 1. Small tasks for E8 | Phase F review |
 - **MCP serverInfo version is empty** (2026-10-14): `initialize` returns `{"name": "agent-hub", "version": ""}`; pass the package version to `MCPServer`. Low.
 - **tasksize counts dotted module names as files** (2026-10-14): a brief line "Stdlib plus `agenthub.triage` and `agenthub.planstate`" under Expected output counted 4 files for a 2-file task (E8 draft, `triage-apply`). Count only backticked spans with a `/` or a file extension. Low.
 - **gateguard false positives** (2026-10-14, E8 review): (1) `skip-added` fires on the formatter comment `# fmt: skip`
   (`gateguard.py:442` regex `\bskip\b`) — ignore `# fmt: skip`/`# fmt: off` comments; (2) `assert-removed` fired on
   `test_server_lists_tools` in `tests/test_mcpserver.py` when the task only added two names to a `set(...) == {…}`
   literal — `_weakened` should not treat a grown expected-literal as weakening. Low; both were read and judged benign.
-- **`plan_review` unreaped child hangs the director for hours — HIGH** (2026-10-14): the MCP server starts
+- ~~**`plan_review` unreaped child hangs the director for hours — HIGH**~~ **Fixed 2026-10-14 (plan `deadlock`).** (2026-10-14): the MCP server starts
   `agenthub plan review` without a wait thread, so the finished runner stays a zombie until the server exits. A director
   waiting with `while kill -0 <pid>` (zombies answer `kill -0`) never wakes. Seen at least 3 times: E8 review finished
   13:20, session idle until /exit at 21:12 (session 4040f7e7). Fix: reap the child (wait thread as in `plan_run`) and
@@ -55,14 +55,14 @@ a turn. Items:
   result file or the wait tool, and cover dead processes"). The skill lives in `agent-plugins`.
 - **Resume notes:** a resume note must name the last review/plan result file, so a new session reads finished
   results instead of re-running (E8 review was re-run although its result had been on disk since 13:20).
-- **agy OAuth expiry is classified `failed`, not auth (2026-10-14):** with an expired agy login every run prints an
+- ~~**agy OAuth expiry is classified `failed`, not auth**~~ **Fixed 2026-10-14 (`fix/agy-ssh-auth`, `agents/agy` maps the markers to AUTH).** (2026-10-14): with an expired agy login every run prints an
   OAuth URL, `Waiting for authentication (timeout 60s)...`, `Error: authentication timed out.` and is recorded as
   `failed` — so plan tasks retry twice and escalate, and reviews end `failed` (3 E8 reviews, every `implement`
   attempt of plan `deadlock`). Map "authentication failed or timed out" to the auth outcome (cooldown the agy links,
   fall through the chain, no escalation). **Root cause (verified):** under SSH (`SSH_CONNECTION`/`SSH_TTY` set) agy
   uses empty file-based token storage instead of the keyring; blanking those vars makes `agy -p` work. Fix task
   `agy-ssh-auth` (adapter blanks them + auth markers). No re-login needed.
-- **Race in stalled detection (found in review of plan `deadlock`):** MCP `plan_run` returned before the new runner
+- ~~**Race in stalled detection**~~ **Fixed (plan `deadlock`, `plan-run-claims`; E8: `plan_run` refuses while a verified runner lives).** MCP `plan_run` returned before the new runner
   wrote `runner.pid`, so `plan_wait` on a resumed plan saw the previous runner's dead pid → false `stalled`. Fix
   task `plan-run-claims` writes `runner.pid` in `plan_run` right after spawn.
 - **agy keyring override lows (review `20261014-154835-review-85cf`, approve):** SSH vars are blanked, not removed
