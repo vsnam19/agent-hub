@@ -2,13 +2,14 @@ import fcntl
 import json
 import os
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 
 import pytest
 
 import agenthub.triagerun
-from agenthub.cli import UsageError, _claim_runner, _task_head, main
+from agenthub.cli import UsageError, _claim_runner, _live_runner, _task_head, main
 from agenthub.guards import GuardError, inspect
 from agenthub.plan import load as load_plan
 from agenthub.planstate import load_or_init
@@ -222,9 +223,10 @@ def test_triage_refuses_live_runner(env_sandbox, tmp_path, monkeypatch, capsys):
     assert saved_state["runner"] == {"pid": other_pid, "start_time": 12345}
 
 
-def test_triage_claims_runner(env_sandbox, tmp_path, monkeypatch):
-    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+def test_triage_does_not_claim_runner(env_sandbox, tmp_path, monkeypatch):
+    plan_file, _state = make_gated_plan_run(env_sandbox, tmp_path)
     state_file = plan_file.parent / "state.json"
+    plan_dir = plan_file.parent
 
     data = json.loads(state_file.read_text())
     data["runner"] = {"pid": 99999, "start_time": 12345}
@@ -233,6 +235,10 @@ def test_triage_claims_runner(env_sandbox, tmp_path, monkeypatch):
     recorded_pid = os.getpid()
     recorded_time = 77777
     monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: recorded_time if pid == recorded_pid else None)
+    monkeypatch.setattr(agenthub.cli, "is_running", lambda pid: False if pid == 99999 else True)
+
+    runner_pid_file = plan_file.parent / "runner.pid"
+    runner_pid_file.unlink(missing_ok=True)
 
     triage_calls = 0
 
@@ -240,10 +246,9 @@ def test_triage_claims_runner(env_sandbox, tmp_path, monkeypatch):
         nonlocal triage_calls
         triage_calls += 1
         saved_state = json.loads(state_file.read_text())
-        assert saved_state["runner"] == {"pid": recorded_pid, "start_time": recorded_time}
+        assert saved_state.get("runner") != {"pid": recorded_pid, "start_time": recorded_time}
         runner_pid_file = plan_file.parent / "runner.pid"
-        assert runner_pid_file.is_file()
-        assert json.loads(runner_pid_file.read_text()) == {"pid": recorded_pid, "start_time": recorded_time}
+        assert not runner_pid_file.is_file()
         return None
 
     monkeypatch.setattr(agenthub.triagerun, "triage_task", fake_triage)
@@ -252,9 +257,9 @@ def test_triage_claims_runner(env_sandbox, tmp_path, monkeypatch):
     assert rc == 0
     assert triage_calls > 0
 
-    # If the recorded runner is already this process, triage succeeds and claims it again
-    rc2 = main(["plan", "triage", str(plan_file)])
-    assert rc2 == 0
+    saved_state = json.loads(state_file.read_text())
+    assert saved_state.get("runner") != {"pid": recorded_pid, "start_time": recorded_time}
+    assert not (plan_dir / "runner.pid").is_file()
 
 
 def test_zombie_runner_is_not_alive(env_sandbox, tmp_path, monkeypatch):
@@ -283,7 +288,7 @@ def test_zombie_runner_is_not_alive(env_sandbox, tmp_path, monkeypatch):
         nonlocal triage_calls
         triage_calls += 1
         saved_state = json.loads(state_file.read_text())
-        assert saved_state["runner"] == {"pid": my_pid, "start_time": my_start_time}
+        assert saved_state.get("runner") != {"pid": my_pid, "start_time": my_start_time}
         return None
 
     monkeypatch.setattr(agenthub.triagerun, "triage_task", fake_triage)
@@ -312,7 +317,7 @@ def test_claim_uses_lock_file(env_sandbox, tmp_path, monkeypatch):
 
     lock_file = plan_dir / "runner.lock"
     assert lock_file.is_file()
-    assert any(op == fcntl.LOCK_EX for _, op in flock_calls)
+    assert any(op == (fcntl.LOCK_EX | fcntl.LOCK_NB) for _, op in flock_calls)
 
 
 def test_empty_worktree_counts_as_skipped(env_sandbox, tmp_path, monkeypatch, capsys):
@@ -542,7 +547,7 @@ def test_claim_refreshes_tasks_from_disk(env_sandbox, tmp_path, monkeypatch):
     assert saved["runner"] == {"pid": my_pid, "start_time": my_time}
 
 
-def test_claim_without_plan_checks_state_as_given(env_sandbox, tmp_path, monkeypatch):
+def test_claim_without_plan_checks_live_runner_on_disk(env_sandbox, tmp_path, monkeypatch):
     plan_file, _state = make_gated_plan_run(env_sandbox, tmp_path)
     plan_dir = plan_file.parent
     state_file = plan_dir / "state.json"
@@ -565,48 +570,144 @@ def test_claim_without_plan_checks_state_as_given(env_sandbox, tmp_path, monkeyp
     monkeypatch.setattr(agenthub.cli, "is_running", lambda pid: True)
     monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: my_time if pid == my_pid else live_start)
 
-    # Without plan=..., checks s.runner as given, ignoring disk state
-    _claim_runner(s, plan_dir)
-    assert s.runner == {"pid": my_pid, "start_time": my_time}
+    # Even without plan=..., _live_runner checks disk and refuses
+    with pytest.raises(UsageError, match=f"plan runner {live_pid} is still running; wait or cancel it first"):
+        _claim_runner(s, plan_dir)
 
 
-def test_triage_releases_runner_claim(env_sandbox, tmp_path, monkeypatch):
-    plan_file, state = make_gated_plan_run(env_sandbox, tmp_path)
+def test_live_runner(tmp_path, monkeypatch):
+    # Non-existent file
+    assert _live_runner(tmp_path) is None
+
+    # Invalid JSON
+    state_file = tmp_path / "state.json"
+    state_file.write_text("not json")
+    assert _live_runner(tmp_path) is None
+
+    # Missing runner
+    state_file.write_text(json.dumps({"tasks": {}}))
+    assert _live_runner(tmp_path) is None
+
+    # Runner is this process (should return None)
+    my_pid = os.getpid()
+    state_file.write_text(json.dumps({"runner": {"pid": my_pid, "start_time": 100}}))
+    monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: 100)
+    monkeypatch.setattr(agenthub.cli, "is_running", lambda pid: True)
+    assert _live_runner(tmp_path) is None
+
+    # Runner is other dead process
+    other_pid = os.getpid() + 1000
+    state_file.write_text(json.dumps({"runner": {"pid": other_pid, "start_time": 200}}))
+    monkeypatch.setattr(agenthub.cli, "is_running", lambda pid: False)
+    assert _live_runner(tmp_path) is None
+
+    # Runner start_time mismatch
+    monkeypatch.setattr(agenthub.cli, "is_running", lambda pid: True)
+    monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: 300)
+    assert _live_runner(tmp_path) is None
+
+    # Runner verified alive
+    monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: 200)
+    assert _live_runner(tmp_path) == other_pid
+
+
+def test_triage_refusal_leaves_state_untouched(env_sandbox, tmp_path, monkeypatch, capsys):
+    plan_file, _state = make_gated_plan_run(env_sandbox, tmp_path)
     state_file = plan_file.parent / "state.json"
-    plan_dir = plan_file.parent
+    data = json.loads(state_file.read_text())
+    other_pid = os.getpid() + 1000
+    data["runner"] = {"pid": other_pid, "start_time": 12345}
+    data["tasks"]["t1"]["status"] = "running"
+    data["tasks"]["t1"]["attempts"] = [{"job": "", "status": "running", "exit_code": None, "gate_touched": []}]
+    raw_bytes = json.dumps(data, indent=2).encode("utf-8") + b"\n"
+    state_file.write_bytes(raw_bytes)
 
-    recorded_pid = os.getpid()
-    recorded_time = 77777
-    monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: recorded_time if pid == recorded_pid else None)
+    monkeypatch.setattr(agenthub.cli, "start_time", lambda pid: 12345 if pid == other_pid else None)
+    monkeypatch.setattr(agenthub.cli, "is_running", lambda pid: True if pid == other_pid else False)
 
-    claimed_during_triage = None
+    rc = main(["plan", "triage", str(plan_file)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert f"agent-hub: plan runner {other_pid} is still running; wait or cancel it first" in err
+    assert state_file.read_bytes() == raw_bytes
+
+
+def test_run_refuses_while_triage_holds_lock(env_sandbox, tmp_path, monkeypatch, capsys):
+    plan_file, _state = make_gated_plan_run(env_sandbox, tmp_path)
+
+    run_rc = None
+    run_err = None
 
     def fake_triage(plan, task, tstate, jobs, head, now):
-        nonlocal claimed_during_triage
-        disk_state = json.loads(state_file.read_text())
-        claimed_during_triage = disk_state.get("runner")
+        nonlocal run_rc, run_err
+        run_rc = main(["plan", "run", str(plan_file)])
+        run_err = capsys.readouterr().err
         return None
 
     monkeypatch.setattr(agenthub.triagerun, "triage_task", fake_triage)
 
     rc = main(["plan", "triage", str(plan_file)])
     assert rc == 0
-    assert claimed_during_triage == {"pid": recorded_pid, "start_time": recorded_time}
+    assert run_rc == 2
+    assert "agent-hub: plan is busy (triage in progress); try again later" in run_err
 
-    # After triage finishes, claim is released
-    saved_state = json.loads(state_file.read_text())
-    assert saved_state["runner"] == {}
-    assert not (plan_dir / "runner.pid").is_file()
 
-    # Also releases on error
-    def failing_triage(plan, task, tstate, jobs, head, now):
-        raise RuntimeError("simulated triage crash")
+def test_triage_stops_on_signal(env_sandbox, tmp_path, monkeypatch):
+    plan_file, _state = make_gated_plan_run(env_sandbox, tmp_path)
+    state_file = plan_file.parent / "state.json"
 
-    monkeypatch.setattr(agenthub.triagerun, "triage_task", failing_triage)
+    triage_calls = []
 
-    with pytest.raises(RuntimeError, match="simulated triage crash"):
-        main(["plan", "triage", str(plan_file)])
+    def fake_triage(plan, task, tstate, jobs, head, now):
+        triage_calls.append(task.name)
+        if task.name == "t1":
+            tstate.status = "blocked"
+            tstate.reason = "triage job cancelled"
+            os.kill(os.getpid(), signal.SIGTERM)
+            return {
+                "task": task.name,
+                "status": "blocked",
+                "reason": "triage job cancelled",
+            }
+        return None
 
-    saved_state_after_error = json.loads(state_file.read_text())
-    assert saved_state_after_error["runner"] == {}
-    assert not (plan_dir / "runner.pid").is_file()
+    monkeypatch.setattr(agenthub.triagerun, "triage_task", fake_triage)
+
+    rc = main(["plan", "triage", str(plan_file)])
+    assert rc == 130
+    assert triage_calls == ["t1"]
+
+    saved = json.loads(state_file.read_text())
+    assert saved["tasks"]["t1"]["status"] == "done"
+    assert saved["tasks"]["t1"]["reason"] == ""
+    assert saved["tasks"]["t2"]["status"] == "done"
+
+
+def test_cancelled_triage_job_stops_loop(env_sandbox, tmp_path, monkeypatch):
+    plan_file, _state = make_gated_plan_run(env_sandbox, tmp_path)
+    state_file = plan_file.parent / "state.json"
+
+    triage_calls = []
+
+    def fake_triage(plan, task, tstate, jobs, head, now):
+        triage_calls.append(task.name)
+        if task.name == "t1":
+            tstate.status = "blocked"
+            tstate.reason = "triage job cancelled"
+            return {
+                "task": task.name,
+                "status": "blocked",
+                "reason": "triage job cancelled",
+            }
+        return None
+
+    monkeypatch.setattr(agenthub.triagerun, "triage_task", fake_triage)
+
+    rc = main(["plan", "triage", str(plan_file)])
+    assert rc == 130
+    assert triage_calls == ["t1"]
+
+    saved = json.loads(state_file.read_text())
+    assert saved["tasks"]["t1"]["status"] == "done"
+    assert saved["tasks"]["t1"]["reason"] == ""
+    assert saved["tasks"]["t2"]["status"] == "done"
