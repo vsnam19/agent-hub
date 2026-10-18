@@ -7,6 +7,18 @@ every task is merged or a limit stops you (quota, a decision only the owner can 
 running, nothing pushed. agent-hub v0.10.1 installed (the CLI is an editable install of this repo, so master's code
 runs; the MCP server is the plugin cache 0.10.1 — use the **CLI** for `plan triage/close`).
 
+**Progress 2026-10-19 (session cut by claude:opus quota, resets 00:50 +07):** plan.json + 19 briefs written
+(`~/.local/state/agent-hub/plans/followups-1/`), `plan run` done (19/19). Review rounds (round briefs `briefs/*-rN.md`,
+rejections `fixes/*-rejected.md`). **Approved on HEAD:** pool-gemini-id, network-transient, review-excludes-implementers
+(fail-closed rule, D-103 to write), plan-review-signal, wait-timeout-cap, dead-job-helper, cancel-before-announce
+(cascaded), gate-cmd-cancel-test, plan-merge-empty, mcp-server-version, tasksize-dotted-names, flaky-index-lock,
+agy-keyring-lows, skills-weekly-lows, plugin-hooks (needs cascade from hook-cli + re-review). **Open:**
+gateguard-fmt-skip r3 (re-review; rejections in fixes/), hook-cli r2 (re-review), triage-skip-merged r3 and
+close-cascade r2 (fix jobs were running — `agent-hub wait -d .worktrees/followups-1-<task>`, read diff, re-review).
+Decisions to log: implementers = every implement job on the work tree (fail-closed); cascade uses plain git merge
+(astmerge stays manual). Follow-up: real cancel gap between gate stdout creation and `on_start` pgid (review
+20261018-154041-review-09d2 low). Then `scripts/cascade.sh followups-1 plugin-hooks hook-cli`, `ready` all, merge.
+
 **Current work: plan `followups-1`** — spec `docs/superpowers/specs/2026-10-18-followups-1.md` (19 tasks; 18–19 are
 the owner's new Claude Code hooks: SessionStart context and a Stop guard while jobs run — they need a release to
 take effect, so after merging them ask the owner whether to release).
