@@ -1393,6 +1393,7 @@ def _cmd_plan(args) -> int:
             _check_plan_skills(plan)
 
             from agenthub import triagerun
+            from agenthub.cascade import cascade
             from agenthub.planclose import close
             from agenthub.planrun import review_task
             from agenthub.planstate import load_or_init
@@ -1434,6 +1435,15 @@ def _cmd_plan(args) -> int:
                         return [err]
                     return readiness(list_jobs(paths(), 100000), Path(tstate.worktree), head)
 
+                close_kwargs = {}
+                try:
+                    import inspect
+
+                    if "cascade" in inspect.signature(close).parameters:
+                        close_kwargs["cascade"] = cascade
+                except (ValueError, TypeError):
+                    pass
+
                 result = close(
                     plan,
                     state,
@@ -1442,6 +1452,7 @@ def _cmd_plan(args) -> int:
                     triage=triage,
                     ready=ready,
                     max_rounds=args.rounds,
+                    **close_kwargs,
                 )
                 print(_safe(str(result.report)))
                 return 0 if result.ok else 1
