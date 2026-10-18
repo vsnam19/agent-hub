@@ -300,6 +300,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("mcp", help="run the MCP server over stdio")
 
+    hook = sub.add_parser("hook", help="Claude Code session hooks")
+    hook.add_argument("event", choices=["session-start", "stop"], help="hook event name")
+
     return parser
 
 
@@ -321,6 +324,7 @@ def main(argv: list[str] | None = None) -> int:
             "hub": _cmd_hub,
             "skills": _cmd_skills,
             "mcp": _cmd_mcp,
+            "hook": _cmd_hook,
         }[args.command]
         return handler(args)
     except SystemExit as e:  # --help
@@ -1497,3 +1501,9 @@ def _cmd_mcp(args) -> int:
 
     run_stdio()
     return 0
+
+
+def _cmd_hook(args) -> int:
+    from agenthub import hooks
+
+    return hooks.main(args.event, sys.stdin, sys.stdout)
