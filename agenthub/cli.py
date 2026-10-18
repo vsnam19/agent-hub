@@ -18,7 +18,7 @@ from agenthub import guards
 from agenthub.agents import registry
 from agenthub.brief import BriefError, order_table
 from agenthub.config import ConfigError, parse_duration, paths, role_kind
-from agenthub.jobs import get_job, list_jobs
+from agenthub.jobs import dead_job_result, get_job, list_jobs
 from agenthub.orchestrate import EXIT, RunArgs, readiness, run_gate_job, run_job, skills_hint
 from agenthub.plan import PlanError
 from agenthub.plan import load as load_plan
@@ -979,7 +979,11 @@ def _cmd_wait(args) -> int:
                 pass
             if result.get("status") == "running":
                 pid, _ = read_pid_file(pid_file)
-                print(_safe(f"job process {pid} is not running; result.json was never finished"))
+                dead = dead_job_result(result, pid)
+                if args.json:
+                    print(json.dumps(dead, indent=2))
+                else:
+                    print(_safe(dead["reason"]))
                 return 1
             if args.json:
                 print(json.dumps(result, indent=2))
