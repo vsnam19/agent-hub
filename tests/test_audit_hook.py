@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
+import io
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from agenthub.audit import writer
 from agenthub.audit.writer import audit_root, event_hash
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -460,4 +466,129 @@ def test_unknown_host_and_event_exit_zero(tmp_path: Path) -> None:
         assert res_agy.stdout == "{}"
         assert res_agy.stderr == ""
 
+    assert _read_day_events(tmp_path) == []
+
+
+def _load_audit_hook() -> Any:
+    spec = importlib.util.spec_from_file_location("audit_hook", HOOK_SCRIPT)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_timeout_records_pending_for_remaining_events(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    audit_hook = _load_audit_hook()
+    assert hasattr(audit_hook, "HookTimeout"), "HookTimeout must be defined in hooks/audit-hook.py"
+    assert issubclass(audit_hook.HookTimeout, Exception)
+    assert not issubclass(audit_hook.HookTimeout, SystemExit)
+
+    monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path))
+
+    outward_payload = {
+        **REAL_CLAUDE_POST_TOOL_USE_PAYLOAD,
+        "tool_input": {"command": "cd /tmp/x && git push origin main", "description": "Push branch"},
+    }
+    trace = {
+        "AGENT_HUB_TRACE_PLAN": "phase-g",
+        "AGENT_HUB_TRACE_TASK": "audit-hook-entry",
+        "AGENT_HUB_TRACE_JOB": "20261019-022237-implement-hard-1f02",
+        "AGENT_HUB_TRACE_ATTEMPT": "1",
+        "AGENT_HUB_TRACE_ROLE": "implement-hard",
+    }
+    for k, v in trace.items():
+        monkeypatch.setenv(k, v)
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(outward_payload)))
+
+    real_append = writer._append_locked
+    appended: list[dict[str, Any]] = []
+
+    def timeout_append(event: Any, root: Path) -> None:
+        appended.append(event)
+        # Simulate timeout during the first write
+        audit_hook._alarm_handler(signal.SIGALRM, None)
+        real_append(event, root)
+
+    monkeypatch.setattr(writer, "_append_locked", timeout_append)
+
+    rc = audit_hook.main(["--host", "claude", "PostToolUse"])
+    assert rc == 0
+
+    # Only first event attempted to append; subsequent event skipped write due to timeout
+    assert len(appended) == 1
+
+    # Neither event was written to the day file
+    assert _read_day_events(tmp_path) == []
+
+    # Both events were recorded in pending file with "hook timeout"
+    pending_file = tmp_path / "audit-pending-gap.jsonl"
+    assert pending_file.is_file()
+    lines = pending_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+
+    rec0 = json.loads(lines[0])
+    rec1 = json.loads(lines[1])
+    assert rec0["reason"] == "hook timeout"
+    assert rec1["reason"] == "hook timeout"
+    assert rec0["ts"]
+    assert rec1["ts"]
+
+    # When logging recovers, both lost events are reported in a gap
+    recovery_event = {
+        "ts": "2026-10-19T20:00:00.000Z",
+        "actor": {"role": "director", "host": "claude", "session_id": "d376e73f-f8af-4eb8-b73d-29d2672d7737"},
+        "kind": "tool",
+        "target": "echo recovered",
+        "outcome": {"status": "ok"},
+    }
+    monkeypatch.undo()
+    monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path))
+    assert audit_hook.write(recovery_event, state_dir=tmp_path) is True
+    assert not pending_file.exists()
+
+    events = _read_day_events(tmp_path)
+    assert len(events) == 2
+    gap_ev, rec_ev = events[0], events[1]
+    assert gap_ev["kind"] == "gap"
+    assert gap_ev["detail"]["lost"] == 2
+    assert gap_ev["detail"]["reason"] == "hook timeout"
+    assert rec_ev["kind"] == "tool"
+    assert rec_ev["target"] == "echo recovered"
+
+
+def test_timeout_exits_zero_and_prints_agy_ack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    audit_hook = _load_audit_hook()
+    assert hasattr(audit_hook, "HookTimeout"), "HookTimeout must be defined in hooks/audit-hook.py"
+    assert issubclass(audit_hook.HookTimeout, Exception)
+
+    monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(REAL_AGY_POST_TOOL_USE_PAYLOAD)))
+
+    real_append = writer._append_locked
+
+    def timeout_append(event: Any, root: Path) -> None:
+        audit_hook._alarm_handler(signal.SIGALRM, None)
+        real_append(event, root)
+
+    monkeypatch.setattr(writer, "_append_locked", timeout_append)
+
+    rc = audit_hook.main(["--host", "agy", "PostToolUse"])
+    assert rc == 0
+
+    captured = capsys.readouterr()
+    assert captured.out == "{}"
+    assert captured.err == ""
+
+    # Event was recorded as pending with "hook timeout"
+    pending_file = tmp_path / "audit-pending-gap.jsonl"
+    assert pending_file.is_file()
+    lines = pending_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["reason"] == "hook timeout"
+
+    # Day file is empty
     assert _read_day_events(tmp_path) == []

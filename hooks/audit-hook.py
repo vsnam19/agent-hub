@@ -12,7 +12,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agenthub.audit.normalize import normalize  # noqa: E402
-from agenthub.audit.writer import write  # noqa: E402
+from agenthub.audit.writer import record_pending, write  # noqa: E402
 
 
 def _utc_now_iso() -> str:
@@ -57,12 +57,26 @@ def _parse_args(argv: list[str]) -> tuple[str, str]:
     return host.strip().lower(), event_name.strip()
 
 
+class HookTimeout(Exception):
+    def __init__(self, message: str = "hook timeout") -> None:
+        super().__init__(message)
+
+
+_timed_out = False
+
+
 def _alarm_handler(_signum: int, _frame: Any) -> None:
-    sys.exit(0)
+    global _timed_out
+    _timed_out = True
+    raise HookTimeout("hook timeout")
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _timed_out
+    _timed_out = False
     host = ""
+    events: list[dict[str, Any]] = []
+    i = 0
     try:
         raw_argv = sys.argv[1:] if argv is None else argv
         host, event_name = _parse_args(raw_argv)
@@ -83,10 +97,30 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         events = normalize(host, event_name, payload, os.environ)
-        for ev in events:
+        while i < len(events):
+            ev = events[i]
             if not ev.get("ts"):
                 ev["ts"] = _utc_now_iso()
-            write(ev)
+            if _timed_out:
+                record_pending(ev, "hook timeout")
+                i += 1
+                continue
+            try:
+                write(ev)
+            except HookTimeout:
+                _timed_out = True
+                record_pending(ev, "hook timeout")
+            i += 1
+    except HookTimeout:
+        _timed_out = True
+        try:
+            for ev in events[i:]:
+                if not ev.get("ts"):
+                    ev["ts"] = _utc_now_iso()
+                record_pending(ev, "hook timeout")
+        except Exception:
+            pass
+        return 0
     except BaseException:
         return 0
     finally:
