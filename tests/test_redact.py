@@ -499,3 +499,38 @@ def test_wget_user_password_redacted():
     assert "hunter2" not in " ".join(out)
     out = redact_argv(["wget", "--http-password", "hunter2", "http://x"])
     assert "hunter2" not in " ".join(out)
+
+
+def test_curl_user_value_still_generic_redacted():
+    from agenthub.redact import redact_argv
+
+    key = "sk_live_51HxXk9pLmQ2vR7tY4wZq"
+    out = redact_argv(["curl", "http://x", "-u", f"{key}:"])
+    assert key not in " ".join(out)
+    ghp = "ghp_" + "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5"
+    out = redact_argv(["curl", "-u", ghp, "http://x"])
+    assert ghp not in " ".join(out)
+    out = redact_argv(["curl", "-u", "alice@corp.com:pw"])
+    assert out[:2] == ["curl", "-u"]
+    assert "pw" not in out[2]
+    assert out[2] in ("<email>:<redacted>", "alice@corp.com:<redacted>", "<email>")
+
+
+def test_single_dash_secret_flag_with_u_not_curl_bundle():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["curl", "-auth-token=SECRETVALUE1", "http://x"]) == [
+        "curl",
+        "-auth-token=<redacted>",
+        "http://x",
+    ]
+    assert redact_argv(["curl", "-auth-token", "SECRETVALUE1"]) == ["curl", "-auth-token", "<redacted>"]
+
+
+def test_every_argv_item_gets_redact_pass():
+    from agenthub.redact import redact, redact_argv
+
+    key = "sk_live_51HxXk9pLmQ2vR7tY4wZq"
+    assert redact(key) != key
+    for argv in (["curl", "-u", key], ["curl", f"-u{key}"], ["curl", "--user", key], ["curl", f"--user={key}"]):
+        assert key not in " ".join(redact_argv(argv))

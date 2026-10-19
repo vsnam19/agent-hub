@@ -220,7 +220,7 @@ def test_lock_timeout_returns_false_and_records_pending(tmp_path: Path) -> None:
             fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
 
     assert ok is False
-    assert 0.18 <= elapsed
+    assert 0.18 <= elapsed < 2.0
 
     pending_file = tmp_path / "audit-pending-gap.jsonl"
     assert pending_file.is_file()

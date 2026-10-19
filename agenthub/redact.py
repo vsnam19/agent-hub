@@ -75,7 +75,8 @@ _SECRET_FLAG_WORDS = (
 )
 _PASSWORD_PROGRAMS = {"mysql", "mysqldump", "mysqladmin", "sshpass"}
 _CURL_USER_FLAGS = {"-u", "--user", "-U", "--proxy-user"}
-_CURL_SHORT_USER = re.compile(r"^-([a-zA-Z]*?)([uU])(.*)$")
+# bundle letters must be curl short flags that never take a value
+_CURL_SHORT_USER = re.compile(r"^-([#0123456ABCGIJLMNOREVZfgijklnpqsSv]*)([uU])(.*)$")
 _SECRET_KEY = re.compile(rf"(?i)^{_NAME}$")
 _ENV_VAR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 
@@ -215,7 +216,24 @@ def _redact_userpass(value: str) -> str:
 
 
 def redact_argv(argv: list[str]) -> list[str]:
-    """Redact secret flags, env prefixes and embedded secrets in an argv list."""
+    """Redact secret flags, env prefixes and embedded secrets in an argv list.
+
+    Every item goes through `redact()` as a last step, so no branch bypasses generic redaction.
+    """
+    return [_final_pass(item) for item in _redact_argv_items(argv)]
+
+
+def _final_pass(item: str) -> str:
+    """`redact()` an item; a trailing `:<redacted>` / `=<redacted>` marker is kept, its prefix is still redacted."""
+    if item == "<redacted>":
+        return item
+    for marker in (":<redacted>", "=<redacted>"):
+        if item.endswith(marker):
+            return redact(item[: -len(marker)]) + marker
+    return redact(item)
+
+
+def _redact_argv_items(argv: list[str]) -> list[str]:
     if not argv:
         return []
 
