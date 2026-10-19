@@ -42,16 +42,26 @@ def parse_since(text: str, now: datetime | None = None) -> str:
 
     m = _RELATIVE_RE.match(cleaned)
     if m:
-        val = float(m.group(1))
-        unit = m.group(2).lower()
-        sec = val * _UNIT_SECONDS[unit]
-        base_now = datetime.now(timezone.utc) if now is None else now
-        if base_now.tzinfo is None:
-            base_now = base_now.replace(tzinfo=timezone.utc)
-        else:
-            base_now = base_now.astimezone(timezone.utc)
-        target_dt = base_now - timedelta(seconds=sec)
-        return _format_utc_iso(target_dt)
+        try:
+            val = float(m.group(1))
+            unit = m.group(2).lower()
+            sec = val * _UNIT_SECONDS[unit]
+            base_now = datetime.now(timezone.utc) if now is None else now
+            if base_now.tzinfo is None:
+                base_now = base_now.replace(tzinfo=timezone.utc)
+            else:
+                base_now = base_now.astimezone(timezone.utc)
+            target_dt = base_now - timedelta(seconds=sec)
+            return _format_utc_iso(target_dt)
+        except OverflowError as err:
+            raise ValueError(f"invalid since expression: {text!r}") from err
+
+    if _MONTH_RE.match(cleaned):
+        try:
+            dt = datetime.fromisoformat(f"{cleaned}-01")
+        except ValueError as err:
+            raise ValueError(f"invalid since expression: {text!r}") from err
+        return _format_utc_iso(dt)
 
     try:
         dt = datetime.fromisoformat(cleaned)
@@ -188,14 +198,8 @@ def read_events_with_archives(
 ) -> tuple[list[dict[str, Any]], list[str]]:
     since_month: str | None = None
     if since is not None:
-        cleaned = since.strip()
-        if not cleaned:
-            raise ValueError("empty since expression")
-        if _MONTH_RE.match(cleaned):
-            since_month = cleaned
-        else:
-            since_iso = parse_since(cleaned)
-            since_month = since_iso[:7]
+        since_iso = parse_since(since)
+        since_month = since_iso[:7]
 
     root = audit_root(state_dir)
     manifests_dir = root / "manifests"
@@ -279,7 +283,7 @@ def read_events_with_archives(
 
     seen_ids: set[str] = set()
     deduped_events: list[dict[str, Any]] = []
-    for ev in archived_events + local_events:
+    for ev in local_events + archived_events:
         eid = ev.get("event_id")
         if isinstance(eid, str) and eid:
             if eid in seen_ids:

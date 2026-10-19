@@ -273,7 +273,7 @@ def test_local_only_behaviour_unchanged(tmp_path: Path) -> None:
     assert events == [e_oct1, e_oct2]
 
 
-def test_corrupt_archive_listed_as_skipped(tmp_path: Path) -> None:
+def test_corrupt_xz_archive_skipped(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     vault_dir = tmp_path / "vault"
     vault_audit_dir = vault_dir / "agent-hub-audit"
@@ -320,7 +320,7 @@ def test_corrupt_archive_listed_as_skipped(tmp_path: Path) -> None:
     assert events == [e_oct]
 
 
-def test_month_in_both_local_and_archive_not_duplicated(tmp_path: Path) -> None:
+def test_month_local_and_archived_deduped(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     vault_dir = tmp_path / "vault"
     vault_audit_dir = vault_dir / "agent-hub-audit"
@@ -404,11 +404,13 @@ def test_month_in_both_local_and_archive_not_duplicated(tmp_path: Path) -> None:
     assert event_ids.count("arch-only") == 1
     assert event_ids.count(e_oct["event_id"]) == 1
 
-    # Assert that for the shared event_ids, the archived event was kept (put archived events first)
+    # Assert that for the shared event_ids, the local event was kept (local copy wins)
     shared_1 = next(ev for ev in events if ev.get("event_id") == e_sep1["event_id"])
-    assert shared_1.get("source") == "archive"
+    assert shared_1 == e_sep1
+    assert "source" not in shared_1
     shared_2 = next(ev for ev in events if ev.get("event_id") == e_sep2["event_id"])
-    assert shared_2.get("source") == "archive"
+    assert shared_2 == e_sep2
+    assert "source" not in shared_2
 
     # Assert events with no event_id are both preserved
     targets = [ev.get("target") for ev in events]
