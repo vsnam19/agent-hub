@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import time
 import uuid
 from collections.abc import Mapping
@@ -241,38 +242,107 @@ def _parse_ts(ts: Any) -> datetime | None:
     return dt
 
 
-def _sanitize_nested(v: Any) -> Any:
-    if isinstance(v, str):
-        return redact(v)
-    if isinstance(v, Mapping):
-        return {k: _sanitize_nested(val) for k, val in v.items()}
-    if isinstance(v, list):
-        return [_sanitize_nested(item) for item in v]
-    if isinstance(v, tuple):
-        return tuple(_sanitize_nested(item) for item in v)
-    if isinstance(v, set):
-        return {_sanitize_nested(item) for item in v}
-    return v
+_SECRET_KEY_SUBSTRINGS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "api-key",
+    "authorization",
+    "cookie",
+    "credential",
+    "private_key",
+    "private-key",
+    "privatekey",
+)
+
+_DIGEST_KEYS = {
+    "sha256",
+    "sha256_before",
+    "sha256_after",
+    "sha",
+    "hash",
+    "prev_hash",
+    "first_hash",
+    "first_prev_hash",
+    "last_hash",
+}
+_HEX_40_OR_64 = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
+_EVIDENCE_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
-def _sanitize_detail(detail: Mapping[str, Any]) -> dict[str, Any]:
+def _is_secret_key(k: Any) -> bool:
+    name = str(k).lower()
+    return any(sub in name for sub in _SECRET_KEY_SUBSTRINGS)
+
+
+def _sanitize_argv(v: Any) -> Any:
+    if not isinstance(v, (list, tuple)):
+        return _sanitize_value(v)
+    items = list(v)
+    str_items = [x for x in items if isinstance(x, str)]
+    redacted_strings = iter(redact_argv(str_items))
+    res: list[Any] = []
+    for x in items:
+        if isinstance(x, str):
+            res.append(next(redacted_strings))
+        else:
+            res.append(str(x))
+    return type(v)(res) if isinstance(v, tuple) else res
+
+
+def _sanitize_mapping(m: Mapping[str, Any]) -> dict[str, Any]:
     res: dict[str, Any] = {}
-    for k, v in detail.items():
-        if k == "argv" and isinstance(v, (list, tuple)):
-            items = list(v)
-            if all(isinstance(x, str) for x in items):
-                redacted = redact_argv(items)
-            else:
-                redacted = [_sanitize_nested(x) for x in items]
-            res[k] = type(v)(redacted) if isinstance(v, tuple) else redacted
+    for k, v in m.items():
+        if _is_secret_key(k):
+            res[k] = "<redacted>"
+        elif k == "argv" and isinstance(v, (list, tuple)):
+            res[k] = _sanitize_argv(v)
         elif k == "stderr_tail" and isinstance(v, str):
             redacted = redact(v)
             if len(redacted) > 2000:
                 redacted = redacted[-2000:]
             res[k] = redacted
+        elif k in _DIGEST_KEYS and isinstance(v, str) and _HEX_40_OR_64.fullmatch(v):
+            res[k] = v
+        elif k == "evidence" and isinstance(v, str) and (_EVIDENCE_SHA256.fullmatch(v) or _HEX_40_OR_64.fullmatch(v)):
+            res[k] = v
+        elif k == "session_id" and isinstance(v, str):
+            res[k] = v
         else:
-            res[k] = _sanitize_nested(v)
+            res[k] = _sanitize_value(v)
     return res
+
+
+def _sanitize_value(v: Any) -> Any:
+    if isinstance(v, str):
+        if _UUID_RE.fullmatch(v):
+            return v
+        return redact(v)
+    if isinstance(v, Mapping):
+        return _sanitize_mapping(v)
+    if isinstance(v, (set, frozenset)):
+        return [_sanitize_value(item) for item in sorted(v, key=str)]
+    if isinstance(v, tuple):
+        return [_sanitize_value(item) for item in v]
+    if isinstance(v, list):
+        return [_sanitize_value(item) for item in v]
+    if isinstance(v, bool) or v is None:
+        return v
+    if isinstance(v, (int, float)):
+        return v
+    return redact(str(v))
+
+
+def _sanitize_nested(v: Any) -> Any:
+    return _sanitize_value(v)
+
+
+def _sanitize_detail(detail: Mapping[str, Any]) -> dict[str, Any]:
+    return _sanitize_mapping(detail)
 
 
 def sanitize(event: Mapping[str, Any]) -> dict[str, Any]:
@@ -280,10 +350,17 @@ def sanitize(event: Mapping[str, Any]) -> dict[str, Any]:
     if "target" in out:
         target = out["target"]
         if isinstance(target, str):
-            redacted_target = redact(target)
+            try:
+                tokens = shlex.split(target)
+                redacted_tokens = redact_argv(tokens)
+                redacted_target = shlex.join(redacted_tokens).replace("'<redacted>'", "<redacted>")
+            except ValueError:
+                redacted_target = redact(target)
             if len(redacted_target) > 500:
                 redacted_target = redacted_target[:500]
             out["target"] = redacted_target
+        else:
+            out["target"] = _sanitize_value(target)
     if "quote" in out:
         quote = out["quote"]
         if isinstance(quote, str):
@@ -291,12 +368,43 @@ def sanitize(event: Mapping[str, Any]) -> dict[str, Any]:
             if len(redacted_quote) > 200:
                 redacted_quote = redacted_quote[:199] + "…"
             out["quote"] = redacted_quote
+        else:
+            out["quote"] = _sanitize_value(quote)
+    if "actor" in out:
+        actor = out["actor"]
+        if isinstance(actor, Mapping):
+            out["actor"] = _sanitize_mapping(actor)
+        elif isinstance(actor, str):
+            out["actor"] = redact(actor)
+        else:
+            out["actor"] = _sanitize_value(actor)
+    if "parent" in out:
+        parent = out["parent"]
+        if isinstance(parent, Mapping):
+            out["parent"] = _sanitize_mapping(parent)
+        elif isinstance(parent, str):
+            out["parent"] = redact(parent)
+        else:
+            out["parent"] = _sanitize_value(parent)
+    if "evidence" in out:
+        evidence = out["evidence"]
+        if isinstance(evidence, str):
+            if _EVIDENCE_SHA256.fullmatch(evidence) or _HEX_40_OR_64.fullmatch(evidence):
+                out["evidence"] = evidence
+            else:
+                out["evidence"] = redact(evidence)
+        elif isinstance(evidence, Mapping):
+            out["evidence"] = _sanitize_mapping(evidence)
+        else:
+            out["evidence"] = _sanitize_value(evidence)
     if "detail" in out:
         detail = out["detail"]
         if isinstance(detail, Mapping):
-            out["detail"] = _sanitize_detail(detail)
+            out["detail"] = _sanitize_mapping(detail)
         elif isinstance(detail, str):
             out["detail"] = redact(detail)
+        else:
+            out["detail"] = _sanitize_value(detail)
     return out
 
 
