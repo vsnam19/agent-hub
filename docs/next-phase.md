@@ -10,9 +10,13 @@ from the plugin cache). `agent-hub hub install --apply` ran: the agent-hub MCP s
 agy list-format follow-up: `hub status` still shows them missing). Master clean, no worktrees, no `orch/*` branches,
 nothing running, nothing pushed. Owner: F6 before G; Phase G is discussed at v0.12 — do not start it.
 
-**Current work: none in flight.** Next, in order:
-1. Small task: parse agy 1.4.2's text `agy plugin list` in `agenthub/hub.py` (follow-ups, last items).
-2. E5 (`plan draft`, with the E5 extras in follow-ups), E6, E7 techlead bench. Lows: `docs/follow-ups.md`.
+**Current work (2026-10-19): Phase G — plan `phase-g` running** (v0.12 target). Spec
+`docs/superpowers/specs/2026-10-18-phase-g-audit-log-design.md` (§13 = techlead corrections), decisions D-105..D-120.
+Plan `~/.local/state/agent-hub/plans/phase-g/plan.json` (34 tasks, split by techlead job
+`20261018-235854-techlead-0689`; implement pinned to agy Gemini 3.8 Flash, implement-hard on the chain with Gemini 4
+Argon first). Next: `plan wait` until it stops → `plan review` → `plan triage`/`plan close` → `ready` → `plan merge`
+→ real check (spec §10.4) → docs → local v0.12.0. Pool changed (D-119): Argon added; agy `claude-*-4-6` ids are gone.
+Never `audit schedule --apply`, never the owner's vault, never push.
 
 The steps below describe how `followups-1` was run; reuse them for the next plan (new slug, new spec).
 
