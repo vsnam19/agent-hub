@@ -3,6 +3,7 @@ import fcntl
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -11,6 +12,7 @@ import time
 import unicodedata
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -35,6 +37,51 @@ ALL_JOBS = 100000  # every job record, for filters that must see past any --limi
 SCHEDULE_UNIT = "agent-hub-skills-weekly"
 SCHEDULE_DEFAULT_AT = "Sun *-*-* 20:17"
 SCHEDULE_TIMEOUT_S = 30
+
+
+@dataclass(frozen=True)
+class ScheduleSpec:
+    unit: str
+    service_description: str
+    timer_description: str
+    subcommand: str
+    timeout: str
+    default_calendar: str = SCHEDULE_DEFAULT_AT
+
+    @property
+    def unit_base(self) -> str:
+        return self.unit
+
+    @property
+    def unit_name(self) -> str:
+        return self.unit
+
+    @property
+    def default_at(self) -> str:
+        return self.default_calendar
+
+
+SKILLS_SPEC = ScheduleSpec(
+    unit=SCHEDULE_UNIT,
+    service_description="agent-hub learned skills, weekly",
+    timer_description="Run agent-hub learned skills weekly",
+    subcommand="skills weekly",
+    timeout="6h",
+    default_calendar=SCHEDULE_DEFAULT_AT,
+)
+
+AUDIT_SCHEDULE_UNIT = "agent-hub-audit-archive"
+AUDIT_SCHEDULE_DEFAULT_AT = "Sun *-*-01..07 21:17:00"
+
+
+AUDIT_SPEC = ScheduleSpec(
+    unit=AUDIT_SCHEDULE_UNIT,
+    service_description="agent-hub audit log archive, monthly",
+    timer_description="Run agent-hub audit archive monthly",
+    subcommand="audit archive",
+    timeout="1h",
+    default_calendar=AUDIT_SCHEDULE_DEFAULT_AT,
+)
 
 
 class UsageError(Exception):
@@ -298,6 +345,41 @@ def _build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--announce", help=argparse.SUPPRESS)
     gate.add_argument("--json", action="store_true")
 
+    audit = sub.add_parser("audit", help="read and verify the audit log")
+    audit_sub = audit.add_subparsers(dest="audit_command", required=True, parser_class=_Parser)
+
+    audit_show = audit_sub.add_parser("show", help="show timeline of audit log events")
+    audit_show.add_argument("--plan", help="filter by plan name")
+    audit_show.add_argument("--job", help="filter by job id")
+    audit_show.add_argument("--session", help="filter by director session id")
+    audit_show.add_argument("--since", help="filter events since date, iso timestamp, or relative time")
+    audit_show.add_argument(
+        "--kind", action="append", default=[], dest="kinds", metavar="KIND", help="filter by event kind (repeatable)"
+    )
+    audit_show.add_argument("--json", action="store_true", help="output one JSON object per line")
+
+    audit_verify = audit_sub.add_parser("verify", help="verify audit log integrity")
+    audit_verify.add_argument("--month", metavar="YYYY-MM", help="month to verify (default: all local months)")
+
+    audit_outward = audit_sub.add_parser("outward", help="list only outward events")
+    audit_outward.add_argument("--since", help="filter events since date, iso timestamp, or relative time")
+    audit_outward.add_argument("--json", action="store_true", help="output one JSON object per line")
+
+    audit_archive = audit_sub.add_parser("archive", help="archive a month to the vault")
+    audit_archive.add_argument("--month", metavar="YYYY-MM", help="month to archive (default: previous calendar month)")
+
+    audit_schedule = audit_sub.add_parser(
+        "schedule", help="archive the audit log monthly on a systemd user timer (dry-run unless --apply)"
+    )
+    audit_schedule_mode = audit_schedule.add_mutually_exclusive_group()
+    audit_schedule_mode.add_argument("--apply", action="store_true", help="write the units and enable the timer")
+    audit_schedule_mode.add_argument("--remove", action="store_true", help="disable the timer and delete its units")
+    audit_schedule.add_argument(
+        "--at",
+        default=AUDIT_SCHEDULE_DEFAULT_AT,
+        help=f'systemd calendar expression (default "{AUDIT_SCHEDULE_DEFAULT_AT}")',
+    )
+
     sub.add_parser("mcp", help="run the MCP server over stdio")
 
     hook = sub.add_parser("hook", help="Claude Code session hooks")
@@ -323,6 +405,7 @@ def main(argv: list[str] | None = None) -> int:
             "gate": _cmd_gate,
             "hub": _cmd_hub,
             "skills": _cmd_skills,
+            "audit": _cmd_audit,
             "mcp": _cmd_mcp,
             "hook": _cmd_hook,
         }[args.command]
@@ -503,21 +586,21 @@ def _systemd_word(value: str, *, exec_line: bool = False) -> str:
     return f'"{escaped}"'
 
 
-def _unit_texts(exe: str, at: str) -> tuple[str, str]:
+def _unit_texts(exe: str, at: str, spec: ScheduleSpec = SKILLS_SPEC) -> tuple[str, str]:
     service = (
         "[Unit]\n"
-        "Description=agent-hub learned skills, weekly\n"
+        f"Description={spec.service_description}\n"
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
-        f"ExecStart={_systemd_word(exe, exec_line=True)} skills weekly\n"
+        f"ExecStart={_systemd_word(exe, exec_line=True)} {spec.subcommand}\n"
         f"Environment={_systemd_word('PATH=' + os.environ.get('PATH', ''))}\n"
-        "TimeoutStartSec=6h\n"
+        f"TimeoutStartSec={spec.timeout}\n"
         "Nice=10\n"
     )
     timer = (
         "[Unit]\n"
-        "Description=Run agent-hub learned skills weekly\n"
+        f"Description={spec.timer_description}\n"
         "\n"
         "[Timer]\n"
         f"OnCalendar={at}\n"
@@ -558,13 +641,13 @@ def _read_unit(path: Path) -> str | None:
         return None
 
 
-def _cmd_skills_schedule(args) -> int:
+def _cmd_schedule(args, spec: ScheduleSpec) -> int:
     unit_dir = _unit_dir()
-    service_path = unit_dir / f"{SCHEDULE_UNIT}.service"
-    timer_path = unit_dir / f"{SCHEDULE_UNIT}.timer"
+    service_path = unit_dir / f"{spec.unit}.service"
+    timer_path = unit_dir / f"{spec.unit}.timer"
     timer = timer_path.name
     try:
-        if args.remove:
+        if getattr(args, "remove", False):
             if not (service_path.exists() or timer_path.exists()):
                 print("nothing scheduled")
                 return 0
@@ -588,12 +671,13 @@ def _cmd_skills_schedule(args) -> int:
             print(_safe(f"removed: {timer_path}"))
             return 0
 
-        _check_calendar(args.at)
+        at = args.at if getattr(args, "at", None) is not None else spec.default_calendar
+        _check_calendar(at)
         exe = shutil.which("agent-hub")
         if exe is None:
             raise ScheduleError("agent-hub is not on PATH")
-        service, timer_text = _unit_texts(os.path.abspath(exe), args.at)
-        if not args.apply:
+        service, timer_text = _unit_texts(os.path.abspath(exe), at, spec=spec)
+        if not getattr(args, "apply", False):
             print(_safe(f"# {service_path}\n{service}\n# {timer_path}\n{timer_text}"), end="")
             print(f"would run: systemctl --user daemon-reload; systemctl --user enable --now {timer}")
             print("dry run: nothing written; add --apply to schedule")
@@ -605,7 +689,7 @@ def _cmd_skills_schedule(args) -> int:
         was_active = timer_existed and _schedule_run(["systemctl", "--user", "is-active", timer]).returncode == 0
         files_match = before[service_path] == service and before[timer_path] == timer_text
         if files_match and was_enabled and was_active:
-            print(_safe(f"already scheduled: {timer_path} ({args.at})"))
+            print(_safe(f"already scheduled: {timer_path} ({at})"))
             return 0
         unit_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -639,11 +723,15 @@ def _cmd_skills_schedule(args) -> int:
             for msg in restore_errors:
                 print(_safe(f"agent-hub: {msg}", sys.stderr), file=sys.stderr)
             return 1
-        print(_safe(f"scheduled: {timer_path} ({args.at})"))
+        print(_safe(f"scheduled: {timer_path} ({at})"))
         return 0
     except (ScheduleError, OSError) as e:
         print(_safe(f"agent-hub: {e}", sys.stderr), file=sys.stderr)
         return 1
+
+
+def _cmd_skills_schedule(args) -> int:
+    return _cmd_schedule(args, SKILLS_SPEC)
 
 
 def _cmd_skills(args) -> int:
@@ -692,6 +780,141 @@ def _mine_window(args, state_dir: Path, now: datetime) -> datetime:
     except (OSError, ValueError):
         return since
     return min(since, last if last.tzinfo else last.replace(tzinfo=timezone.utc))
+
+
+def _cmd_audit_show(args) -> int:
+    from agenthub.audit.show import format_line, parse_since, read_events_with_archives, select
+
+    state_dir = paths().state_dir
+
+    since_val: str | None = None
+    if args.since is not None:
+        try:
+            since_val = parse_since(args.since)
+        except ValueError:
+            raise UsageError(f"invalid --since: {args.since!r}") from None
+
+    try:
+        events, skipped = read_events_with_archives(state_dir=state_dir, since=since_val)
+    except ValueError as e:
+        raise UsageError(f"invalid --since: {e}") from None
+
+    if skipped:
+        print(
+            _safe(
+                f"agent-hub: skipped archived months (vault unreachable): {', '.join(skipped)}",
+                sys.stderr,
+            ),
+            file=sys.stderr,
+        )
+
+    kinds = getattr(args, "kinds", None) or getattr(args, "kind", None) or ()
+    matched = select(
+        events,
+        plan=args.plan,
+        job=args.job,
+        session=args.session,
+        since=since_val,
+        kinds=kinds,
+    )
+
+    if args.json:
+        for ev in matched:
+            print(_safe(json.dumps(ev, ensure_ascii=False)))
+    else:
+        for ev in matched:
+            print(_safe(format_line(ev)))
+
+    return 0
+
+
+def _cmd_audit_verify(args) -> int:
+    from agenthub.audit.verify import verify
+
+    state_dir = paths().state_dir
+    month = args.month
+    if month is not None and not re.match(r"^\d{4}-\d{2}$", month):
+        raise UsageError(f"invalid month format: {month!r}, expected YYYY-MM")
+    try:
+        res = verify(state_dir=state_dir, month=month)
+    except ValueError as e:
+        raise UsageError(str(e)) from None
+
+    print(_safe(res.message))
+    return 0 if res.ok else 1
+
+
+def _cmd_audit_outward(args) -> int:
+    from agenthub.audit.show import format_line, outward, parse_since, read_events_with_archives
+
+    state_dir = paths().state_dir
+
+    since_val: str | None = None
+    if args.since is not None:
+        try:
+            since_val = parse_since(args.since)
+        except ValueError:
+            raise UsageError(f"invalid --since: {args.since!r}") from None
+
+    try:
+        events, skipped = read_events_with_archives(state_dir=state_dir, since=since_val)
+    except ValueError as e:
+        raise UsageError(f"invalid --since: {e}") from None
+
+    if skipped:
+        print(
+            _safe(
+                f"agent-hub: skipped archived months (vault unreachable): {', '.join(skipped)}",
+                sys.stderr,
+            ),
+            file=sys.stderr,
+        )
+
+    matched = outward(events, since=since_val)
+
+    if getattr(args, "json", False):
+        for ev in matched:
+            print(_safe(json.dumps(ev, ensure_ascii=False)))
+    else:
+        for ev in matched:
+            print(_safe(format_line(ev)))
+
+    return 0
+
+
+def _cmd_audit_archive(args) -> int:
+    from agenthub.audit.archive import ArchiveError, archive_month
+
+    state_dir = paths().state_dir
+    try:
+        res = archive_month(month=args.month, state_dir=state_dir)
+    except ArchiveError as exc:
+        print(_safe(str(exc), sys.stderr), file=sys.stderr)
+        return 1
+
+    if res.exit_code != 0:
+        print(_safe(res.message, sys.stderr), file=sys.stderr)
+    else:
+        print(_safe(res.message))
+    return res.exit_code
+
+
+def _cmd_audit_schedule(args) -> int:
+    return _cmd_schedule(args, AUDIT_SPEC)
+
+
+def _cmd_audit(args) -> int:
+    if args.audit_command == "show":
+        return _cmd_audit_show(args)
+    if args.audit_command == "verify":
+        return _cmd_audit_verify(args)
+    if args.audit_command == "outward":
+        return _cmd_audit_outward(args)
+    if args.audit_command == "archive":
+        return _cmd_audit_archive(args)
+    if args.audit_command == "schedule":
+        return _cmd_audit_schedule(args)
+    raise UsageError(f"unknown audit command: {args.audit_command}")
 
 
 def _cmd_pool(args) -> int:
