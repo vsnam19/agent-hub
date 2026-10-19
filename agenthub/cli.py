@@ -18,6 +18,7 @@ from pathlib import Path
 
 from agenthub import guards
 from agenthub.agents import registry
+from agenthub.audit.emit import emit
 from agenthub.brief import BriefError, order_table
 from agenthub.config import ConfigError, parse_duration, paths, role_kind
 from agenthub.jobs import dead_job_result, get_job, list_jobs
@@ -1650,32 +1651,54 @@ def _cmd_plan(args) -> int:
         tasks = [
             t for t in merge_order(plan) if (t.kind or t.role) == "implement" and state.task(t.name).status == "done"
         ]
+        rc = 0
+        merged_tasks: list[str] = []
         if not tasks:
             print("no done tasks to merge", file=sys.stderr)
-            return 1
-        try:
-            problem = merge_target_problem(plan.repo, target)
-        except guards.GuardError as e:
-            raise UsageError(str(e)) from None
-        if problem:
-            print(_safe(f"agent-hub: {problem}", sys.stderr), file=sys.stderr)
-            return 3
-
-        jobs = list_jobs(paths(), ALL_JOBS)
-        for task in tasks:
-            result = merge_task(plan, task, state.task(task.name), target, jobs)
-            if result["status"] == "merged":
-                print(_safe(f"{task.name} merged into {target} at {result['sha']}"))
-            elif result["status"] == "already-merged":
-                print(_safe(f"{task.name} already merged"))
-            elif result["status"] == "not-ready":
-                for problem in result["problems"]:
-                    print(_safe(f"{task.name} not ready: {problem}"))
-                return 1
+            rc = 1
+        else:
+            try:
+                problem = merge_target_problem(plan.repo, target)
+            except guards.GuardError as e:
+                raise UsageError(str(e)) from None
+            if problem:
+                print(_safe(f"agent-hub: {problem}", sys.stderr), file=sys.stderr)
+                rc = 3
             else:
-                print(_safe(f"{task.name} merge failed: {result['reason']}", sys.stderr), file=sys.stderr)
-                return 1
-        return 0
+                jobs = list_jobs(paths(), ALL_JOBS)
+                for task in tasks:
+                    result = merge_task(plan, task, state.task(task.name), target, jobs)
+                    if result["status"] == "merged":
+                        merged_tasks.append(task.name)
+                        print(_safe(f"{task.name} merged into {target} at {result['sha']}"))
+                    elif result["status"] == "already-merged":
+                        merged_tasks.append(task.name)
+                        print(_safe(f"{task.name} already merged"))
+                    elif result["status"] == "not-ready":
+                        for problem in result["problems"]:
+                            print(_safe(f"{task.name} not ready: {problem}"))
+                        rc = 1
+                        break
+                    else:
+                        print(_safe(f"{task.name} merge failed: {result['reason']}", sys.stderr), file=sys.stderr)
+                        rc = 1
+                        break
+
+        status = "ok" if rc == 0 else "error"
+        try:
+            emit(
+                "plan",
+                "merge",
+                state_dir=paths().state_dir,
+                parent={"plan": plan_dir.name},
+                target=target,
+                status=status,
+                exit_code=rc,
+                detail={"tasks": merged_tasks},
+            )
+        except Exception:
+            pass
+        return rc
 
     elif args.plan_command == "close":
         result_path = Path(args.result) if getattr(args, "result", None) else None
