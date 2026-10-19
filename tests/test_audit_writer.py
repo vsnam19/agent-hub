@@ -4,10 +4,13 @@ import multiprocessing
 import os
 import re
 import stat
+import time
 from pathlib import Path
 
 import pytest
 
+from agenthub.audit import writer
+from agenthub.audit.verify import verify
 from agenthub.audit.writer import (
     ZERO_HASH,
     AuditLockTimeout,
@@ -87,7 +90,7 @@ def test_append_sets_chain_fields_and_modes(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path))
     month_dir = root / month
     day_file = month_dir / f"{day}.jsonl"
-    lock_file = month_dir / f"{day}.jsonl.lock"
+    lock_file = root / "chain.lock"
 
     assert stat.S_IMODE(root.stat().st_mode) == 0o700
     assert stat.S_IMODE(month_dir.stat().st_mode) == 0o700
@@ -225,3 +228,80 @@ def test_concurrent_processes_keep_chain(tmp_path: Path) -> None:
         assert ev["prev_hash"] == expected_prev
         assert ev["hash"] == event_hash(ev["prev_hash"], ev)
         expected_prev = ev["hash"]
+
+
+def _worker_two_days(state_dir_str: str, worker_id: int, count: int) -> None:
+    for i in range(count):
+        day = "2026-10-18" if (worker_id + i) % 2 == 0 else "2026-10-19"
+        append(
+            {"ts": f"{day}T12:00:00.000Z", "kind": "command", "target": f"cmd-{worker_id}-{i}"},
+            state_dir=Path(state_dir_str),
+        )
+
+
+def test_single_chain_lock_across_days(tmp_path: Path) -> None:
+    append({"ts": "2026-10-18T10:00:00.000Z", "kind": "command", "target": "a"}, state_dir=tmp_path)
+    append({"ts": "2026-10-19T10:00:00.000Z", "kind": "command", "target": "b"}, state_dir=tmp_path)
+    root = audit_root(tmp_path)
+    assert list(root.rglob("*.lock")) == [root / "chain.lock"]
+    assert stat.S_IMODE((root / "chain.lock").stat().st_mode) == 0o600
+    with (root / "chain.lock").open("r+b") as lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            with pytest.raises(AuditLockTimeout):
+                append({"ts": "2026-10-20T10:00:00.000Z", "kind": "command"}, state_dir=tmp_path)
+            with pytest.raises(AuditLockTimeout):
+                append({"ts": "2026-10-18T10:00:00.000Z", "kind": "command"}, state_dir=tmp_path)
+        finally:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+
+
+def test_late_ts_is_raised_and_kept_as_event_ts(tmp_path: Path) -> None:
+    e1 = append({"ts": "2026-10-19T10:00:00.000Z", "kind": "command", "target": "new"}, state_dir=tmp_path)
+    late = "2026-10-18T09:00:00.000Z"
+    e2 = append({"ts": late, "kind": "command", "target": "late"}, state_dir=tmp_path)
+    assert e2["ts"] == e1["ts"]
+    assert e2["event_ts"] == late
+    assert e2["seq"] == 2
+    assert e2["prev_hash"] == e1["hash"]
+    assert "event_ts" not in e1
+    assert not (audit_root(tmp_path) / "2026-10" / "2026-10-18.jsonl").exists()
+    assert verify(tmp_path).ok
+
+
+def test_concurrent_writers_two_days_keep_chain(tmp_path: Path) -> None:
+    ctx = multiprocessing.get_context("spawn")
+    procs = [ctx.Process(target=_worker_two_days, args=(str(tmp_path), w, 15)) for w in range(4)]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=60)
+        assert p.exitcode == 0
+    root = audit_root(tmp_path)
+    events = [
+        json.loads(line) for f in sorted(root.glob("*/*.jsonl")) for line in f.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(events) == 60
+    assert verify(tmp_path).ok
+
+
+def test_lock_deadline_shared_by_gap_and_event(tmp_path: Path) -> None:
+    root = audit_root(tmp_path)
+    root.mkdir(parents=True)
+    (tmp_path / "audit-pending-gap.jsonl").write_text('{"ts":"2026-10-18T00:00:00.000Z","reason":"x"}\n')
+    with (root / "chain.lock").open("a+b") as lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            start = time.monotonic()
+            ok = writer.write({"ts": "2026-10-19T10:00:00.000Z", "kind": "command"}, state_dir=tmp_path)
+            elapsed = time.monotonic() - start
+            with pytest.raises(AuditLockTimeout):
+                append({"kind": "command"}, state_dir=tmp_path, deadline=time.monotonic() - 1)
+        finally:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+    assert ok is False
+    assert 0.18 <= elapsed
+    # the claim never happened: the old entry and the new failure are both still pending
+    lines = (tmp_path / "audit-pending-gap.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert not list(tmp_path.glob("*.claimed"))
