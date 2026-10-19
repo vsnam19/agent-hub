@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from agenthub.config import paths
+from agenthub.redact import redact, redact_argv
 
 ZERO_HASH = "0" * 64
 
@@ -157,8 +158,67 @@ def _initial_prev_hash(root: Path, month: str, day: str) -> str:
     return ZERO_HASH
 
 
+def _sanitize_nested(v: Any) -> Any:
+    if isinstance(v, str):
+        return redact(v)
+    if isinstance(v, Mapping):
+        return {k: _sanitize_nested(val) for k, val in v.items()}
+    if isinstance(v, list):
+        return [_sanitize_nested(item) for item in v]
+    if isinstance(v, tuple):
+        return tuple(_sanitize_nested(item) for item in v)
+    if isinstance(v, set):
+        return {_sanitize_nested(item) for item in v}
+    return v
+
+
+def _sanitize_detail(detail: Mapping[str, Any]) -> dict[str, Any]:
+    res: dict[str, Any] = {}
+    for k, v in detail.items():
+        if k == "argv" and isinstance(v, (list, tuple)):
+            items = list(v)
+            if all(isinstance(x, str) for x in items):
+                redacted = redact_argv(items)
+            else:
+                redacted = [_sanitize_nested(x) for x in items]
+            res[k] = type(v)(redacted) if isinstance(v, tuple) else redacted
+        elif k == "stderr_tail" and isinstance(v, str):
+            redacted = redact(v)
+            if len(redacted) > 2000:
+                redacted = redacted[-2000:]
+            res[k] = redacted
+        else:
+            res[k] = _sanitize_nested(v)
+    return res
+
+
+def sanitize(event: Mapping[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = dict(event)
+    if "target" in out:
+        target = out["target"]
+        if isinstance(target, str):
+            redacted_target = redact(target)
+            if len(redacted_target) > 500:
+                redacted_target = redacted_target[:500]
+            out["target"] = redacted_target
+    if "quote" in out:
+        quote = out["quote"]
+        if isinstance(quote, str):
+            redacted_quote = redact(quote)
+            if len(redacted_quote) > 200:
+                redacted_quote = redacted_quote[:199] + "…"
+            out["quote"] = redacted_quote
+    if "detail" in out:
+        detail = out["detail"]
+        if isinstance(detail, Mapping):
+            out["detail"] = _sanitize_detail(detail)
+        elif isinstance(detail, str):
+            out["detail"] = redact(detail)
+    return out
+
+
 def append(event: Mapping[str, Any], state_dir: Path | str | None = None) -> dict[str, Any]:
-    record: dict[str, Any] = dict(event)
+    record: dict[str, Any] = sanitize(event)
     record["schema_version"] = 1
     if "ts" not in record or record["ts"] is None:
         record["ts"] = _utc_now_iso()
