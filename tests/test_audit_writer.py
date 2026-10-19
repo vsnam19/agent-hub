@@ -485,3 +485,31 @@ def test_pending_line_into_claimed_inode_is_kept(tmp_path: Path, monkeypatch: py
 
     assert pending.read_text(encoding="utf-8") == late
     assert not list(tmp_path.glob("*.claimed"))
+
+
+def test_writer_flags_are_per_thread(tmp_path: Path) -> None:
+    import threading
+
+    seen: dict[str, bool] = {}
+    started = threading.Event()
+    release = threading.Event()
+
+    def other() -> None:
+        writer._state.caller_written = True
+        writer._state.emitting_gap = True
+        started.set()
+        release.wait(5)
+
+    t = threading.Thread(target=other)
+    t.start()
+    assert started.wait(5)
+    try:
+        assert writer.write({"ts": "2026-10-19T10:00:00.000Z", "kind": "command"}, state_dir=tmp_path) is True
+        seen["caller"] = writer._state.caller_written
+        seen["gap"] = writer._state.emitting_gap
+    finally:
+        release.set()
+        t.join()
+
+    assert seen == {"caller": True, "gap": False}
+    assert [e["kind"] for e in _day_events(tmp_path)] == ["command"]

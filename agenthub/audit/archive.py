@@ -158,7 +158,7 @@ def _build_archive_locked(
     state_dir: Path | str | None = None,
     tmp_dir: Path | str | None = None,
 ) -> BuiltArchive:
-    """Build the month archive; the caller holds chain.lock."""
+    """Build the month archive; the month must be a past one, or the caller must hold chain.lock."""
     root = audit_root(state_dir)
     month_dir = root / month
     if not month_dir.is_dir():
@@ -364,8 +364,14 @@ def archive_month(
         if not os.access(vault_dir, os.W_OK | os.X_OK):
             raise ArchiveError(f"vault audit directory is not writable: {vault_dir}")
 
-        # (b) Build under chain.lock: no writer may append while the month is read, packed and deleted
+        # (b) A past month is immutable (writer ts is monotonic): take chain.lock only to confirm the month is not the
+        # current one, then pack and copy without it so writers keep their deadline
         chain_fd = _acquire_chain_lock(root)
+        try:
+            check_month(resolved_month, today=today)
+        finally:
+            _release_lock(chain_fd)
+            chain_fd = None
         built = _build_archive_locked(resolved_month, state_dir=resolved_state_dir)
 
         # (c) Copy to <name>.tar.xz.part in vault, fsync, rename, and compare sha256
@@ -392,7 +398,8 @@ def archive_month(
         if copied_sha256 != built.sha256:
             raise ArchiveError(f"checksum mismatch for {vault_tar}: expected {built.sha256}, got {copied_sha256}")
 
-        # (d) Write the manifest and copy it to <state>/audit/manifests/YYYY-MM.json
+        # (d) Write the manifest and copy it to <state>/audit/manifests/YYYY-MM.json; it and the delete hold the lock
+        chain_fd = _acquire_chain_lock(root)
         created_iso = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         manifest_obj = {
             "month": resolved_month,

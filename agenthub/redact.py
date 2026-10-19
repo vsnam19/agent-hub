@@ -74,6 +74,7 @@ _SECRET_FLAG_WORDS = (
     "private-key",
 )
 _PASSWORD_PROGRAMS = {"mysql", "mysqldump", "mysqladmin", "sshpass"}
+_CURL_USER_FLAGS = {"-u", "--user", "-U", "--proxy-user"}
 _SECRET_KEY = re.compile(rf"(?i)^{_NAME}$")
 _ENV_VAR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 
@@ -202,12 +203,23 @@ def _is_password_program(argv: list[str]) -> bool:
     return any(os.path.basename(arg) in _PASSWORD_PROGRAMS for arg in argv)
 
 
+def _is_curl(argv: list[str]) -> bool:
+    return any(os.path.basename(arg) == "curl" for arg in argv)
+
+
+def _redact_userpass(value: str) -> str:
+    """`user:password` -> `user:<redacted>`; a value without `:` is left as is."""
+    user, sep, _ = value.partition(":")
+    return f"{user}:<redacted>" if sep else value
+
+
 def redact_argv(argv: list[str]) -> list[str]:
     """Redact secret flags, env prefixes and embedded secrets in an argv list."""
     if not argv:
         return []
 
     is_pw_prog = _is_password_program(argv)
+    is_curl = _is_curl(argv)
     res: list[str] = []
     i = 0
 
@@ -234,6 +246,25 @@ def redact_argv(argv: list[str]) -> list[str]:
                 continue
             if arg.startswith("-p") and not arg.startswith("--") and len(arg) > 2:
                 res.append("-p<redacted>")
+                i += 1
+                continue
+
+        if is_curl:
+            if arg in _CURL_USER_FLAGS:
+                res.append(arg)
+                if i + 1 < len(argv):
+                    res.append(_redact_userpass(argv[i + 1]))
+                    i += 2
+                else:
+                    i += 1
+                continue
+            flag, eq, value = arg.partition("=")
+            if eq and flag in _CURL_USER_FLAGS and flag.startswith("--"):
+                res.append(f"{flag}={_redact_userpass(value)}")
+                i += 1
+                continue
+            if arg[:2] in ("-u", "-U") and not arg.startswith("--") and len(arg) > 2:
+                res.append(arg[:2] + _redact_userpass(arg[2:]))
                 i += 1
                 continue
 

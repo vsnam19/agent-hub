@@ -266,3 +266,27 @@ def test_fix_1_archive_month_takes_chain_lock(tmp_path: Path, monkeypatch: pytes
     res_ok = archive_month("2026-09", state_dir=state_dir, vault=vault, today=date(2026, 10, 19))
     assert res_ok.status == "ok"
     assert not (root / "2026-09").exists()
+
+
+def test_archive_packs_without_holding_chain_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state_dir = tmp_path / "state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    append({"ts": "2026-09-01T10:00:00.000Z", "kind": "command", "target": "c1"}, state_dir=state_dir)
+    root = audit_root(state_dir)
+    real_pack = archive_mod._build_archive_locked
+    appended: list[dict] = []
+
+    def slow_pack(*args, **kwargs):  # type: ignore[no-untyped-def]
+        appended.append(
+            append({"ts": "2026-10-19T10:00:00.000Z", "kind": "command", "target": "during"}, state_dir=state_dir)
+        )
+        return real_pack(*args, **kwargs)
+
+    monkeypatch.setattr(archive_mod, "_build_archive_locked", slow_pack)
+    res = archive_month("2026-09", state_dir=state_dir, vault=vault, today=date(2026, 10, 19))
+
+    assert res.status == "ok"
+    assert len(appended) == 1
+    assert not (root / "2026-09").exists()
+    assert (root / "2026-10" / "2026-10-19.jsonl").is_file()

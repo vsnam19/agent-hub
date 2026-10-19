@@ -463,3 +463,27 @@ def test_p_behind_wrapper_with_option_values():
         "mysql",
         "-p<redacted>",
     ]
+
+
+def test_curl_user_password_redacted():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["curl", "-u", "alice:hunter2", "http://x"]) == ["curl", "-u", "alice:<redacted>", "http://x"]
+    assert redact_argv(["curl", "--user", "alice:hunter2"]) == ["curl", "--user", "alice:<redacted>"]
+    assert redact_argv(["curl", "--user=alice:hunter2"]) == ["curl", "--user=alice:<redacted>"]
+    assert redact_argv(["curl", "-U", "bob:pw:x"]) == ["curl", "-U", "bob:<redacted>"]
+    proxy = redact_argv(["/usr/bin/curl", "--proxy-user", "bob:pw"])
+    assert proxy == ["/usr/bin/curl", "--proxy-user", "bob:<redacted>"]
+    assert redact_argv(["curl", "--proxy-user=bob:pw"]) == ["curl", "--proxy-user=bob:<redacted>"]
+    assert redact_argv(["curl", "-ualice:hunter2"]) == ["curl", "-ualice:<redacted>"]
+    assert redact_argv(["curl", "-u", "alice"]) == ["curl", "-u", "alice"]
+
+
+def test_wget_user_password_redacted():
+    from agenthub.redact import redact_argv
+
+    out = redact_argv(["wget", "--user=alice", "--password=hunter2", "http://x"])
+    assert out[2] == "--password=<redacted>"
+    assert "hunter2" not in " ".join(out)
+    out = redact_argv(["wget", "--http-password", "hunter2", "http://x"])
+    assert "hunter2" not in " ".join(out)

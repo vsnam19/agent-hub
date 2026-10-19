@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import signal
+import threading
 import time
 import uuid
 from collections.abc import Mapping
@@ -469,9 +470,15 @@ def sanitize(event: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-_caller_written = False
-_emitting_gap = False
-_gap_written = False
+class _CallState(threading.local):
+    """Per-thread, per-call flags: two threads writing at once never see each other's state."""
+
+    caller_written = False
+    emitting_gap = False
+    gap_written = False
+
+
+_state = _CallState()
 
 
 def _write_record_to_file(
@@ -484,7 +491,6 @@ def _write_record_to_file(
     caller: bool = False,
     claimed_gap: bool = False,
 ) -> tuple[dict[str, Any], str, str]:
-    global _caller_written, _gap_written
     day = _day_from_ts(record["ts"])
     month_dir = root / day[:7]
     _ensure_dir_0700(month_dir)
@@ -508,9 +514,9 @@ def _write_record_to_file(
             line_bytes = b"\n" + line_bytes
         os.write(fd, line_bytes)
         if caller:
-            _caller_written = True
+            _state.caller_written = True
         if claimed_gap:
-            _gap_written = True
+            _state.gap_written = True
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -563,7 +569,7 @@ def _append_locked(event: Mapping[str, Any], root: Path) -> dict[str, Any]:
     _stamp_ts(record, last_ev)
 
     caller_rec, _, _ = _write_record_to_file(
-        record, root, last_ev, last_day, prev_hash, caller=not _emitting_gap, claimed_gap=_emitting_gap
+        record, root, last_ev, last_day, prev_hash, caller=not _state.emitting_gap, claimed_gap=_state.emitting_gap
     )
     return caller_rec
 
@@ -703,14 +709,13 @@ def _claim_pending_and_emit_gap(root: Path, state_dir: Path | str | None) -> Non
     }
     if unparsable:
         gap_event["detail"]["unparsable"] = unparsable
-    global _emitting_gap, _gap_written
-    _emitting_gap = True
-    _gap_written = False
+    _state.emitting_gap = True
+    _state.gap_written = False
     try:
         _append_locked(gap_event, root)
     except BaseException:
-        _emitting_gap = False
-        if _gap_written:
+        _state.emitting_gap = False
+        if _state.gap_written:
             # the gap is in the chain: the claimed lines are reported, not restored
             _release_claims(claims, sizes, pending_path)
             raise
@@ -724,7 +729,7 @@ def _claim_pending_and_emit_gap(root: Path, state_dir: Path | str | None) -> Non
                 os.close(fd)
         _release_claims(claims, sizes, pending_path)
         raise
-    _emitting_gap = False
+    _state.emitting_gap = False
     _release_claims(claims, sizes, pending_path)
 
 
@@ -769,9 +774,8 @@ def _record_pending_failure(event: Mapping[str, Any], exc: Exception, state_dir:
 
 
 def write(event: Mapping[str, Any], state_dir: Path | str | None = None) -> bool:
-    global _caller_written, _emitting_gap
-    _caller_written = False
-    _emitting_gap = False
+    _state.caller_written = False
+    _state.emitting_gap = False
     try:
         deadline = time.monotonic() + _LOCK_DEADLINE_S
         root, lock_fd = _locked_root(state_dir, deadline)
@@ -782,6 +786,6 @@ def write(event: Mapping[str, Any], state_dir: Path | str | None = None) -> bool
             _release_lock(lock_fd)
         return True
     except Exception as exc:
-        if not _caller_written:
+        if not _state.caller_written:
             record_pending(event, str(exc) or type(exc).__name__, state_dir=state_dir)
         return False
