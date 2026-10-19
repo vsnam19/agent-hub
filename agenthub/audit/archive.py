@@ -5,13 +5,16 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tarfile
 import time
 import tomllib
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Any
 
+from agenthub.audit.emit import emit
 from agenthub.audit.verify import verify
 from agenthub.audit.writer import audit_root
 from agenthub.config import paths
@@ -37,6 +40,13 @@ class BuiltArchive:
     first_hash: str
     first_prev_hash: str
     last_hash: str
+
+
+@dataclass(frozen=True)
+class ArchiveResult:
+    status: str
+    message: str
+    exit_code: int
 
 
 def load_vault(config_dir: Path | str | None = None) -> Path:
@@ -268,3 +278,234 @@ def build_archive(
     finally:
         for fd in locked_fds:
             _release_lock(fd)
+
+
+def _sha256_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as f:
+        while chunk := f.read(65536):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _copy_file(src: Path, dst: Path) -> None:
+    fd = os.open(dst, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError:
+            pass
+        with src.open("rb") as fsrc:
+            while chunk := fsrc.read(65536):
+                os.write(fd, chunk)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_file_0600(path: Path, data: bytes) -> None:
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError:
+            pass
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def archive_month(
+    month: str | None = None,
+    state_dir: Path | str | None = None,
+    vault: Path | str | None = None,
+    today: date | datetime | None = None,
+) -> ArchiveResult:
+    resolved_state_dir = paths().state_dir if state_dir is None else Path(state_dir)
+    root = audit_root(resolved_state_dir)
+    target_month = month if isinstance(month, str) else ""
+
+    built: BuiltArchive | None = None
+    part_path: Path | None = None
+    vault_manifest_part: Path | None = None
+    local_manifest_part: Path | None = None
+
+    try:
+        if month is None:
+            resolved_month = default_month(today=today)
+        else:
+            resolved_month = month
+        target_month = str(resolved_month)
+        resolved_month = check_month(resolved_month, today=today)
+        target_month = resolved_month
+
+        vault_root = load_vault() if vault is None else Path(vault).expanduser()
+        if not vault_root.exists():
+            raise ArchiveError(f"vault directory does not exist: {vault_root}")
+        if not vault_root.is_dir():
+            raise ArchiveError(f"vault path is not a directory: {vault_root}")
+
+        vault_dir = vault_root / "agent-hub-audit"
+        if vault_dir.exists() and not vault_dir.is_dir():
+            raise ArchiveError(f"vault audit path is not a directory: {vault_dir}")
+
+        vault_tar = vault_dir / f"{resolved_month}.tar.xz"
+        vault_manifest = vault_dir / f"{resolved_month}.json"
+
+        # (a) If the vault archive and manifest exist and the manifest sha256 matches the file -> noop
+        if vault_dir.is_dir() and vault_tar.is_file() and vault_manifest.is_file():
+            try:
+                existing_manifest = json.loads(vault_manifest.read_text(encoding="utf-8"))
+            except Exception:
+                existing_manifest = None
+            if isinstance(existing_manifest, dict):
+                manifest_sha256 = existing_manifest.get("sha256")
+                if isinstance(manifest_sha256, str) and manifest_sha256:
+                    if _sha256_file(vault_tar) == manifest_sha256:
+                        noop_detail: dict[str, Any] = {
+                            "month": resolved_month,
+                            "sha256": manifest_sha256,
+                        }
+                        if isinstance(existing_manifest.get("count"), int):
+                            noop_detail["count"] = existing_manifest["count"]
+                        emit(
+                            "archive",
+                            "archive",
+                            state_dir=resolved_state_dir,
+                            target=resolved_month,
+                            status="noop",
+                            exit_code=0,
+                            evidence=f"sha256:{manifest_sha256}",
+                            actor_role="archiver",
+                            detail=noop_detail,
+                        )
+                        return ArchiveResult(
+                            status="noop",
+                            message=f"month {resolved_month} already archived",
+                            exit_code=0,
+                        )
+
+        # Create vault subdirectory if the vault itself is an existing writable directory
+        if not os.access(vault_root, os.W_OK | os.X_OK) and not vault_dir.exists():
+            raise ArchiveError(f"vault directory is not writable: {vault_root}")
+        vault_dir.mkdir(exist_ok=True)
+        if not os.access(vault_dir, os.W_OK | os.X_OK):
+            raise ArchiveError(f"vault audit directory is not writable: {vault_dir}")
+
+        # (b) Build via build_archive
+        built = build_archive(resolved_month, state_dir=resolved_state_dir)
+
+        # (c) Copy to <name>.tar.xz.part in vault, fsync, rename, and compare sha256
+        part_path = vault_dir / f"{resolved_month}.tar.xz.part"
+        _copy_file(built.path, part_path)
+        if not part_path.is_file():
+            raise ArchiveError(f"failed to create archive part file: {part_path}")
+
+        part_fd = os.open(part_path, os.O_RDONLY)
+        try:
+            os.fsync(part_fd)
+        except OSError:
+            pass
+        finally:
+            os.close(part_fd)
+
+        part_sha256 = _sha256_file(part_path)
+        if part_sha256 != built.sha256:
+            raise ArchiveError(f"checksum mismatch for {part_path}: expected {built.sha256}, got {part_sha256}")
+
+        os.replace(part_path, vault_tar)
+
+        copied_sha256 = _sha256_file(vault_tar)
+        if copied_sha256 != built.sha256:
+            raise ArchiveError(f"checksum mismatch for {vault_tar}: expected {built.sha256}, got {copied_sha256}")
+
+        # (d) Write the manifest and copy it to <state>/audit/manifests/YYYY-MM.json
+        created_iso = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        manifest_obj = {
+            "month": resolved_month,
+            "files": built.files,
+            "count": built.count,
+            "first_hash": built.first_hash,
+            "first_prev_hash": built.first_prev_hash,
+            "last_hash": built.last_hash,
+            "sha256": built.sha256,
+            "created": created_iso,
+        }
+        manifest_bytes = (json.dumps(manifest_obj, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+        manifests_dir = root / "manifests"
+        manifests_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(manifests_dir, 0o700)
+        except OSError:
+            pass
+
+        local_manifest = manifests_dir / f"{resolved_month}.json"
+        vault_manifest_part = vault_dir / f"{resolved_month}.json.part"
+        local_manifest_part = manifests_dir / f"{resolved_month}.json.part"
+        _write_file_0600(vault_manifest_part, manifest_bytes)
+        shutil.copyfile(vault_manifest_part, local_manifest_part)
+        try:
+            os.chmod(local_manifest_part, 0o600)
+        except OSError:
+            pass
+        os.replace(vault_manifest_part, vault_manifest)
+        os.replace(local_manifest_part, local_manifest)
+
+        # (e) ONLY THEN delete the local month directory <state>/audit/YYYY-MM/ and write an archive event status ok
+        month_dir = root / resolved_month
+        shutil.rmtree(month_dir)
+
+        emit(
+            "archive",
+            "archive",
+            state_dir=resolved_state_dir,
+            target=resolved_month,
+            status="ok",
+            exit_code=0,
+            evidence=f"sha256:{built.sha256}",
+            actor_role="archiver",
+            detail={
+                "month": resolved_month,
+                "count": built.count,
+                "sha256": built.sha256,
+            },
+        )
+        return ArchiveResult(
+            status="ok",
+            message=f"archived {resolved_month} ({built.count} events, sha256={built.sha256})",
+            exit_code=0,
+        )
+    except Exception as exc:
+        for p in (part_path, vault_manifest_part, local_manifest_part):
+            if p is not None and p.exists():
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        reason = str(exc) or type(exc).__name__
+        emit(
+            "archive",
+            "archive",
+            state_dir=resolved_state_dir,
+            target=target_month,
+            status="error",
+            exit_code=1,
+            actor_role="archiver",
+            detail={
+                "month": target_month,
+                "reason": reason,
+            },
+        )
+        return ArchiveResult(
+            status="error",
+            message=reason,
+            exit_code=1,
+        )
+    finally:
+        if built is not None and built.path.exists():
+            try:
+                built.path.unlink(missing_ok=True)
+            except OSError:
+                pass
