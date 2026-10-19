@@ -479,6 +479,18 @@ def test_curl_user_password_redacted():
     assert redact_argv(["curl", "-u", "alice"]) == ["curl", "-u", "alice"]
 
 
+def test_curl_bundled_short_flags_user():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["curl", "-ku", "a:b", "http://x"]) == ["curl", "-ku", "a:<redacted>", "http://x"]
+    assert redact_argv(["curl", "-su", "a:b", "http://x"]) == ["curl", "-su", "a:<redacted>", "http://x"]
+    assert redact_argv(["curl", "-sSu", "a:b", "http://x"]) == ["curl", "-sSu", "a:<redacted>", "http://x"]
+    assert redact_argv(["curl", "-kua:b", "http://x"]) == ["curl", "-kua:<redacted>", "http://x"]
+    assert redact_argv(["curl", "-kU", "a:b", "http://x"]) == ["curl", "-kU", "a:<redacted>", "http://x"]
+    assert redact_argv(["curl", "-kUa:b", "http://x"]) == ["curl", "-kUa:<redacted>", "http://x"]
+    assert redact_argv(["curl", "-sSkua:b", "http://x"]) == ["curl", "-sSkua:<redacted>", "http://x"]
+
+
 def test_wget_user_password_redacted():
     from agenthub.redact import redact_argv
 

@@ -610,6 +610,19 @@ def test_target_curl_user_password_redacted() -> None:
     assert sanitize({"target": "x && curl -u alice:hunter2 http://x"})["target"].startswith("x && curl -u ")
 
 
+def test_target_curl_bundled_user_redacted() -> None:
+    for cmd, expected in (
+        ("curl -ku alice:hunter2 http://x", "curl -ku alice:<redacted> http://x"),
+        ("curl -su alice:hunter2 http://x", "curl -su alice:<redacted> http://x"),
+        ("curl -sSu alice:hunter2 http://x", "curl -sSu alice:<redacted> http://x"),
+        ("curl -kua:b http://x", "curl -kua:<redacted> http://x"),
+    ):
+        out = sanitize({"target": cmd})["target"]
+        assert out == expected
+        assert "<redacted>" in out
+        assert "http://x" in out
+
+
 def test_target_any_changed_token_replaced() -> None:
     out = sanitize({"target": "curl -u alice:hunter2 http://x"})["target"]
     assert out == "curl -u alice:<redacted> http://x"

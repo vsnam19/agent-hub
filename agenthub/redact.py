@@ -75,6 +75,7 @@ _SECRET_FLAG_WORDS = (
 )
 _PASSWORD_PROGRAMS = {"mysql", "mysqldump", "mysqladmin", "sshpass"}
 _CURL_USER_FLAGS = {"-u", "--user", "-U", "--proxy-user"}
+_CURL_SHORT_USER = re.compile(r"^-([a-zA-Z]*?)([uU])(.*)$")
 _SECRET_KEY = re.compile(rf"(?i)^{_NAME}$")
 _ENV_VAR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 
@@ -263,9 +264,19 @@ def redact_argv(argv: list[str]) -> list[str]:
                 res.append(f"{flag}={_redact_userpass(value)}")
                 i += 1
                 continue
-            if arg[:2] in ("-u", "-U") and not arg.startswith("--") and len(arg) > 2:
-                res.append(arg[:2] + _redact_userpass(arg[2:]))
-                i += 1
+            m = _CURL_SHORT_USER.match(arg)
+            if m:
+                rest = m.group(3)
+                if not rest:
+                    res.append(arg)
+                    if i + 1 < len(argv):
+                        res.append(_redact_userpass(argv[i + 1]))
+                        i += 2
+                    else:
+                        i += 1
+                else:
+                    res.append(f"-{m.group(1)}{m.group(2)}{_redact_userpass(rest)}")
+                    i += 1
                 continue
 
         if arg.startswith("-"):
