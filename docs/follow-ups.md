@@ -135,3 +135,12 @@ a turn. Items:
   owner approves the request hash.
 - **Spec-review gate for the techlead.** Revisit after the scorecard baseline exists, so its effect can be measured
   (fix rounds and spec-caused `blocked` tasks with vs without the gate).
+
+## Single source of truth for model ids (owner, 2026-10-19, D-121) — next plan after Phase G
+
+agy 1.4.2 removed `claude-*-4-6`; nothing noticed (cooldowns hid it) and the Phase G task `pool-agy-model-ids` blocked
+because three test files hard-code default-pool ids. Fix: (1) each agent's model list comes from its host CLI
+(`agy models`, …) cached in state; `agent-hub pool` marks `unknown-model` links and chains skip them at once;
+(2) tests read expected chains from `default_pool.toml` via `load_pool()` and use fake ids (`fake:model-a`) for
+arbitrary links; a test fails on real `agy:`/`codex:`/`claude:` literals in `tests/`; (3) the owner pool lists only
+overrides.
