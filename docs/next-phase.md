@@ -13,10 +13,12 @@ vault (no config / missing vault keep data and exit 1; success; re-run no-op; ve
 `.worktrees/phase-g-*`, `.worktrees/phase-g-hardening-*`, `orch/phase-g/*`, `orch/phase-g-hardening/*` — deleting them
 is the owner's call.
 
-**Next (owner to start):** release v0.12.0 (update the plugin cache, restart Claude Code), then the owner steps in
-README "Audit log" (hub install --apply for codex/agy hooks, trust the codex hook, `audit.toml` vault, `audit schedule
---apply`). After that: D-121 (one source of truth for model ids) + D-122 (`incident add`, weekly reads
-`incidents.jsonl`), then `docs/follow-ups.md` "From the Phase G final review" and "From plan phase-g-hardening".
+**Current work (2026-10-20 00:00 UTC): plan `ids-incidents` (D-121 + D-122) running.** Spec
+`docs/superpowers/specs/2026-10-20-model-ids-and-incidents-design.md`; split by techlead job
+`20261019-234713-techlead-ed70` (21 tasks); plan `~/.local/state/agent-hub/plans/ids-incidents/plan.json`
+(implement on `agy:gemini-3.8-flash-high`; reviews on the owner review chain Argon Medium → agy Claude Opus 5.5 Medium →
+Flash — **never claude:opus**, D-126). Next: plan wait → plan review → plan close → ready → plan merge → v0.13.0.
+Owner still to do for v0.12.0: release (plugin cache), then README "Audit log" owner steps.
 
 The steps below describe how `followups-1` was run; reuse them for the next plan (new slug, new spec).
 
