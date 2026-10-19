@@ -375,8 +375,21 @@ def test_p_flag_untouched_for_other_programs():
     assert redact_argv(["env", "A=1", "mkdir", "-p", "my/dir"]) == ["env", "A=1", "mkdir", "-p", "my/dir"]
     assert redact_argv(["grep", "-p", "pattern"]) == ["grep", "-p", "pattern"]
     assert redact_argv(["python", "app.py", "-p", "arg"]) == ["python", "app.py", "-p", "arg"]
-    assert redact_argv(["echo", "mysql", "-p", "secret"]) == ["echo", "mysql", "-p", "secret"]
+    assert redact_argv(["echo", "mysql", "-p", "secret"]) == ["echo", "mysql", "-p", "<redacted>"]
     assert redact_argv(["ls", "mysqldump", "-p"]) == ["ls", "mysqldump", "-p"]
+
+
+def test_compound_command_starting_with_echo_still_redacts_p():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["echo", "start", "&&", "mysql", "-phunter2", "db"]) == [
+        "echo",
+        "start",
+        "&&",
+        "mysql",
+        "-p<redacted>",
+        "db",
+    ]
 
 
 def test_secret_flag_name_variants():

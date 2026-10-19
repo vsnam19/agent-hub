@@ -207,7 +207,7 @@ def redact_argv(argv: list[str]) -> list[str]:
     if not argv:
         return []
 
-    is_pw_prog = _is_password_program(argv) and not (argv and os.path.basename(argv[0]) == "echo")
+    is_pw_prog = _is_password_program(argv)
     res: list[str] = []
     i = 0
 
