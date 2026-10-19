@@ -1,7 +1,9 @@
 import json
 import shutil
+from datetime import date
 from pathlib import Path
 
+from agenthub.audit.archive import archive_month
 from agenthub.audit.verify import VerifyResult, verify
 from agenthub.audit.writer import ZERO_HASH, append, audit_root, canonical_json, event_hash
 
@@ -92,7 +94,7 @@ def test_reordered_events_are_detected(tmp_path: Path) -> None:
     assert "seq=3: seq mismatch: expected 2, got 3" in res.message
 
 
-def test_clock_skew_over_two_seconds_fails(tmp_path: Path) -> None:
+def test_ts_backwards_is_break_strict(tmp_path: Path) -> None:
     # Monotonic timestamps (equal ts) pass
     append({"ts": "2026-10-18T10:00:05.000Z", "kind": "command", "target": "first"}, state_dir=tmp_path)
     append({"ts": "2026-10-18T10:00:05.000Z", "kind": "command", "target": "second"}, state_dir=tmp_path)
@@ -107,7 +109,7 @@ def test_clock_skew_over_two_seconds_fails(tmp_path: Path) -> None:
     assert res_ok2.ok is True
     assert res_ok2.message == "ok: 3 events"
 
-    # Earlier timestamp fails with ts went backwards
+    # Under strict D-123 rule, any earlier timestamp fails with ts went backwards
     day_file = audit_root(tmp_path) / "2026-10" / "2026-10-18.jsonl"
     lines = day_file.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 3
@@ -463,3 +465,93 @@ def test_ts_backwards_is_break(tmp_path: Path) -> None:
     assert res.ok is False
     assert "2026-10/2026-10-18.jsonl:2 seq=2:" in res.message
     assert "ts went backwards" in res.message
+
+
+def test_earlier_tail_not_json_object_derives_seq(tmp_path: Path) -> None:
+    root = audit_root(tmp_path)
+    sep_dir = root / "2026-09"
+    sep_dir.mkdir(parents=True, exist_ok=True)
+
+    ev0 = {
+        "schema_version": 1,
+        "ts": "2026-09-18T10:00:00.000Z",
+        "seq": 1,
+        "event_id": "e0",
+        "kind": "command",
+        "target": "valid",
+        "prev_hash": ZERO_HASH,
+    }
+    ev0["hash"] = event_hash(ZERO_HASH, ev0)
+
+    # Line 1: blank
+    # Line 2: valid event with seq=1
+    # Line 3: blank
+    # Line 4: JSON that is not an object (e.g. "[1, 2, 3]")
+    # Line number is 4, but seq should be derived from previous event (seq=1) + 1 = 2
+    day_content = "\n" + canonical_json(ev0) + "\n\n[1, 2, 3]\n"
+    (sep_dir / "2026-09-18.jsonl").write_text(day_content, encoding="utf-8")
+
+    oct_dir = root / "2026-10"
+    oct_dir.mkdir(parents=True, exist_ok=True)
+    ev1 = {
+        "schema_version": 1,
+        "ts": "2026-10-01T10:00:00.000Z",
+        "seq": 1,
+        "event_id": "e1",
+        "kind": "command",
+        "target": "oct",
+        "prev_hash": ev0["hash"],
+    }
+    ev1["hash"] = event_hash(ev0["hash"], ev1)
+    (oct_dir / "2026-10-01.jsonl").write_text(canonical_json(ev1) + "\n", encoding="utf-8")
+
+    res = verify(state_dir=tmp_path, month="2026-10")
+    assert res.ok is False
+    assert "2026-09/2026-09-18.jsonl:4" in res.message
+    assert "seq=2:" in res.message
+    assert "event is not a JSON object" in res.message
+
+
+def test_month_with_only_empty_day_files_verifies_archive(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    vault_dir = tmp_path / "vault"
+    vault_dir.mkdir(parents=True, exist_ok=True)
+
+    append({"ts": "2026-09-01T10:00:00.000Z", "kind": "command", "target": "c1"}, state_dir=state_dir)
+    append({"ts": "2026-09-02T10:00:00.000Z", "kind": "command", "target": "c2"}, state_dir=state_dir)
+
+    res_archive = archive_month("2026-09", state_dir=state_dir, vault=vault_dir, today=date(2026, 10, 19))
+    assert res_archive.status == "ok"
+
+    # Recreate the 2026-09 directory with only an empty day file (blank lines)
+    sep_dir = audit_root(state_dir) / "2026-09"
+    sep_dir.mkdir(parents=True, exist_ok=True)
+    (sep_dir / "2026-09-01.jsonl").write_text("\n\n", encoding="utf-8")
+
+    # A month with only empty day files must not count as local to hide its manifest/archive
+    res = verify(state_dir=state_dir, month="2026-09", vault=vault_dir)
+    assert res.ok is True
+    assert res.message == "ok: 2 events"
+
+
+def test_verify_archived_month_loads_default_vault(tmp_path: Path, monkeypatch) -> None:
+    state_dir = tmp_path / "state"
+    vault_dir = tmp_path / "vault"
+    vault_dir.mkdir(parents=True, exist_ok=True)
+
+    append({"ts": "2026-09-01T10:00:00.000Z", "kind": "command", "target": "c1"}, state_dir=state_dir)
+    append({"ts": "2026-09-01T10:00:01.000Z", "kind": "command", "target": "c2"}, state_dir=state_dir)
+
+    res_archive = archive_month("2026-09", state_dir=state_dir, vault=vault_dir, today=date(2026, 10, 19))
+    assert res_archive.status == "ok"
+
+    # Configure default owner config (via AGENT_HUB_CONFIG) to point to vault_dir
+    config_dir = tmp_path / "owner_config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "audit.toml").write_text(f'vault = "{vault_dir}"\n', encoding="utf-8")
+    monkeypatch.setenv("AGENT_HUB_CONFIG", str(config_dir))
+
+    # verify(month=M) called with neither vault nor config_dir
+    res = verify(state_dir=state_dir, month="2026-09")
+    assert res.ok is True
+    assert res.message == "ok: 2 events"

@@ -32,6 +32,30 @@ def _parse_ts(ts: str) -> datetime:
     return dt
 
 
+def _is_non_empty_day_file(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return any(line.strip() for line in f)
+    except Exception:
+        try:
+            return path.stat().st_size > 0
+        except OSError:
+            return False
+
+
+def _derive_seq(non_empty_before: list[tuple[int, str]], fallback: int) -> int:
+    for _, prev_l in reversed(non_empty_before):
+        try:
+            prev_rec = json.loads(prev_l)
+            if isinstance(prev_rec, dict) and isinstance(prev_rec.get("seq"), int):
+                return prev_rec["seq"] + 1
+        except Exception:
+            pass
+    return fallback
+
+
 def _latest_earlier_local_day_hash(root: Path, before_day: str) -> tuple[str, str, str] | VerifyResult | None:
     if not root.is_dir():
         return None
@@ -59,27 +83,21 @@ def _latest_earlier_local_day_hash(root: Path, before_day: str) -> tuple[str, st
             # Stop here and report break if unreadable.
             rel_path = path.relative_to(root).as_posix()
             last_line_no, last_line_str = non_empty[-1]
+
             try:
                 record = json.loads(last_line_str)
             except Exception as e:
-                seq_val = last_line_no
-                for _, prev_l in reversed(non_empty[:-1]):
-                    try:
-                        prev_rec = json.loads(prev_l)
-                        if isinstance(prev_rec, dict) and isinstance(prev_rec.get("seq"), int):
-                            seq_val = prev_rec["seq"] + 1
-                            break
-                    except Exception:
-                        pass
+                seq_val = _derive_seq(non_empty[:-1], last_line_no)
                 return VerifyResult(
                     ok=False,
                     message=f"{rel_path}:{last_line_no} seq={seq_val}: invalid JSON: {e}",
                 )
 
             if not isinstance(record, dict):
+                seq_val = _derive_seq(non_empty[:-1], last_line_no)
                 return VerifyResult(
                     ok=False,
-                    message=f"{rel_path}:{last_line_no} seq={last_line_no}: event is not a JSON object",
+                    message=f"{rel_path}:{last_line_no} seq={seq_val}: event is not a JSON object",
                 )
 
             h = record.get("hash")
@@ -385,7 +403,9 @@ def verify(
             raise ValueError(f"invalid month format: {month!r}, expected YYYY-MM")
         month_dir = root / month
         manifest_file = root / "manifests" / f"{month}.json"
-        has_local = month_dir.is_dir() and any(p.is_file() and _DAY_FILE_RE.match(p.name) for p in month_dir.iterdir())
+        has_local = month_dir.is_dir() and any(
+            _DAY_FILE_RE.match(p.name) and _is_non_empty_day_file(p) for p in month_dir.iterdir()
+        )
         if not has_local:
             if manifest_file.is_file():
                 if vault is not None or config_dir is not None:
@@ -395,7 +415,19 @@ def verify(
                         vault=vault,
                         config_dir=config_dir,
                     )
-                return VerifyResult(ok=True, message=f"month {month} is not local and was not checked")
+                from agenthub.audit.archive import ArchiveError, load_vault
+                from agenthub.config import ConfigError
+
+                try:
+                    default_vault = load_vault(config_dir=None)
+                except (ArchiveError, ConfigError):
+                    return VerifyResult(ok=True, message=f"month {month} is not local and was not checked")
+                return _verify_archived_month(
+                    root=root,
+                    month=month,
+                    vault=default_vault,
+                    config_dir=None,
+                )
             return VerifyResult(ok=True, message="ok: 0 events")
         target_months = [month]
     else:
