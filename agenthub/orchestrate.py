@@ -11,12 +11,13 @@ import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from agenthub import brief as briefmod
 from agenthub import env, gateguard, guards, handoff, process
 from agenthub.agents import Classified, Outcome, Request, registry
-from agenthub.audit.trace import trace_env
+from agenthub.audit.emit import emit
+from agenthub.audit.trace import trace_context, trace_env
 from agenthub.config import ConfigError, Paths, Pool
 from agenthub.jobs import Job, list_jobs, new_job
 from agenthub.pool import Cooldowns, Link
@@ -58,6 +59,53 @@ class RunArgs:
     exclude: list[str] = dataclasses.field(default_factory=list)  # agent:model links to skip (e.g. the implementer)
     allow: list[str] = dataclasses.field(default_factory=list)  # repo-relative globs the run may change
     skills: list[str] = dataclasses.field(default_factory=list)  # worker skills the brief tells the worker to load
+
+
+def _gate_summary(gates: list[dict] | None) -> str | None:
+    if not gates:
+        return None
+    failed = next((g for g in gates if g.get("rc") != 0), None)
+    if failed:
+        return f"FAILED: {failed.get('cmd')} (rc {failed.get('rc')})"
+    return f"passed ({len(gates)})"
+
+
+def _parent_for(job_id: str) -> dict[str, Any]:
+    env_parent = trace_context(os.environ).parent
+    parent: dict[str, Any] = {}
+    for key in ("plan", "task"):
+        if key in env_parent:
+            parent[key] = env_parent[key]
+    parent["job"] = job_id
+    return parent
+
+
+def _emit_job(
+    event: str,
+    *,
+    state_dir: Path | str,
+    job_id: str,
+    status: str = "ok",
+    exit_code: int | None = None,
+    duration_ms: int | float | None = None,
+    quote: str | None = None,
+    detail: dict[str, Any] | None = None,
+) -> None:
+    try:
+        emit(
+            "job",
+            event,
+            state_dir=state_dir,
+            job_id=job_id,
+            parent=_parent_for(job_id),
+            status=status,
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+            quote=quote,
+            detail=detail,
+        )
+    except Exception:
+        pass
 
 
 def repo_gates(root: Path) -> list[str]:
@@ -216,16 +264,29 @@ def run_gate_job(
         try:
             job.write_json("result.json", record)
             (on_started or globals()["on_started"])(job.id)
+            _emit_job(
+                "start",
+                state_dir=p.state_dir,
+                job_id=job.id,
+                detail={"role": "gate", "kind": "gate", "workdir": str(repo.root)},
+            )
             record["gate"], passed = run_gates(
                 merge_gates(defaults, cli_gates), repo.root, job.dir / "gate", head, cancel
             )
+            _emit_job(
+                "gate",
+                state_dir=p.state_dir,
+                job_id=job.id,
+                status="ok" if passed else "error",
+                quote=_gate_summary(record["gate"]),
+            )
             record["gate_touched"] = [] if cancel.cancelled else gateguard.inspect_diff(repo, since)
         except BaseException:
-            _finish(job, record, "cancelled" if cancel.cancelled else "failed", now, started)
+            _finish(job, record, "cancelled" if cancel.cancelled else "failed", now, started, state_dir=p.state_dir)
             raise
     if cancel.cancelled:
-        return _finish(job, record, "cancelled", now, started)
-    return _finish(job, record, "ok" if passed else "gate-failed", now, started)
+        return _finish(job, record, "cancelled", now, started, state_dir=p.state_dir)
+    return _finish(job, record, "ok" if passed else "gate-failed", now, started, state_dir=p.state_dir)
 
 
 class _Cancel:
@@ -386,6 +447,12 @@ def run_job(
         try:
             job.write_json("result.json", record)
             (on_started or globals()["on_started"])(job.id)
+            _emit_job(
+                "start",
+                state_dir=p.state_dir,
+                job_id=job.id,
+                detail={"role": args.role, "kind": kind, "workdir": str(workdir)},
+            )
 
             if cancel.cancelled:
                 return _finish(job, record, "cancelled", now, started)
@@ -468,6 +535,22 @@ def run_job(
                     record["effort"] = link.effort
                 else:
                     record.pop("effort", None)
+                _emit_job(
+                    "attempt",
+                    state_dir=p.state_dir,
+                    job_id=job.id,
+                    status="ok" if cl.outcome == Outcome.OK else "error",
+                    exit_code=ran.rc if ran is not None else None,
+                    duration_ms=int(round(ran.duration_s * 1000)) if ran is not None else None,
+                    detail={
+                        "agent": link.agent,
+                        "model": link.model,
+                        "n": n,
+                        "outcome": entry.get("outcome"),
+                        "rc": entry.get("rc"),
+                        "duration": entry.get("duration_s"),
+                    },
+                )
 
                 if cancel.cancelled:
                     entry["outcome"] = "cancelled"
@@ -489,6 +572,13 @@ def run_job(
                     if guards.fingerprint(repo) != before:
                         status = "interrupted"
                         break
+                    if n < len(links):
+                        _emit_job(
+                            "fallback",
+                            state_dir=p.state_dir,
+                            job_id=job.id,
+                            detail={"from": n, "outcome": str(cl.outcome)},
+                        )
                     continue
                 if read_only and cl.outcome == Outcome.FAILED and cl.detail.startswith("permission auto-denied"):
                     entry["fallthrough"] = "permission auto-denied"
@@ -524,10 +614,25 @@ def run_job(
             reply_text = Path(reply_path).read_text()
             record["verdict"] = handoff.parse_verdict(reply_text)
             record["touched_review"] = handoff.parse_touched_entries(reply_text)
+            if record["verdict"]:
+                _emit_job(
+                    "review",
+                    state_dir=p.state_dir,
+                    job_id=job.id,
+                    quote=str(record["verdict"]),
+                    detail={"verdict": record["verdict"]},
+                )
 
     record["gate"] = []
     if status == "ok" and kind == "implement" and gates:
         record["gate"], passed = run_gates(gates, workdir, job.dir / "gate", guards.head(repo))
+        _emit_job(
+            "gate",
+            state_dir=p.state_dir,
+            job_id=job.id,
+            status="ok" if passed else "error",
+            quote=_gate_summary(record["gate"]),
+        )
         if not passed:
             status = "gate-failed"
 
@@ -700,7 +805,14 @@ def _write_reply(attempt_dir: Path, cl: Classified) -> None:
         reply_file.write_text(cl.reply)
 
 
-def _finish(job: Job, record: dict, status: str, now, started: datetime) -> dict:
+def _finish(
+    job: Job,
+    record: dict,
+    status: str,
+    now: Callable[[], datetime],
+    started: datetime,
+    state_dir: Path | str | None = None,
+) -> dict:
     try:
         current = job.read_json("result.json")
     except (OSError, ValueError):
@@ -708,11 +820,33 @@ def _finish(job: Job, record: dict, status: str, now, started: datetime) -> dict
     if current.get("status") == "cancelled" and status != "cancelled":
         return current
     ended = now()
+    duration_s = (ended - started).total_seconds()
     record.update(
         status=status,
         exit_code=EXIT[status],
         ended=ended.isoformat(),
-        duration_s=round((ended - started).total_seconds(), 3),
+        duration_s=round(duration_s, 3),
     )
     job.write_json("result.json", record)
+
+    handoff_data = record.get("handoff")
+    quote = (
+        handoff_data["summary"]
+        if isinstance(handoff_data, dict) and isinstance(handoff_data.get("summary"), str)
+        else None
+    )
+    try:
+        resolved_state_dir = state_dir if state_dir is not None else job.dir.parent.parent
+    except Exception:
+        resolved_state_dir = ""
+
+    _emit_job(
+        "finish",
+        state_dir=resolved_state_dir,
+        job_id=job.id,
+        status=status,
+        exit_code=EXIT[status],
+        duration_ms=int(round(duration_s * 1000)),
+        quote=quote,
+    )
     return record
