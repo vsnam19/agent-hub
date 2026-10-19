@@ -797,6 +797,10 @@ def _cmd_audit_show(args) -> int:
 
     try:
         events, skipped = read_events_with_archives(state_dir=state_dir, since=since_val)
+    except (OSError, UnicodeDecodeError) as e:
+        detail = getattr(e, "filename", None) or e
+        print(_safe(f"audit: cannot read {detail}", sys.stderr), file=sys.stderr)
+        return 1
     except ValueError as e:
         raise UsageError(f"invalid --since: {e}") from None
 
@@ -838,6 +842,10 @@ def _cmd_audit_verify(args) -> int:
         raise UsageError(f"invalid month format: {month!r}, expected YYYY-MM")
     try:
         res = verify(state_dir=state_dir, month=month)
+    except (OSError, UnicodeDecodeError) as e:
+        detail = getattr(e, "filename", None) or e
+        print(_safe(f"audit: cannot read {detail}", sys.stderr), file=sys.stderr)
+        return 1
     except ValueError as e:
         raise UsageError(str(e)) from None
 
@@ -859,6 +867,10 @@ def _cmd_audit_outward(args) -> int:
 
     try:
         events, skipped = read_events_with_archives(state_dir=state_dir, since=since_val)
+    except (OSError, UnicodeDecodeError) as e:
+        detail = getattr(e, "filename", None) or e
+        print(_safe(f"audit: cannot read {detail}", sys.stderr), file=sys.stderr)
+        return 1
     except ValueError as e:
         raise UsageError(f"invalid --since: {e}") from None
 
@@ -905,17 +917,22 @@ def _cmd_audit_schedule(args) -> int:
 
 
 def _cmd_audit(args) -> int:
-    if args.audit_command == "show":
-        return _cmd_audit_show(args)
-    if args.audit_command == "verify":
-        return _cmd_audit_verify(args)
-    if args.audit_command == "outward":
-        return _cmd_audit_outward(args)
-    if args.audit_command == "archive":
-        return _cmd_audit_archive(args)
-    if args.audit_command == "schedule":
-        return _cmd_audit_schedule(args)
-    raise UsageError(f"unknown audit command: {args.audit_command}")
+    try:
+        if args.audit_command == "show":
+            return _cmd_audit_show(args)
+        if args.audit_command == "verify":
+            return _cmd_audit_verify(args)
+        if args.audit_command == "outward":
+            return _cmd_audit_outward(args)
+        if args.audit_command == "archive":
+            return _cmd_audit_archive(args)
+        if args.audit_command == "schedule":
+            return _cmd_audit_schedule(args)
+        raise UsageError(f"unknown audit command: {args.audit_command}")
+    except (OSError, UnicodeDecodeError) as e:
+        detail = getattr(e, "filename", None) or e
+        print(_safe(f"audit: cannot read {detail}", sys.stderr), file=sys.stderr)
+        return 1
 
 
 def _cmd_pool(args) -> int:

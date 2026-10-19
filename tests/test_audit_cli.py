@@ -295,3 +295,69 @@ def test_audit_missing_subcommand_exit_two(capsys: pytest.CaptureFixture[str]) -
     assert rc == 2
     _, err = capsys.readouterr()
     assert "agent-hub: " in err
+
+
+def test_show_unreadable_day_file_exit_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("AGENT_HUB_STATE", str(state_dir))
+
+    day_file = audit_root(state_dir) / "2026-10" / "2026-10-18.jsonl"
+    day_file.parent.mkdir(parents=True, exist_ok=True)
+    day_file.write_text("some content\n", encoding="utf-8")
+
+    def _raise_permission_error(*args: object, **kwargs: object) -> None:
+        raise PermissionError(13, "Permission denied", str(day_file))
+
+    monkeypatch.setattr("agenthub.audit.show.read_events", _raise_permission_error)
+
+    rc = main(["audit", "show"])
+    assert rc == 1
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "audit: cannot read" in err
+    assert str(day_file) in err
+
+
+def test_show_bad_utf8_exit_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("AGENT_HUB_STATE", str(state_dir))
+
+    day_file = audit_root(state_dir) / "2026-10" / "2026-10-18.jsonl"
+    day_file.parent.mkdir(parents=True, exist_ok=True)
+    day_file.write_bytes(b"\xff\xff\n")
+
+    rc = main(["audit", "show"])
+    assert rc == 1
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "audit: cannot read" in err
+    assert "codec can't decode" in err
+
+
+def test_bad_since_still_exit_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("AGENT_HUB_STATE", str(state_dir))
+
+    rc = main(["audit", "show", "--since", "not-a-valid-since"])
+    assert rc == 2
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "agent-hub: " in err
+    assert "since" in err
+
+    rc_outward = main(["audit", "outward", "--since", "not-a-valid-since"])
+    assert rc_outward == 2
+
+    out_outward, err_outward = capsys.readouterr()
+    assert out_outward == ""
+    assert "agent-hub: " in err_outward
+    assert "since" in err_outward
