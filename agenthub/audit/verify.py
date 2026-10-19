@@ -74,14 +74,30 @@ def _latest_earlier_local_day_hash(root: Path, before_day: str) -> tuple[str, st
         for _, path in candidates:
             with path.open("r", encoding="utf-8") as f:
                 lines = f.readlines()
+            if not lines:
+                # 0-byte day file: writer treats as absent
+                continue
+
+            rel_path = path.relative_to(root).as_posix()
             non_empty = [(i, line.strip()) for i, line in enumerate(lines, 1) if line.strip()]
             if not non_empty:
-                # empty day file: writer treats as absent
-                continue
+                return VerifyResult(
+                    ok=False,
+                    message=f"{rel_path}:1 seq=1: blank line",
+                )
+
+            # Check if last line of file is blank
+            last_line_no = len(lines)
+            last_line_str = lines[-1]
+            if not last_line_str.strip():
+                seq_val = _derive_seq(non_empty, last_line_no)
+                return VerifyResult(
+                    ok=False,
+                    message=f"{rel_path}:{last_line_no} seq={seq_val}: blank line",
+                )
 
             # First non-empty earlier file: writer would have chained from this file.
             # Stop here and report break if unreadable.
-            rel_path = path.relative_to(root).as_posix()
             last_line_no, last_line_str = non_empty[-1]
 
             try:
@@ -130,13 +146,18 @@ def _verify_day_lines(
     state: _ChainState,
     initial_check_reason: str | None = None,
 ) -> VerifyResult | None:
-    non_empty_lines = [line for line in lines if line.strip()]
-    if not non_empty_lines:
+    if not lines:
         return None
 
     expected_seq = 1
 
     for line_no, raw_line in enumerate(lines, 1):
+        if not raw_line.strip():
+            return VerifyResult(
+                ok=False,
+                message=f"{rel_path}:{line_no} seq={expected_seq}: blank line",
+            )
+
         # 1. JSON parses
         try:
             record = json.loads(raw_line)
@@ -344,7 +365,7 @@ def _verify_archived_month(
                     rel_p = f"{month}/{Path(member.name).name}"
                     return VerifyResult(ok=False, message=f"{rel_p}:1 seq=1: invalid UTF-8: {e}")
 
-                if not any(line.strip() for line in lines):
+                if not lines:
                     continue
 
                 rel_path = f"{month}/{Path(member.name).name}"
@@ -357,6 +378,7 @@ def _verify_archived_month(
                 )
                 if res is not None:
                     return res
+                state.expected_source = rel_path
     except Exception as e:
         return VerifyResult(ok=False, message=f"corrupt archive for {month}: {e}")
 
@@ -457,8 +479,8 @@ def verify(
         with day_file.open("r", encoding="utf-8") as f:
             lines = f.readlines()
 
-        # Skip empty day files: the writer treats an empty file as absent
-        if not any(line.strip() for line in lines):
+        # Skip empty day files (0 bytes): the writer treats an empty file as absent
+        if not lines:
             continue
 
         # Determine expected prev_hash for line 1 of this day file

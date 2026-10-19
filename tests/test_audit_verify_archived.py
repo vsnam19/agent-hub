@@ -198,3 +198,54 @@ def test_local_month_results_unchanged(tmp_path: Path) -> None:
     assert "2026-10/2026-10-18.jsonl:2" in res_tampered.message
     assert "seq=2" in res_tampered.message
     assert "hash mismatch" in res_tampered.message
+
+
+def test_archived_later_day_names_previous_file_as_source(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    vault_dir = tmp_path / "vault"
+    vault_dir.mkdir(parents=True, exist_ok=True)
+
+    append({"ts": "2026-09-01T10:00:00.000Z", "kind": "command", "target": "c1"}, state_dir=state_dir)
+    append({"ts": "2026-09-02T10:00:00.000Z", "kind": "command", "target": "c2"}, state_dir=state_dir)
+
+    res_archive = archive_month("2026-09", state_dir=state_dir, vault=vault_dir, today=date(2026, 10, 19))
+    assert res_archive.status == "ok"
+
+    vault_tar = vault_dir / "agent-hub-audit" / "2026-09.tar.xz"
+    assert vault_tar.is_file()
+
+    # Extract archive
+    extract_dir = tmp_path / "extract"
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(vault_tar, "r:xz") as tar:
+        tar.extractall(extract_dir, filter="data")
+
+    # Day 2 line 1 prev_hash mismatch
+    day2_file = extract_dir / "2026-09" / "2026-09-02.jsonl"
+    lines = day2_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    record["prev_hash"] = "0" * 64
+    lines[0] = canonical_json(record)
+    day2_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    day1_file = extract_dir / "2026-09" / "2026-09-01.jsonl"
+
+    # Repack into vault_tar
+    with tarfile.open(vault_tar, "w:xz") as tar:
+        tar.add(day1_file, arcname="2026-09/2026-09-01.jsonl")
+        tar.add(day2_file, arcname="2026-09/2026-09-02.jsonl")
+
+    # Update sha256 in local manifest so it passes sha256 check and reaches day lines verification
+    repacked_sha = hashlib.sha256(vault_tar.read_bytes()).hexdigest()
+    local_manifest = state_dir / "audit" / "manifests" / "2026-09.json"
+    manifest_data = json.loads(local_manifest.read_text(encoding="utf-8"))
+    manifest_data["sha256"] = repacked_sha
+    local_manifest.write_text(json.dumps(manifest_data, indent=2), encoding="utf-8")
+
+    res = verify(state_dir=state_dir, month="2026-09", vault=vault_dir)
+    assert res.ok is False
+    assert "2026-09/2026-09-02.jsonl:1 seq=1:" in res.message
+    assert "prev_hash mismatch" in res.message
+    assert "expected from 2026-09/2026-09-01.jsonl" in res.message
+    assert "manifests/2026-09.json" not in res.message

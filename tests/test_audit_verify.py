@@ -566,3 +566,83 @@ def test_verify_archived_month_loads_default_vault(tmp_path: Path, monkeypatch) 
     res = verify(state_dir=state_dir, month="2026-09")
     assert res.ok is True
     assert res.message == "ok: 2 events"
+
+
+def test_blank_line_is_break_everywhere(tmp_path: Path) -> None:
+    # 1. In _verify_day_lines: blank line in the middle of a day file is reported as break with reason "blank line"
+    append({"ts": "2026-10-18T10:00:00.000Z", "kind": "command", "target": "first"}, state_dir=tmp_path)
+    append({"ts": "2026-10-18T10:00:01.000Z", "kind": "command", "target": "second"}, state_dir=tmp_path)
+
+    day_file = audit_root(tmp_path) / "2026-10" / "2026-10-18.jsonl"
+    lines = day_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    # Insert blank line between line 1 and line 2
+    day_file.write_text(lines[0] + "\n\n" + lines[1] + "\n", encoding="utf-8")
+
+    res = verify(state_dir=tmp_path)
+    assert res.ok is False
+    assert "2026-10/2026-10-18.jsonl:2 seq=2:" in res.message
+    assert "blank line" in res.message
+    assert "invalid JSON" not in res.message
+
+    # 2. In _verify_day_lines: blank line at line 1 of a day file
+    day_file.write_text("\n" + lines[0] + "\n", encoding="utf-8")
+    res1 = verify(state_dir=tmp_path)
+    assert res1.ok is False
+    assert "2026-10/2026-10-18.jsonl:1 seq=1:" in res1.message
+    assert "blank line" in res1.message
+
+    # 3. In _verify_day_lines: day file with only blank lines
+    day_file.write_text("\n\n", encoding="utf-8")
+    res_only_blank = verify(state_dir=tmp_path)
+    assert res_only_blank.ok is False
+    assert "2026-10/2026-10-18.jsonl:1 seq=1:" in res_only_blank.message
+    assert "blank line" in res_only_blank.message
+
+    # 4. In _latest_earlier_local_day_hash: earlier day file with only blank lines stops at that file and names it
+    tmp2 = tmp_path / "case_earlier_blank"
+    root2 = audit_root(tmp2)
+    sep_dir = root2 / "2026-09"
+    sep_dir.mkdir(parents=True, exist_ok=True)
+    ev0 = {
+        "schema_version": 1,
+        "ts": "2026-09-17T10:00:00.000Z",
+        "seq": 1,
+        "event_id": "e0",
+        "kind": "command",
+        "target": "old",
+        "prev_hash": ZERO_HASH,
+    }
+    ev0["hash"] = event_hash(ZERO_HASH, ev0)
+    (sep_dir / "2026-09-17.jsonl").write_text(canonical_json(ev0) + "\n", encoding="utf-8")
+
+    # 2026-09-18 has only blank lines
+    (sep_dir / "2026-09-18.jsonl").write_text("\n\n", encoding="utf-8")
+
+    oct_dir = root2 / "2026-10"
+    oct_dir.mkdir(parents=True, exist_ok=True)
+    ev_oct = {
+        "schema_version": 1,
+        "ts": "2026-10-01T10:00:00.000Z",
+        "seq": 1,
+        "event_id": "e1",
+        "kind": "command",
+        "target": "new",
+        "prev_hash": ev0["hash"],
+    }
+    ev_oct["hash"] = event_hash(ev0["hash"], ev_oct)
+    (oct_dir / "2026-10-01.jsonl").write_text(canonical_json(ev_oct) + "\n", encoding="utf-8")
+
+    # Verifying month 2026-10 must NOT skip 2026-09-18 to use 2026-09-17;
+    # it must stop and name 2026-09-18 with blank line
+    res_earlier = verify(state_dir=tmp2, month="2026-10")
+    assert res_earlier.ok is False
+    assert "2026-09/2026-09-18.jsonl:1 seq=1:" in res_earlier.message
+    assert "blank line" in res_earlier.message
+
+    # 5. In _latest_earlier_local_day_hash: earlier day file ending in a blank line stops at that file and names it
+    (sep_dir / "2026-09-18.jsonl").write_text(canonical_json(ev0) + "\n\n", encoding="utf-8")
+    res_earlier_tail = verify(state_dir=tmp2, month="2026-10")
+    assert res_earlier_tail.ok is False
+    assert "2026-09/2026-09-18.jsonl:2 seq=2:" in res_earlier_tail.message
+    assert "blank line" in res_earlier_tail.message
