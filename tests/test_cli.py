@@ -95,20 +95,20 @@ def test_run_bad_timeout_exit_2(env_sandbox, repo, tmp_path, capsys):
 
 def test_pool_output_and_clear(env_sandbox, capsys):
     until = datetime.now(timezone.utc) + timedelta(hours=2)
-    Cooldowns(paths().cooldowns_file).set(Link("agy", "claude-sonnet-4-6"), until)
+    Cooldowns(paths().cooldowns_file).set(Link("agy", "claude-sonnet-5-5-medium"), until)
     assert main(["pool"]) == 0
     out = capsys.readouterr().out
     assert "implement (implement, escalate → implement-hard):" in out
     assert "review (review):" in out
-    sonnet = next(line for line in out.splitlines() if "agy:claude-sonnet-4-6" in line)
+    sonnet = next(line for line in out.splitlines() if "agy:claude-sonnet-5-5-medium" in line)
     assert line_has(sonnet, "installed", "9.9.9", "cooldown until")
-    opus = next(line for line in out.splitlines() if "agy:claude-opus-4-6-thinking" in line)
+    opus = next(line for line in out.splitlines() if "agy:claude-opus-5-5-high" in line)
     assert "cooldown" not in opus and opus.startswith("  ")
 
-    assert main(["pool", "--clear", "agy:claude-sonnet-4-6"]) == 0
-    assert capsys.readouterr().out.strip() == "cleared agy:claude-sonnet-4-6"
-    assert main(["pool", "--clear", "agy:claude-sonnet-4-6"]) == 0
-    assert capsys.readouterr().out.strip() == "no cooldown for agy:claude-sonnet-4-6"
+    assert main(["pool", "--clear", "agy:claude-sonnet-5-5-medium"]) == 0
+    assert capsys.readouterr().out.strip() == "cleared agy:claude-sonnet-5-5-medium"
+    assert main(["pool", "--clear", "agy:claude-sonnet-5-5-medium"]) == 0
+    assert capsys.readouterr().out.strip() == "no cooldown for agy:claude-sonnet-5-5-medium"
 
 
 def line_has(line, *needles):
