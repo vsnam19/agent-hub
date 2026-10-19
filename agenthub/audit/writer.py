@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from agenthub.config import paths
+from agenthub.redact import redact, redact_argv
 
 ZERO_HASH = "0" * 64
 
@@ -157,8 +158,67 @@ def _initial_prev_hash(root: Path, month: str, day: str) -> str:
     return ZERO_HASH
 
 
+def _sanitize_nested(v: Any) -> Any:
+    if isinstance(v, str):
+        return redact(v)
+    if isinstance(v, Mapping):
+        return {k: _sanitize_nested(val) for k, val in v.items()}
+    if isinstance(v, list):
+        return [_sanitize_nested(item) for item in v]
+    if isinstance(v, tuple):
+        return tuple(_sanitize_nested(item) for item in v)
+    if isinstance(v, set):
+        return {_sanitize_nested(item) for item in v}
+    return v
+
+
+def _sanitize_detail(detail: Mapping[str, Any]) -> dict[str, Any]:
+    res: dict[str, Any] = {}
+    for k, v in detail.items():
+        if k == "argv" and isinstance(v, (list, tuple)):
+            items = list(v)
+            if all(isinstance(x, str) for x in items):
+                redacted = redact_argv(items)
+            else:
+                redacted = [_sanitize_nested(x) for x in items]
+            res[k] = type(v)(redacted) if isinstance(v, tuple) else redacted
+        elif k == "stderr_tail" and isinstance(v, str):
+            redacted = redact(v)
+            if len(redacted) > 2000:
+                redacted = redacted[-2000:]
+            res[k] = redacted
+        else:
+            res[k] = _sanitize_nested(v)
+    return res
+
+
+def sanitize(event: Mapping[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = dict(event)
+    if "target" in out:
+        target = out["target"]
+        if isinstance(target, str):
+            redacted_target = redact(target)
+            if len(redacted_target) > 500:
+                redacted_target = redacted_target[:500]
+            out["target"] = redacted_target
+    if "quote" in out:
+        quote = out["quote"]
+        if isinstance(quote, str):
+            redacted_quote = redact(quote)
+            if len(redacted_quote) > 200:
+                redacted_quote = redacted_quote[:199] + "…"
+            out["quote"] = redacted_quote
+    if "detail" in out:
+        detail = out["detail"]
+        if isinstance(detail, Mapping):
+            out["detail"] = _sanitize_detail(detail)
+        elif isinstance(detail, str):
+            out["detail"] = redact(detail)
+    return out
+
+
 def append(event: Mapping[str, Any], state_dir: Path | str | None = None) -> dict[str, Any]:
-    record: dict[str, Any] = dict(event)
+    record: dict[str, Any] = sanitize(event)
     record["schema_version"] = 1
     if "ts" not in record or record["ts"] is None:
         record["ts"] = _utc_now_iso()
@@ -205,3 +265,85 @@ def append(event: Mapping[str, Any], state_dir: Path | str | None = None) -> dic
             os.close(lock_fd)
 
     return record
+
+
+def _pending_gap_path(state_dir: Path | str | None = None) -> Path:
+    base = paths().state_dir if state_dir is None else Path(state_dir)
+    return base / "audit-pending-gap.jsonl"
+
+
+def _read_pending_gap_entries(pending_path: Path) -> list[dict[str, Any]]:
+    if not pending_path.is_file():
+        return []
+    try:
+        lines = pending_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    entries: list[dict[str, Any]] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+            if isinstance(item, dict):
+                entries.append(item)
+        except Exception:
+            continue
+    return entries
+
+
+def _record_pending_failure(event: Mapping[str, Any], exc: Exception, state_dir: Path | str | None = None) -> None:
+    try:
+        base = paths().state_dir if state_dir is None else Path(state_dir)
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        path = base / "audit-pending-gap.jsonl"
+        event_ts = event.get("ts") if isinstance(event, Mapping) else None
+        ts = str(event_ts) if event_ts else _utc_now_iso()
+        reason = str(exc) or type(exc).__name__
+        line = canonical_json({"ts": ts, "reason": reason}) + "\n"
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            os.write(fd, line.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
+
+
+def write(event: Mapping[str, Any], state_dir: Path | str | None = None) -> bool:
+    try:
+        pending_path = _pending_gap_path(state_dir)
+        if pending_path.is_file():
+            entries = _read_pending_gap_entries(pending_path)
+            if entries:
+                first_ts = entries[0].get("ts", "")
+                first_reason = entries[0].get("reason", "")
+                lost_count = len(entries)
+                now = _utc_now_iso()
+                gap_event = {
+                    "ts": now,
+                    "kind": "gap",
+                    "actor": {"role": "agent-hub", "host": "agent-hub"},
+                    "target": "",
+                    "outcome": {"status": "ok"},
+                    "detail": {
+                        "from": first_ts,
+                        "to": now,
+                        "reason": first_reason,
+                        "lost": lost_count,
+                    },
+                }
+                append(gap_event, state_dir=state_dir)
+            pending_path.unlink(missing_ok=True)
+
+        append(event, state_dir=state_dir)
+        return True
+    except Exception as exc:
+        _record_pending_failure(event, exc, state_dir=state_dir)
+        return False
