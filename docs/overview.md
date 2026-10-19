@@ -92,6 +92,12 @@ attempt (stdout, stderr, reply), `gate/<n>.log`, `diff.patch` for reviews, and `
 | `repo` | the git common dir — which project owns the job (D-078) |
 | `scope_violation` | files changed outside `--allow` (D-071) |
 
+### Audit log
+
+Every agent action (director sessions of Claude Code, codex and agy, plus agent-hub jobs and plans) is appended to a
+hash-chained log at `<state>/audit/YYYY-MM/YYYY-MM-DD.jsonl`. Logging is fail-open and observe-only; never stored:
+model thinking, file contents, command output, bodies, auth headers.
+
 ## 5. Safety rules built in
 
 - The CLI refuses implement jobs on the default branch or a detached HEAD.
