@@ -200,8 +200,14 @@ def test_plugin_hooks_manifest():
     # SessionStart hook
     assert "SessionStart" in hooks
     session_start_entries = hooks["SessionStart"]
-    assert len(session_start_entries) == 1
-    session_start = session_start_entries[0]
+    session_start_groups = [
+        g
+        for g in session_start_entries
+        if [h.get("command") for h in g.get("hooks", [])] == ["${CLAUDE_PLUGIN_ROOT}/bin/agent-hub hook session-start"]
+    ]
+    assert len(session_start_groups) == 1
+    session_start = session_start_groups[0]
+    assert session_start_entries[0] == session_start
     assert session_start.get("matcher") == "startup|resume|clear|compact"
     assert len(session_start.get("hooks", [])) == 1
     ss_hook = session_start["hooks"][0]
@@ -212,8 +218,14 @@ def test_plugin_hooks_manifest():
     # Stop hook
     assert "Stop" in hooks
     stop_entries = hooks["Stop"]
-    assert len(stop_entries) == 1
-    stop = stop_entries[0]
+    stop_groups = [
+        g
+        for g in stop_entries
+        if [h.get("command") for h in g.get("hooks", [])] == ["${CLAUDE_PLUGIN_ROOT}/bin/agent-hub hook stop"]
+    ]
+    assert len(stop_groups) == 1
+    stop = stop_groups[0]
+    assert stop_entries[0] == stop
     assert len(stop.get("hooks", [])) == 1
     stop_hook = stop["hooks"][0]
     assert stop_hook.get("type") == "command"
