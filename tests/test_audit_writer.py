@@ -3,11 +3,17 @@ import json
 import multiprocessing
 import os
 import re
+import signal
 import stat
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
 
+from agenthub.audit import writer
+from agenthub.audit.verify import verify
 from agenthub.audit.writer import (
     ZERO_HASH,
     AuditLockTimeout,
@@ -87,7 +93,7 @@ def test_append_sets_chain_fields_and_modes(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path))
     month_dir = root / month
     day_file = month_dir / f"{day}.jsonl"
-    lock_file = month_dir / f"{day}.jsonl.lock"
+    lock_file = root / "chain.lock"
 
     assert stat.S_IMODE(root.stat().st_mode) == 0o700
     assert stat.S_IMODE(month_dir.stat().st_mode) == 0o700
@@ -225,3 +231,173 @@ def test_concurrent_processes_keep_chain(tmp_path: Path) -> None:
         assert ev["prev_hash"] == expected_prev
         assert ev["hash"] == event_hash(ev["prev_hash"], ev)
         expected_prev = ev["hash"]
+
+
+def _worker_two_days(state_dir_str: str, worker_id: int, count: int) -> None:
+    for i in range(count):
+        day = "2026-10-18" if (worker_id + i) % 2 == 0 else "2026-10-19"
+        append(
+            {"ts": f"{day}T12:00:00.000Z", "kind": "command", "target": f"cmd-{worker_id}-{i}"},
+            state_dir=Path(state_dir_str),
+        )
+
+
+def test_single_chain_lock_across_days(tmp_path: Path) -> None:
+    append({"ts": "2026-10-18T10:00:00.000Z", "kind": "command", "target": "a"}, state_dir=tmp_path)
+    append({"ts": "2026-10-19T10:00:00.000Z", "kind": "command", "target": "b"}, state_dir=tmp_path)
+    root = audit_root(tmp_path)
+    assert list(root.rglob("*.lock")) == [root / "chain.lock"]
+    assert stat.S_IMODE((root / "chain.lock").stat().st_mode) == 0o600
+    with (root / "chain.lock").open("r+b") as lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            with pytest.raises(AuditLockTimeout):
+                append({"ts": "2026-10-20T10:00:00.000Z", "kind": "command"}, state_dir=tmp_path)
+            with pytest.raises(AuditLockTimeout):
+                append({"ts": "2026-10-18T10:00:00.000Z", "kind": "command"}, state_dir=tmp_path)
+        finally:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+
+
+def test_late_ts_is_raised_and_kept_as_event_ts(tmp_path: Path) -> None:
+    e1 = append({"ts": "2026-10-19T10:00:00.000Z", "kind": "command", "target": "new"}, state_dir=tmp_path)
+    late = "2026-10-18T09:00:00.000Z"
+    e2 = append({"ts": late, "kind": "command", "target": "late"}, state_dir=tmp_path)
+    assert e2["ts"] == e1["ts"]
+    assert e2["event_ts"] == late
+    assert e2["seq"] == 2
+    assert e2["prev_hash"] == e1["hash"]
+    assert "event_ts" not in e1
+    assert not (audit_root(tmp_path) / "2026-10" / "2026-10-18.jsonl").exists()
+    assert verify(tmp_path).ok
+
+
+def test_concurrent_writers_two_days_keep_chain(tmp_path: Path) -> None:
+    ctx = multiprocessing.get_context("spawn")
+    procs = [ctx.Process(target=_worker_two_days, args=(str(tmp_path), w, 15)) for w in range(4)]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=60)
+        assert p.exitcode == 0
+    root = audit_root(tmp_path)
+    events = [
+        json.loads(line) for f in sorted(root.glob("*/*.jsonl")) for line in f.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(events) == 60
+    assert verify(tmp_path).ok
+
+
+def test_lock_deadline_shared_by_gap_and_event(tmp_path: Path) -> None:
+    root = audit_root(tmp_path)
+    root.mkdir(parents=True)
+    (tmp_path / "audit-pending-gap.jsonl").write_text('{"ts":"2026-10-18T00:00:00.000Z","reason":"x"}\n')
+    with (root / "chain.lock").open("a+b") as lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            start = time.monotonic()
+            ok = writer.write({"ts": "2026-10-19T10:00:00.000Z", "kind": "command"}, state_dir=tmp_path)
+            elapsed = time.monotonic() - start
+            with pytest.raises(AuditLockTimeout):
+                append({"kind": "command"}, state_dir=tmp_path, deadline=time.monotonic() - 1)
+        finally:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+    assert ok is False
+    assert 0.18 <= elapsed
+    # the claim never happened: the old entry and the new failure are both still pending
+    lines = (tmp_path / "audit-pending-gap.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert not list(tmp_path.glob("*.claimed"))
+
+
+def _pending_entry(ts: str, reason: str) -> str:
+    return canonical_json({"ts": ts, "reason": reason}) + "\n"
+
+
+def _day_events(state_dir: Path) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for df in sorted(audit_root(state_dir).glob("*/*.jsonl")):
+        events.extend(json.loads(line) for line in df.read_text(encoding="utf-8").splitlines() if line.strip())
+    return events
+
+
+def test_fix_5_orphaned_claimed_file_joins_the_gap(tmp_path: Path) -> None:
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    dead = tmp_path / f"audit-pending-gap.{proc.pid}.claimed"
+    dead.write_text(_pending_entry("2026-10-18T00:00:00.000Z", "a") + _pending_entry("2026-10-18T00:00:01.000Z", "b"))
+    alive = tmp_path / f"audit-pending-gap.{os.getppid()}.claimed"
+    alive.write_text(_pending_entry("2026-10-18T00:00:02.000Z", "c"))
+    (tmp_path / "audit-pending-gap.jsonl").write_text(_pending_entry("2026-10-18T00:00:03.000Z", "d"))
+
+    assert writer.write({"ts": "2026-10-19T10:00:00.000Z", "kind": "command"}, state_dir=tmp_path) is True
+
+    events = _day_events(tmp_path)
+    gaps = [e for e in events if e["kind"] == "gap"]
+    assert len(gaps) == 1
+    assert gaps[0]["detail"]["lost"] == 3  # type: ignore[index]
+    assert not dead.exists()
+    assert alive.exists()
+    assert not (tmp_path / "audit-pending-gap.jsonl").exists()
+
+
+class _Boom(Exception):
+    pass
+
+
+def test_fix_9_inner_handlers_do_not_hide_timeouts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "audit-pending-gap.jsonl").write_text(_pending_entry("2026-10-18T00:00:00.000Z", "x"))
+    real_read = Path.read_bytes
+
+    def boom_read(self: Path) -> bytes:
+        if self.name.endswith(".claimed"):
+            raise _Boom("timeout")
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", boom_read)
+    assert writer.write({"ts": "2026-10-19T10:00:00.000Z", "kind": "command"}, state_dir=tmp_path) is False
+    monkeypatch.undo()
+
+    assert _day_events(tmp_path) == []
+
+
+def test_fix_9_no_pending_for_event_already_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom_fsync(fd: int) -> None:
+        raise _Boom("timeout after write")
+
+    monkeypatch.setattr(os, "fsync", boom_fsync)
+    ok = writer.write({"ts": "2026-10-19T10:00:00.000Z", "kind": "command", "target": "x"}, state_dir=tmp_path)
+    monkeypatch.undo()
+
+    assert ok is False
+    assert [e["target"] for e in _day_events(tmp_path)] == ["x"]
+    assert not (tmp_path / "audit-pending-gap.jsonl").exists()
+
+
+def test_fix_9_record_pending_survives_sigalrm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fired: list[bool] = []
+
+    def handler(_signum: int, _frame: object) -> None:
+        fired.append(True)
+        raise _Boom("alarm")
+
+    old = signal.signal(signal.SIGALRM, handler)
+    real_write = os.write
+    state = {"raised": False}
+
+    def alarm_write(fd: int, data: bytes) -> int:
+        if not state["raised"]:
+            state["raised"] = True
+            signal.raise_signal(signal.SIGALRM)
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", alarm_write)
+    try:
+        writer.record_pending({"ts": "2026-10-19T10:00:00.000Z"}, "hook timeout", state_dir=tmp_path)
+    finally:
+        monkeypatch.undo()
+        signal.signal(signal.SIGALRM, old)
+
+    lines = (tmp_path / "audit-pending-gap.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["reason"] == "hook timeout"

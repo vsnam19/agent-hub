@@ -1,3 +1,4 @@
+import fcntl
 import hashlib
 import json
 import tarfile
@@ -6,9 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from agenthub.audit import archive as archive_mod
 from agenthub.audit.archive import (
     ArchiveError,
     BuiltArchive,
+    archive_month,
     build_archive,
     check_month,
     default_month,
@@ -238,3 +241,28 @@ def test_failure_removes_only_own_tmp_file(tmp_path: Path, monkeypatch: pytest.M
 
     # Tarball was cleaned up
     assert not (tmp_dir / "2026-09.tar.xz").exists()
+
+
+def test_fix_1_archive_month_takes_chain_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state_dir = tmp_path / "state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    append({"ts": "2026-09-01T10:00:00.000Z", "kind": "command", "target": "c1"}, state_dir=state_dir)
+    root = audit_root(state_dir)
+    monkeypatch.setattr(archive_mod, "_CHAIN_LOCK_WAIT_S", 0.05)
+
+    with (root / "chain.lock").open("a+b") as lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            res = archive_month("2026-09", state_dir=state_dir, vault=vault, today=date(2026, 10, 19))
+        finally:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+
+    assert res.status == "error"
+    assert "timed out" in res.message
+    assert (root / "2026-09" / "2026-09-01.jsonl").is_file()
+
+    # once the lock is free the archive goes through
+    res_ok = archive_month("2026-09", state_dir=state_dir, vault=vault, today=date(2026, 10, 19))
+    assert res_ok.status == "ok"
+    assert not (root / "2026-09").exists()
