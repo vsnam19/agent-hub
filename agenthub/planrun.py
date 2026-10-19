@@ -5,11 +5,15 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from agenthub import guards
+from agenthub.audit.emit import emit
+from agenthub.audit.trace import trace_env
 from agenthub.config import ConfigError, load_pool, paths
 from agenthub.guards import _git_argv
 from agenthub.jobs import list_jobs
@@ -34,6 +38,25 @@ def _trail(
         if fresh:
             f.write(TRAIL_HEADER + "\n")
         f.write("\t".join(str(c).replace("\t", " ").replace("\r", " ").replace("\n", " ") for c in cells) + "\n")
+    try:
+        event = "autocommit" if phase == "commit" else phase
+        plan_name = plan.path.parent.name if plan.path else ""
+        parent: dict[str, Any] = {"plan": plan_name}
+        if task:
+            parent["task"] = task
+        emit(
+            "plan",
+            event,
+            state_dir=paths().state_dir,
+            parent=parent,
+            target=decision,
+            status=result or "ok",
+            quote=reason,
+            evidence=evidence,
+            detail={"phase": phase},
+        )
+    except Exception:
+        pass
 
 
 def _kind(task: Task) -> str:
@@ -111,9 +134,36 @@ def compose_brief(plan: Plan, task: Task, state: State, attempt_note: str) -> st
     return "\n\n".join(parts)
 
 
+@contextmanager
+def _trace_environ(plan: Plan, task_name: str) -> Iterator[None]:
+    plan_name = plan.path.parent.name if plan.path else None
+    env = trace_env(plan=plan_name, task=task_name)
+    saved = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def run_plan(
     plan: Plan, state: State, spawn: Callable[[list[str], Path], subprocess.Popen], max_parallel: int | None = None
 ) -> int:
+    try:
+        plan_name = plan.path.parent.name if plan.path else ""
+        emit(
+            "plan",
+            "run-start",
+            state_dir=paths().state_dir,
+            parent={"plan": plan_name},
+        )
+    except Exception:
+        pass
+
     if max_parallel is None:
         max_parallel = plan.max_parallel
 
@@ -130,6 +180,7 @@ def run_plan(
     orig_sigterm = signal.signal(signal.SIGTERM, handle_sigterm)
     orig_sigint = signal.signal(signal.SIGINT, handle_sigterm)
 
+    rc = 1
     try:
         while True:
             if cancelled:
@@ -144,7 +195,8 @@ def run_plan(
                             except subprocess.TimeoutExpired:
                                 running_children[name].kill()
                 state.save()
-                return 130
+                rc = 130
+                return rc
 
             changed = False
 
@@ -293,7 +345,8 @@ def run_plan(
                 if plan.jev:
                     argv.append("--jev")
 
-                popen = spawn(argv, log_file)
+                with _trace_environ(plan, task.name):
+                    popen = spawn(argv, log_file)
                 running_children[task.name] = popen
 
                 tstate.status = "running"
@@ -317,8 +370,10 @@ def run_plan(
             # 6. Stop when nothing is pending or running
             if not any(state.task(t.name).status in ("pending", "running") for t in plan.tasks):
                 if all(state.task(t.name).status == "done" for t in plan.tasks):
-                    return 0
-                return 1
+                    rc = 0
+                    return rc
+                rc = 1
+                return rc
 
             # 4. Poll
             time.sleep(PLAN_POLL_S)
@@ -351,8 +406,6 @@ def run_plan(
                         except Exception:
                             pass
                     else:
-                        from agenthub.config import paths
-
                         p = paths()
                         if attempt.job:
                             job_result_path = p.jobs_dir / attempt.job / "result.json"
@@ -459,6 +512,18 @@ def run_plan(
     finally:
         signal.signal(signal.SIGTERM, orig_sigterm)
         signal.signal(signal.SIGINT, orig_sigint)
+        try:
+            plan_name = plan.path.parent.name if plan.path else ""
+            emit(
+                "plan",
+                "run-finish",
+                state_dir=paths().state_dir,
+                parent={"plan": plan_name},
+                status="ok" if rc == 0 else "error",
+                detail={"return_code": rc},
+            )
+        except Exception:
+            pass
 
 
 def _fix_brief_part(reason: str) -> str:

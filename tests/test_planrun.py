@@ -392,13 +392,13 @@ def _record_job(job_id, agent, model):
 
 
 def test_review_skips_implementing_model(tmp_path):
-    implementer = "agy:claude-opus-4-6-thinking"
+    implementer = "agy:gemini-4-argon-medium"
     assert implementer in load_pool().roles["review"].chain
     plan = make_plan(
         tmp_path, [{"name": "t1"}, {"name": "r1", "role": "review", "verifies": "t1", "depends_on": ["t1"]}]
     )
     state = load_or_init(plan)
-    _record_job("j1", "agy", "claude-opus-4-6-thinking")
+    _record_job("j1", "agy", "gemini-4-argon-medium")
     spawn = FakeSpawner({"t1": [{"status": "ok", "id": "j1"}], "r1": [{"status": "ok"}]})
 
     rc = run_plan(plan, state, spawn)

@@ -182,6 +182,27 @@ then a local release. Nothing is pushed.
 - `agent-hub skills schedule --remove` disables the timer, deletes both unit files and reloads systemd. Only these two
   units are touched.
 
+### Audit log
+
+Every agent action (director sessions of Claude Code, codex and agy, plus agent-hub jobs and plans) is appended to a
+hash-chained log at `<state>/audit/YYYY-MM/YYYY-MM-DD.jsonl`. Logging is fail-open and observe-only; never stored:
+model thinking, file contents, command output, bodies, auth headers.
+
+- `agent-hub audit show [--plan P | --job J | --session S | --since T] [--kind K] [--json]`
+- `agent-hub audit verify [--month YYYY-MM]`
+- `agent-hub audit outward [--since T]`
+- `agent-hub audit archive [--month YYYY-MM]`
+- `agent-hub audit schedule [--apply] [--remove] [--at CALENDAR]`
+
+MCP tools: `audit_status`, `audit_show`, `audit_archive_status`, `audit_archive_rerun`.
+
+Owner steps after release:
+1. restart Claude Code (plugin hooks load);
+2. `agent-hub hub install --apply` (codex and agy hook entries);
+3. trust the codex hook (codex asks on next start, or `/hooks`);
+4. write the vault path as `vault = '...'` in audit.toml in the agent-hub config directory;
+5. `agent-hub audit schedule --apply`.
+
 ## MCP server
 
 agent-hub ships an MCP server (`agent-hub mcp`) that exposes typed tools for Claude Code, Cursor, Codex, and other MCP clients. Claude Code sessions with the agent-hub plugin start the server automatically through `bin/agent-hub` (no extra needed).

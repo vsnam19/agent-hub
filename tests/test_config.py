@@ -61,7 +61,7 @@ def test_load_pool_default_only(monkeypatch, tmp_path):
     pool = load_pool(p)
     assert pool.roles["implement"].chain == [
         "claude:haiku",
-        "agy:claude-sonnet-4-6",
+        "agy:claude-sonnet-5-5-medium",
         "agy:gemini-3.8-flash-high",
         "codex:gpt-5.6-terra",
     ]
@@ -82,7 +82,7 @@ chain = ["x:y"]
     assert pool.roles["implement"].chain == ["x:y"]
     assert "review" in pool.roles
     assert pool.roles["review"].chain == [
-        "agy:claude-opus-4-6-thinking",
+        "agy:gemini-4-argon-medium",
         "codex:gpt-5.6-terra",
         "agy:gemini-3.8-flash-high",
         "claude:sonnet",

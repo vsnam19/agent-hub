@@ -296,3 +296,22 @@ These override the sections above where they disagree.
    names other than `run_command` are undocumented and map to kind `tool`.
 9. Emitters take the state directory from the caller (`Paths`), never from the global, so tests stay isolated.
 10. The codex payload fixture is captured in its own task before the codex normaliser.
+
+## 14. Hardening (2026-10-19, D-123..D-125) — supersedes §3 locking and skew rules
+
+1. §3 lock: one chain lock `<audit>/chain.lock` for every append and for `archive_month`; per-day `.jsonl.lock`
+   files are no longer used. Lock wait is one 200 ms deadline per `write()` (gap included); the archive job waits 30 s.
+2. §3 `ts`: under the lock the writer keeps `ts` non-decreasing (a late or clock-stepped `ts` is raised to the chain's
+   last `ts`; the original goes to `event_ts`). `verify` therefore treats any decrease as a break — the 2 s clock-skew
+   tolerance is gone. A blank line in a day file is a break.
+3. Pending gap: claimed with `os.replace` under the lock; orphaned claims (dead pid or older than 60 s) join the next
+   gap; lines that land in a claimed file after it was read are put back; unreadable entries are `lost: "unknown"`.
+4. Corrupt tail: never repaired; the writer chains from the last valid event and writes one `gap`
+   (`corrupt-tail <file>:<line>`); `verify` still reports the break.
+5. Redaction: dict values under secret-looking keys become `<redacted>` at any depth of `detail`/`actor`/`parent`;
+   digest fields (`sha256*`, `*hash`, `sha256:<hex>` evidence) are never redacted; `target` keeps its original text
+   with whole-token secret values replaced; generic secret long flags and `-p` behind wrappers are redacted.
+6. `classify`: basename program match, wrapper stripping, one level of `sh -c`; no evaluation of `eval`, `$(…)` or
+   interpreter one-liners (D-125).
+7. The hook's SIGALRM raises `HookTimeout(Exception)`; events not written after a timeout go to the pending file; an
+   event already written is never also counted as lost.
