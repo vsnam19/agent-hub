@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import lzma
 import re
 import tarfile
 from collections.abc import Iterable, Iterator, Mapping
@@ -273,9 +274,18 @@ def read_events_with_archives(
                     finally:
                         f.close()
             archived_events.extend(month_events)
-        except (tarfile.TarError, OSError, EOFError):
+        except (tarfile.TarError, OSError, EOFError, lzma.LZMAError):
             skipped_months.append(month)
 
-    all_events = archived_events + local_events
-    all_events.sort(key=lambda ev: str(ev.get("ts", "")))
-    return all_events, skipped_months
+    seen_ids: set[str] = set()
+    deduped_events: list[dict[str, Any]] = []
+    for ev in archived_events + local_events:
+        eid = ev.get("event_id")
+        if isinstance(eid, str) and eid:
+            if eid in seen_ids:
+                continue
+            seen_ids.add(eid)
+        deduped_events.append(ev)
+
+    deduped_events.sort(key=lambda ev: str(ev.get("ts", "")))
+    return deduped_events, skipped_months

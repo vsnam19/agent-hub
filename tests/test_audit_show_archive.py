@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import os
 import tarfile
 from datetime import date
 from pathlib import Path
@@ -29,8 +31,6 @@ def _make_tarball_with_bad_line(tar_path: Path, month: str, valid_events: list[d
         ti = tarfile.TarInfo(name=f"{month}/{month}-01.jsonl")
         ti.size = len(content)
         ti.mtime = 1700000000
-        import io
-
         tar.addfile(ti, io.BytesIO(content))
 
 
@@ -271,3 +271,150 @@ def test_local_only_behaviour_unchanged(tmp_path: Path) -> None:
     # read_events returns ONLY local events, ignoring manifests and vault archives
     assert len(events) == 2
     assert events == [e_oct1, e_oct2]
+
+
+def test_corrupt_archive_listed_as_skipped(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    vault_dir = tmp_path / "vault"
+    vault_audit_dir = vault_dir / "agent-hub-audit"
+    vault_audit_dir.mkdir(parents=True, exist_ok=True)
+
+    root = audit_root(state_dir)
+    manifests_dir = root / "manifests"
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+    (manifests_dir / "2026-08.json").write_text(json.dumps({"month": "2026-08"}), encoding="utf-8")
+
+    # Build a valid .tar.xz archive with several thousand lines of incompressible data,
+    # then corrupt bytes in its middle so the first tar header still reads but later data fails.
+    lines = [
+        f'{{"ts": "2026-08-01T{i % 24:02d}:00:00.000Z", "data": "{os.urandom(64).hex()}"}}\n'.encode("utf-8")
+        for i in range(3000)
+    ]
+    content = b"".join(lines)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:xz") as tar:
+        ti = tarfile.TarInfo(name="2026-08/2026-08-01.jsonl")
+        ti.size = len(content)
+        tar.addfile(ti, io.BytesIO(content))
+
+    compressed = bytearray(buf.getvalue())
+    compressed[len(compressed) // 2] ^= 0xFF
+
+    tar_path = vault_audit_dir / "2026-08.tar.xz"
+    tar_path.write_bytes(compressed)
+
+    # Local events in 2026-10
+    e_oct = append(
+        {"ts": "2026-10-01T10:00:00.000Z", "kind": "command", "target": "c1"},
+        state_dir=state_dir,
+    )
+
+    events, skipped = read_events_with_archives(
+        state_dir=state_dir,
+        since=None,
+        vault=vault_dir,
+    )
+
+    assert "2026-08" in skipped
+    assert skipped == ["2026-08"]
+    assert events == [e_oct]
+
+
+def test_month_in_both_local_and_archive_not_duplicated(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    vault_dir = tmp_path / "vault"
+    vault_audit_dir = vault_dir / "agent-hub-audit"
+    vault_audit_dir.mkdir(parents=True, exist_ok=True)
+
+    root = audit_root(state_dir)
+    manifests_dir = root / "manifests"
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+    (manifests_dir / "2026-09.json").write_text(json.dumps({"month": "2026-09"}), encoding="utf-8")
+
+    # Local events in 2026-09
+    e_sep1 = append(
+        {"ts": "2026-09-01T10:00:00.000Z", "kind": "command", "target": "c1"},
+        state_dir=state_dir,
+    )
+    e_sep2 = append(
+        {"ts": "2026-09-02T10:00:00.000Z", "kind": "command", "target": "c2"},
+        state_dir=state_dir,
+    )
+
+    # In archive, include e_sep1 and e_sep2 (with source='archive' to distinguish),
+    # an archive-only event, and an event with no event_id
+    e_arch1 = dict(e_sep1, source="archive")
+    e_arch2 = dict(e_sep2, source="archive")
+    e_arch_only = {
+        "ts": "2026-09-03T10:00:00.000Z",
+        "kind": "command",
+        "target": "c3",
+        "event_id": "arch-only",
+        "source": "archive",
+    }
+    e_no_id_arch = {
+        "ts": "2026-09-04T10:00:00.000Z",
+        "kind": "command",
+        "target": "c4_no_id_arch",
+        "source": "archive",
+    }
+
+    arch_lines = [
+        json.dumps(e_arch1),
+        json.dumps(e_arch2),
+        json.dumps(e_arch_only),
+        json.dumps(e_no_id_arch),
+    ]
+    content = ("\n".join(arch_lines) + "\n").encode("utf-8")
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:xz") as tar:
+        ti = tarfile.TarInfo(name="2026-09/2026-09-01.jsonl")
+        ti.size = len(content)
+        tar.addfile(ti, io.BytesIO(content))
+    (vault_audit_dir / "2026-09.tar.xz").write_bytes(buf.getvalue())
+
+    # In local 2026-09: add an event with no event_id to 2026-09-02.jsonl
+    no_id_local = {
+        "ts": "2026-09-02T12:00:00.000Z",
+        "kind": "command",
+        "target": "c5_no_id_local",
+        "hash": "0" * 64,
+    }
+    with open(root / "2026-09" / "2026-09-02.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(no_id_local) + "\n")
+
+    # Local event in 2026-10
+    e_oct = append(
+        {"ts": "2026-10-01T10:00:00.000Z", "kind": "command", "target": "c_oct"},
+        state_dir=state_dir,
+    )
+
+    events, skipped = read_events_with_archives(
+        state_dir=state_dir,
+        since=None,
+        vault=vault_dir,
+    )
+
+    assert skipped == []
+
+    # Assert that each shared event_id appears exactly once
+    event_ids = [ev["event_id"] for ev in events if "event_id" in ev and ev["event_id"]]
+    assert event_ids.count(e_sep1["event_id"]) == 1
+    assert event_ids.count(e_sep2["event_id"]) == 1
+    assert event_ids.count("arch-only") == 1
+    assert event_ids.count(e_oct["event_id"]) == 1
+
+    # Assert that for the shared event_ids, the archived event was kept (put archived events first)
+    shared_1 = next(ev for ev in events if ev.get("event_id") == e_sep1["event_id"])
+    assert shared_1.get("source") == "archive"
+    shared_2 = next(ev for ev in events if ev.get("event_id") == e_sep2["event_id"])
+    assert shared_2.get("source") == "archive"
+
+    # Assert events with no event_id are both preserved
+    targets = [ev.get("target") for ev in events]
+    assert "c4_no_id_arch" in targets
+    assert "c5_no_id_local" in targets
+
+    # Assert that the output is oldest first
+    timestamps = [str(ev.get("ts", "")) for ev in events]
+    assert timestamps == sorted(timestamps)
