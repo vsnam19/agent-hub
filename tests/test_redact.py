@@ -8,6 +8,7 @@ def test_skillmine_redact_is_the_leaf_function():
     from agenthub import skillmine
 
     assert skillmine.redact is redact_module.redact
+    assert skillmine.HOME_PATH is redact_module.HOME_PATH
 
 
 def test_redact_argv_token_flag_forms():
@@ -125,3 +126,65 @@ def test_redact_module_imports_stdlib_only():
         root_pkg = mod.split(".")[0]
         assert not mod.startswith("agenthub"), f"agenthub/redact.py must not import from agenthub, found: {mod}"
         assert root_pkg in stdlib_names, f"agenthub/redact.py must only import stdlib, found: {mod}"
+
+
+def test_redact_argv_secret_named_flags_space_separated():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["az", "login", "--client-secret", "s3cr3tpw"]) == [
+        "az",
+        "login",
+        "--client-secret",
+        "<redacted>",
+    ]
+    assert redact_argv(["gh", "--auth-token", "abc123xyz"]) == [
+        "gh",
+        "--auth-token",
+        "<redacted>",
+    ]
+    assert redact_argv(["az", "login", "--client-secret=x"]) == [
+        "az",
+        "login",
+        "--client-secret=<redacted>",
+    ]
+    assert redact_argv(["tool", "--api-key", "secret-key-123"]) == [
+        "tool",
+        "--api-key",
+        "<redacted>",
+    ]
+    assert redact_argv(["tool", "--db-password", "hunter2"]) == [
+        "tool",
+        "--db-password",
+        "<redacted>",
+    ]
+    assert redact_argv(["ls", "--sort", "size"]) == [
+        "ls",
+        "--sort",
+        "size",
+    ]
+    assert redact_argv(["tool", "--output", "dir"]) == [
+        "tool",
+        "--output",
+        "dir",
+    ]
+
+
+def test_redact_argv_password_program_after_sudo():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["sudo", "mysql", "-psecret123"]) == [
+        "sudo",
+        "mysql",
+        "-p<redacted>",
+    ]
+    assert redact_argv(["sudo", "mysql", "-p", "secret123"]) == [
+        "sudo",
+        "mysql",
+        "-p",
+        "<redacted>",
+    ]
+    assert redact_argv(["mkdir", "-p", "dir"]) == [
+        "mkdir",
+        "-p",
+        "dir",
+    ]
