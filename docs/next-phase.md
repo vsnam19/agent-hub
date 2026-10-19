@@ -10,13 +10,15 @@ from the plugin cache). `agent-hub hub install --apply` ran: the agent-hub MCP s
 agy list-format follow-up: `hub status` still shows them missing). Master clean, no worktrees, no `orch/*` branches,
 nothing running, nothing pushed. Owner: F6 before G; Phase G is discussed at v0.12 — do not start it.
 
-**Current work (2026-10-19, 12:00 UTC): Phase G — `plan close` finished, waiting on an owner decision.** Spec
-`docs/superpowers/specs/2026-10-18-phase-g-audit-log-design.md` (§13), decisions D-105..D-122. Plan
-`~/.local/state/agent-hub/plans/phase-g/plan.json`; report `~/.local/state/agent-hub/plans/phase-g/report.md`:
-19 approved, 15 blocked (writer cross-day race / pending-gap race / torn tail, classify basename, verify idle month,
-3 fix briefs > 3 files, 6 cascade conflicts on `agenthub/audit/verify.py` from `audit-verify`'s fix round). Nothing
-merged yet. Argon review quota is out until 2026-10-24 (reviews fall back to claude:opus). Incidents logged in
-`~/.local/state/agent-hub/incidents.jsonl`.
+**Current work (2026-10-19, 13:40 UTC): Phase G hardening (owner chose option 2, D-124).** Spec
+`docs/superpowers/specs/2026-10-18-phase-g-audit-log-design.md`, decisions D-105..D-125. All 34 `orch/phase-g/*`
+branches are merged into `orch/phase-g-hardening/integrate` (worktree `.worktrees/phg-integrate`, HEAD 4562504;
+conflicts resolved by job `20261019-131505-implement-hard-191a`). Plan
+`~/.local/state/agent-hub/plans/phase-g-hardening/plan.json` (base = that branch, 11 tasks, one per open finding
+group) is running. Next: `plan wait` → `plan review` → `plan triage`/`close` → merge each approved
+`orch/phase-g-hardening/*` into the integration branch → `agent-hub gate` + review (base = 4562504) + `ready` on its
+HEAD → merge to master → real check (spec §10.4) → docs → v0.12.0. Old report:
+`~/.local/state/agent-hub/plans/phase-g/report.md`. Argon review quota out until 2026-10-24.
 
 The steps below describe how `followups-1` was run; reuse them for the next plan (new slug, new spec).
 
