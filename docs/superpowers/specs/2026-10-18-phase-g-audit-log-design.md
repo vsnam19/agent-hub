@@ -277,3 +277,22 @@ hook registration (after the pending `agy plugin list` parser task in `agenthub/
 wiring → MCP read-only tools → README / overview / orchestrate skill. Keep each `audit` command in its own
 `agenthub/audit/*.py`; serialise tasks that edit `agenthub/planrun.py`, `agenthub/cli.py`, `agenthub/hub.py`,
 `agenthub/mcpserver.py` or `hooks/hooks.json`.
+
+## 13. Corrections from the techlead review (job `20261018-235854-techlead-0689`, D-120)
+
+These override the sections above where they disagree.
+
+1. §3.1: with no pending record nothing is known to be lost, so no `gap` event is written in that case; the
+   pending-gap file lives **outside** the audit directory, at `<state>/audit-pending-gap.jsonl`.
+2. §2 `file_write`: only `sha256_after` (post events only, D-113); `sha256_before` is absent.
+3. §7: `audit_archive_rerun` writes and deletes, so it has `readOnlyHint=False`; it is still the only non-read tool
+   and still takes a month only.
+4. §6: `-p` values are redacted only for `mysql`, `mysqldump`, `mysqladmin`, `sshpass` (else `mkdir -p dir` breaks).
+5. §5.2: the hook's import closure may include `agenthub/config.py` (stdlib-only) for the state directory.
+6. §5.1: the plan runner sets `AGENT_HUB_TRACE_PLAN`/`TASK` around its `spawn` call in `agenthub/planrun.py`;
+   `run_job` sets `JOB`, `ROLE`, `ATTEMPT` (link number) per attempt. `actor` gains `pool_role`.
+7. §5.4: `classify` returns a list of events; it scans every `&&`, `;`, `|` segment (`cd x && git push`).
+8. §5.2: agy `SessionStart`/`Stop` are flat handler lists without `matcher`; only `PostToolUse` is grouped. agy tool
+   names other than `run_command` are undocumented and map to kind `tool`.
+9. Emitters take the state directory from the caller (`Paths`), never from the global, so tests stay isolated.
+10. The codex payload fixture is captured in its own task before the codex normaliser.
