@@ -3,6 +3,7 @@ import fcntl
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -331,6 +332,26 @@ def _build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--announce", help=argparse.SUPPRESS)
     gate.add_argument("--json", action="store_true")
 
+    audit = sub.add_parser("audit", help="read and verify the audit log")
+    audit_sub = audit.add_subparsers(dest="audit_command", required=True, parser_class=_Parser)
+
+    audit_show = audit_sub.add_parser("show", help="show timeline of audit log events")
+    audit_show.add_argument("--plan", help="filter by plan name")
+    audit_show.add_argument("--job", help="filter by job id")
+    audit_show.add_argument("--session", help="filter by director session id")
+    audit_show.add_argument("--since", help="filter events since date, iso timestamp, or relative time")
+    audit_show.add_argument(
+        "--kind", action="append", default=[], dest="kinds", metavar="KIND", help="filter by event kind (repeatable)"
+    )
+    audit_show.add_argument("--json", action="store_true", help="output one JSON object per line")
+
+    audit_verify = audit_sub.add_parser("verify", help="verify audit log integrity")
+    audit_verify.add_argument("--month", metavar="YYYY-MM", help="month to verify (default: all local months)")
+
+    audit_outward = audit_sub.add_parser("outward", help="list only outward events")
+    audit_outward.add_argument("--since", help="filter events since date, iso timestamp, or relative time")
+    audit_outward.add_argument("--json", action="store_true", help="output one JSON object per line")
+
     sub.add_parser("mcp", help="run the MCP server over stdio")
 
     hook = sub.add_parser("hook", help="Claude Code session hooks")
@@ -356,6 +377,7 @@ def main(argv: list[str] | None = None) -> int:
             "gate": _cmd_gate,
             "hub": _cmd_hub,
             "skills": _cmd_skills,
+            "audit": _cmd_audit,
             "mcp": _cmd_mcp,
             "hook": _cmd_hook,
         }[args.command]
@@ -730,6 +752,116 @@ def _mine_window(args, state_dir: Path, now: datetime) -> datetime:
     except (OSError, ValueError):
         return since
     return min(since, last if last.tzinfo else last.replace(tzinfo=timezone.utc))
+
+
+def _cmd_audit_show(args) -> int:
+    from agenthub.audit.show import format_line, parse_since, read_events_with_archives, select
+
+    state_dir = paths().state_dir
+
+    since_val: str | None = None
+    if args.since is not None:
+        try:
+            since_val = parse_since(args.since)
+        except ValueError:
+            raise UsageError(f"invalid --since: {args.since!r}") from None
+
+    try:
+        events, skipped = read_events_with_archives(state_dir=state_dir, since=since_val)
+    except ValueError as e:
+        raise UsageError(f"invalid --since: {e}") from None
+
+    if skipped:
+        print(
+            _safe(
+                f"agent-hub: skipped archived months (vault unreachable): {', '.join(skipped)}",
+                sys.stderr,
+            ),
+            file=sys.stderr,
+        )
+
+    kinds = getattr(args, "kinds", None) or getattr(args, "kind", None) or ()
+    matched = select(
+        events,
+        plan=args.plan,
+        job=args.job,
+        session=args.session,
+        since=since_val,
+        kinds=kinds,
+    )
+
+    if args.json:
+        for ev in matched:
+            print(_safe(json.dumps(ev, ensure_ascii=False)))
+    else:
+        for ev in matched:
+            print(_safe(format_line(ev)))
+
+    return 0
+
+
+def _cmd_audit_verify(args) -> int:
+    from agenthub.audit.verify import verify
+
+    state_dir = paths().state_dir
+    month = args.month
+    if month is not None and not re.match(r"^\d{4}-\d{2}$", month):
+        raise UsageError(f"invalid month format: {month!r}, expected YYYY-MM")
+    try:
+        res = verify(state_dir=state_dir, month=month)
+    except ValueError as e:
+        raise UsageError(str(e)) from None
+
+    print(_safe(res.message))
+    return 0 if res.ok else 1
+
+
+def _cmd_audit_outward(args) -> int:
+    from agenthub.audit.show import format_line, outward, parse_since, read_events_with_archives
+
+    state_dir = paths().state_dir
+
+    since_val: str | None = None
+    if args.since is not None:
+        try:
+            since_val = parse_since(args.since)
+        except ValueError:
+            raise UsageError(f"invalid --since: {args.since!r}") from None
+
+    try:
+        events, skipped = read_events_with_archives(state_dir=state_dir, since=since_val)
+    except ValueError as e:
+        raise UsageError(f"invalid --since: {e}") from None
+
+    if skipped:
+        print(
+            _safe(
+                f"agent-hub: skipped archived months (vault unreachable): {', '.join(skipped)}",
+                sys.stderr,
+            ),
+            file=sys.stderr,
+        )
+
+    matched = outward(events, since=since_val)
+
+    if getattr(args, "json", False):
+        for ev in matched:
+            print(_safe(json.dumps(ev, ensure_ascii=False)))
+    else:
+        for ev in matched:
+            print(_safe(format_line(ev)))
+
+    return 0
+
+
+def _cmd_audit(args) -> int:
+    if args.audit_command == "show":
+        return _cmd_audit_show(args)
+    if args.audit_command == "verify":
+        return _cmd_audit_verify(args)
+    if args.audit_command == "outward":
+        return _cmd_audit_outward(args)
+    raise UsageError(f"unknown audit command: {args.audit_command}")
 
 
 def _cmd_pool(args) -> int:
