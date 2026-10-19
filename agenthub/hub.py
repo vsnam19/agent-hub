@@ -16,14 +16,167 @@ HOSTS = ("codex", "agy")
 INSTALLABLE = ("missing", "stale")
 MCP_ROW = "mcp:agent-hub"
 MCP_SERVER_NAME = "agent-hub"
+AUDIT_HOOK_SCRIPT = "audit-hook.py"
+AUDIT_HOOK_TIMEOUT = 5
+CODEX_AUDIT_EVENTS = ("PostToolUse", "SessionStart")
+AGY_HOOK_GROUP = "agent-hub"
+
+
+def _hub_root() -> Path:
+    return Path(__file__).resolve().parent.parent
 
 
 def _mcp_bin_path() -> Path:
-    return Path(__file__).resolve().parent.parent / "bin" / "agent-hub"
+    return _hub_root() / "bin" / "agent-hub"
 
 
 def _mcp_command() -> list[str]:
     return [str(_mcp_bin_path()), "mcp"]
+
+
+def _agy_home() -> Path:
+    return Path(os.environ.get("HOME", "~")).expanduser() / ".gemini" / "config"
+
+
+def audit_hook_command(host: str, event: str, root: Path | None = None) -> str:
+    base = Path(root) if root is not None else _hub_root()
+    script = base / "hooks" / AUDIT_HOOK_SCRIPT
+    return shlex.join(["python3", "-I", str(script), "--host", host, event])
+
+
+def register_codex_hooks(path: Path, root: Path | None = None) -> bool:
+    path = Path(path)
+    if path.exists():
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("codex hooks file must be a JSON object")
+    else:
+        data = {"hooks": {}}
+
+    hooks_map = data.get("hooks")
+    if hooks_map is None:
+        hooks_map = {}
+        data["hooks"] = hooks_map
+    elif not isinstance(hooks_map, dict):
+        raise ValueError("codex hooks field must be a JSON object")
+
+    changed = not path.exists()
+    for event in CODEX_AUDIT_EVENTS:
+        expected_handler = {
+            "type": "command",
+            "command": audit_hook_command("codex", event, root),
+            "timeout": AUDIT_HOOK_TIMEOUT,
+        }
+        expected_group: dict = (
+            {"matcher": "*", "hooks": [expected_handler]} if event == "PostToolUse" else {"hooks": [expected_handler]}
+        )
+        event_list = hooks_map.get(event)
+        if event_list is None:
+            hooks_map[event] = [expected_group]
+            changed = True
+            continue
+        if not isinstance(event_list, list):
+            raise ValueError(f"codex hooks.{event} must be a list")
+
+        found_idx: int | None = None
+        for idx, group in enumerate(event_list):
+            if not isinstance(group, dict):
+                raise ValueError(f"codex hooks.{event}[{idx}] must be an object")
+            handlers = group.get("hooks")
+            if not isinstance(handlers, list):
+                continue
+            if any(isinstance(h, dict) and AUDIT_HOOK_SCRIPT in str(h.get("command", "")) for h in handlers):
+                found_idx = idx
+                break
+
+        if found_idx is None:
+            event_list.append(expected_group)
+            changed = True
+        else:
+            group = event_list[found_idx]
+            handlers = group["hooks"]
+            if len(handlers) == 1:
+                if group != expected_group:
+                    event_list[found_idx] = expected_group
+                    changed = True
+            else:
+                for h_idx, h in enumerate(handlers):
+                    if isinstance(h, dict) and AUDIT_HOOK_SCRIPT in str(h.get("command", "")):
+                        if h != expected_handler:
+                            handlers[h_idx] = expected_handler
+                            changed = True
+                        break
+                if event == "PostToolUse" and group.get("matcher") != "*":
+                    group["matcher"] = "*"
+                    changed = True
+
+    if not changed and path.exists():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return True
+
+
+def register_agy_hooks(path: Path, root: Path | None = None) -> bool:
+    path = Path(path)
+    if path.exists():
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("agy hooks file must be a JSON object")
+    else:
+        data = {}
+
+    existing = data.get(AGY_HOOK_GROUP)
+    if existing is not None:
+        if not isinstance(existing, dict):
+            raise ValueError(f"agy hooks group {AGY_HOOK_GROUP!r} must be a JSON object")
+        if existing.get("enabled") is False:
+            return False
+
+    expected_group = {
+        "PostToolUse": [
+            {
+                "matcher": "*",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": audit_hook_command("agy", "PostToolUse", root),
+                        "timeout": AUDIT_HOOK_TIMEOUT,
+                    }
+                ],
+            }
+        ],
+        "SessionStart": [
+            {
+                "type": "command",
+                "command": audit_hook_command("agy", "SessionStart", root),
+                "timeout": AUDIT_HOOK_TIMEOUT,
+            }
+        ],
+        "Stop": [
+            {
+                "type": "command",
+                "command": audit_hook_command("agy", "Stop", root),
+                "timeout": AUDIT_HOOK_TIMEOUT,
+            }
+        ],
+    }
+
+    changed = not path.exists()
+    if existing is None:
+        data[AGY_HOOK_GROUP] = expected_group
+        changed = True
+    else:
+        for event, val in expected_group.items():
+            if existing.get(event) != val:
+                existing[event] = val
+                changed = True
+
+    if not changed and path.exists():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return True
 
 
 @dataclass(frozen=True)
@@ -153,7 +306,15 @@ def install(
         emit("nothing to install")
     for cmd in cmds:
         emit("$ " + shlex.join(cmd))
+    hook_root = repo_root if repo_root is not None else _hub_root()
+    hook_targets: list[tuple[Path, Callable[[Path, Path], bool]]] = []
+    if "codex" in hosts:
+        hook_targets.append((_codex_home() / "hooks.json", register_codex_hooks))
+    if "agy" in hosts:
+        hook_targets.append((_agy_home() / "hooks.json", register_agy_hooks))
     if not apply:
+        for hook_path, _register in hook_targets:
+            emit(f"would register audit hook in {hook_path}")
         return 0
     for cmd in cmds:
         try:
@@ -167,6 +328,12 @@ def install(
         if proc.returncode != 0:
             tail = "\n".join((proc.stderr.strip() or proc.stdout.strip()).splitlines()[-10:])
             emit(f"failed (exit {proc.returncode}): {shlex.join(cmd)}\n{tail}")
+            return 1
+    for hook_path, register in hook_targets:
+        try:
+            register(hook_path, hook_root)
+        except (OSError, ValueError) as exc:
+            emit(f"failed: {hook_path}: {exc}")
             return 1
     emit("")
     emit(format_rows(status(config_dir, repo_root)))
