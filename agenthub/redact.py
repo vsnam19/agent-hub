@@ -63,7 +63,6 @@ _WORD_PIECE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+")
 _IDENT_WORD = re.compile(r"(?:[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]{3,})+")
 _JOB_ID = re.compile(r"\d{8}-\d{6}-[a-z]+(?:-[a-z]+)*-[0-9a-f]{4}(?:\.\w+)?")
 
-_SECRET_FLAGS = {"--token", "--password", "--passwd", "--secret", "--api-key"}
 _SECRET_FLAG_WORDS = (
     "secret",
     "token",
@@ -188,33 +187,19 @@ def _identifier_part(part: str) -> bool:
 
 
 def _is_secret_flag_name(name: str) -> bool:
-    """Whether a long flag name contains secret keywords."""
+    """Whether a flag name contains secret keywords or matches the secret name grammar."""
     name_lower = name.lower()
     name_norm = name_lower.replace("_", "-")
-    return any(w in name_lower or w in name_norm for w in _SECRET_FLAG_WORDS)
+    return (
+        any(w in name_lower or w in name_norm for w in _SECRET_FLAG_WORDS)
+        or bool(_SECRET_KEY.fullmatch(name_lower))
+        or bool(_SECRET_KEY.fullmatch(name_norm))
+    )
 
 
 def _is_password_program(argv: list[str]) -> bool:
-    """Return True if argv executes one of _PASSWORD_PROGRAMS after skipping sudo, env, and KEY=val."""
-    i = 0
-    while i < len(argv):
-        arg = argv[i]
-        if _ENV_VAR.match(arg):
-            i += 1
-            continue
-        base = os.path.basename(arg)
-        if base == "sudo":
-            i += 1
-            while i < len(argv) and argv[i].startswith("-"):
-                i += 1
-            continue
-        if base == "env":
-            i += 1
-            while i < len(argv) and argv[i].startswith("-"):
-                i += 1
-            continue
-        return base in _PASSWORD_PROGRAMS
-    return False
+    """Return True if any argv item's basename is in _PASSWORD_PROGRAMS."""
+    return any(os.path.basename(arg) in _PASSWORD_PROGRAMS for arg in argv)
 
 
 def redact_argv(argv: list[str]) -> list[str]:
@@ -222,7 +207,7 @@ def redact_argv(argv: list[str]) -> list[str]:
     if not argv:
         return []
 
-    is_pw_prog = _is_password_program(argv)
+    is_pw_prog = _is_password_program(argv) and not (argv and os.path.basename(argv[0]) == "echo")
     res: list[str] = []
     i = 0
 
@@ -252,15 +237,17 @@ def redact_argv(argv: list[str]) -> list[str]:
                 i += 1
                 continue
 
-        if arg.startswith("--"):
+        if arg.startswith("-"):
             if "=" in arg:
                 flag_name, _ = arg.split("=", 1)
-                if _is_secret_flag_name(flag_name[2:]):
+                clean_name = flag_name.lstrip("-")
+                if clean_name and _is_secret_flag_name(clean_name):
                     res.append(f"{flag_name}=<redacted>")
                     i += 1
                     continue
             else:
-                if _is_secret_flag_name(arg[2:]):
+                clean_name = arg.lstrip("-")
+                if clean_name and _is_secret_flag_name(clean_name):
                     res.append(arg)
                     if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
                         res.append("<redacted>")

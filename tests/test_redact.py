@@ -360,3 +360,76 @@ def test_p_flag_untouched_for_other_programs():
     assert redact_argv(["python", "app.py", "-p", "arg"]) == ["python", "app.py", "-p", "arg"]
     assert redact_argv(["echo", "mysql", "-p", "secret"]) == ["echo", "mysql", "-p", "secret"]
     assert redact_argv(["ls", "mysqldump", "-p"]) == ["ls", "mysqldump", "-p"]
+
+
+def test_secret_flag_name_variants():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["tool", "--pass", "pw"]) == ["tool", "--pass", "<redacted>"]
+    assert redact_argv(["gpg", "--passphrase", "pw"]) == ["gpg", "--passphrase", "<redacted>"]
+    assert redact_argv(["tool", "--key", "mykey"]) == ["tool", "--key", "<redacted>"]
+    assert redact_argv(["tool", "--access-key", "ak"]) == ["tool", "--access-key", "<redacted>"]
+    assert redact_argv(["tool", "--auth", "x"]) == ["tool", "--auth", "<redacted>"]
+    assert redact_argv(["tool", "--session", "s3ss"]) == ["tool", "--session", "<redacted>"]
+    assert redact_argv(["tool", "--pass=pw"]) == ["tool", "--pass=<redacted>"]
+    assert redact_argv(["tool", "--passphrase=pw"]) == ["tool", "--passphrase=<redacted>"]
+    assert redact_argv(["tool", "--key=k"]) == ["tool", "--key=<redacted>"]
+    assert redact_argv(["tool", "--access-key=ak"]) == ["tool", "--access-key=<redacted>"]
+    assert redact_argv(["tool", "--auth=x"]) == ["tool", "--auth=<redacted>"]
+
+
+def test_single_dash_secret_flags():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["vault-tool", "-token", "x"]) == ["vault-tool", "-token", "<redacted>"]
+    assert redact_argv(["app", "-password", "x"]) == ["app", "-password", "<redacted>"]
+    assert redact_argv(["keytool", "-storepass", "changeit"]) == ["keytool", "-storepass", "<redacted>"]
+    assert redact_argv(["tool", "-token=x"]) == ["tool", "-token=<redacted>"]
+    assert redact_argv(["tool", "-password=x"]) == ["tool", "-password=<redacted>"]
+    assert redact_argv(["tool", "-v"]) == ["tool", "-v"]
+    assert redact_argv(["tool", "-o", "out"]) == ["tool", "-o", "out"]
+
+
+def test_p_behind_wrapper_with_option_values():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["sudo", "-u", "root", "mysql", "-psecret123"]) == [
+        "sudo",
+        "-u",
+        "root",
+        "mysql",
+        "-p<redacted>",
+    ]
+    assert redact_argv(["docker", "exec", "db", "mysql", "-p", "s3cr3t"]) == [
+        "docker",
+        "exec",
+        "db",
+        "mysql",
+        "-p",
+        "<redacted>",
+    ]
+    assert redact_argv(["kubectl", "exec", "pod", "--", "mysql", "-p", "s3cr3t"]) == [
+        "kubectl",
+        "exec",
+        "pod",
+        "--",
+        "mysql",
+        "-p",
+        "<redacted>",
+    ]
+    assert redact_argv(["timeout", "10", "sshpass", "-p", "pw", "ssh", "host"]) == [
+        "timeout",
+        "10",
+        "sshpass",
+        "-p",
+        "<redacted>",
+        "ssh",
+        "host",
+    ]
+    assert redact_argv(["env", "-u", "FOO", "mysql", "-ppw"]) == [
+        "env",
+        "-u",
+        "FOO",
+        "mysql",
+        "-p<redacted>",
+    ]
