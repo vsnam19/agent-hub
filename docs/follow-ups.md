@@ -135,3 +135,22 @@ a turn. Items:
   owner approves the request hash.
 - **Spec-review gate for the techlead.** Revisit after the scorecard baseline exists, so its effect can be measured
   (fix rounds and spec-caused `blocked` tasks with vs without the gate).
+
+## Single source of truth for model ids (owner, 2026-10-19, D-121) — next plan after Phase G
+
+agy 1.4.2 removed `claude-*-4-6`; nothing noticed (cooldowns hid it) and the Phase G task `pool-agy-model-ids` blocked
+because three test files hard-code default-pool ids. Fix: (1) each agent's model list comes from its host CLI
+(`agy models`, …) cached in state; `agent-hub pool` marks `unknown-model` links and chains skip them at once;
+(2) tests read expected chains from `default_pool.toml` via `load_pool()` and use fake ids (`fake:model-a`) for
+arbitrary links; a test fails on real `agy:`/`codex:`/`claude:` literals in `tests/`; (3) the owner pool lists only
+overrides.
+
+## Incident log for `skills weekly` (owner, 2026-10-19, D-122) — with the D-121 plan
+
+Every process failure (director, techlead or tool cause — not ordinary review findings) is one line in
+`<state>/incidents.jsonl`: `ts`, `kind` (`brief-scope`, `stale-model-id`, `spec-issue`, `process-skip`, `wait-hang`,
+`quota`, `tool-break`, …), `source`, `plan`/`task`/`job`, `cost` (attempts, rounds, minutes), `what`, `lesson`.
+Started by hand on 2026-10-19 (4 entries). To build: `agent-hub incident add …` (deterministic, also an audit event
+of kind `incident`); `skillmine.mine` reads it; the weekly report shows counts per kind per week and the top cost,
+and drafts a `learned-director` lesson when one kind repeats ≥ 3 times; the orchestrate skill tells the director to
+log one whenever a task blocks or fails for a reason that is not the implementer's.
