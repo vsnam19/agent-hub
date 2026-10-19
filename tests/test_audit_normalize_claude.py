@@ -155,7 +155,7 @@ def test_claude_quote_from_description() -> None:
     }
     events = normalize("claude", "PostToolUse", with_desc, {})
     assert len(events) == 1
-    assert events[0]["quote"] == long_desc
+    assert events[0]["quote"] == ("D" * 199) + "…"
 
     without_desc = {
         **REAL_CLAUDE_POST_TOOL_USE_PAYLOAD,
@@ -172,6 +172,102 @@ def test_claude_quote_from_description() -> None:
     events_empty = normalize("claude", "PostToolUse", empty_desc, {})
     assert len(events_empty) == 1
     assert "quote" not in events_empty[0]
+
+
+def test_quote_cut_to_200_with_ellipsis() -> None:
+    # 200 chars kept whole
+    desc_200 = "A" * 200
+    events_200 = normalize(
+        "claude",
+        "PostToolUse",
+        {**REAL_CLAUDE_POST_TOOL_USE_PAYLOAD, "tool_input": {"command": "echo hi", "description": desc_200}},
+        {},
+    )
+    assert len(events_200) == 1
+    assert events_200[0]["quote"] == desc_200
+    assert len(events_200[0]["quote"]) == 200
+
+    # 201 chars cut to 199 chars + ellipsis
+    desc_201 = ("B" * 199) + "XY"
+    events_201 = normalize(
+        "claude",
+        "PostToolUse",
+        {**REAL_CLAUDE_POST_TOOL_USE_PAYLOAD, "tool_input": {"command": "echo hi", "description": desc_201}},
+        {},
+    )
+    assert len(events_201) == 1
+    assert events_201[0]["quote"] == ("B" * 199) + "…"
+    assert len(events_201[0]["quote"]) == 200
+
+    # 350 chars cut to 199 chars + ellipsis
+    desc_350 = "C" * 350
+    events_350 = normalize(
+        "claude",
+        "PostToolUse",
+        {**REAL_CLAUDE_POST_TOOL_USE_PAYLOAD, "tool_input": {"command": "echo hi", "description": desc_350}},
+        {},
+    )
+    assert len(events_350) == 1
+    assert events_350[0]["quote"] == ("C" * 199) + "…"
+    assert len(events_350[0]["quote"]) == 200
+
+
+def test_non_string_command_does_not_raise() -> None:
+    # 1. Null command
+    null_payload = {
+        **REAL_CLAUDE_POST_TOOL_USE_PAYLOAD,
+        "tool_input": {"command": None, "description": "Null command test"},
+    }
+    null_events = normalize("claude", "PostToolUse", null_payload, {})
+    assert len(null_events) == 1
+    ev_null = null_events[0]
+    assert ev_null["kind"] == "command"
+    assert ev_null["target"] == ""
+    assert ev_null["detail"]["command_type"] == "NoneType"
+    assert ev_null["outcome"] == {"status": "ok"}
+    assert ev_null["quote"] == "Null command test"
+
+    # 2. Integer command
+    int_payload = {
+        **REAL_CLAUDE_POST_TOOL_USE_PAYLOAD,
+        "tool_input": {"command": 12345},
+    }
+    int_events = normalize("claude", "PostToolUse", int_payload, {})
+    assert len(int_events) == 1
+    ev_int = int_events[0]
+    assert ev_int["kind"] == "command"
+    assert ev_int["target"] == ""
+    assert ev_int["detail"]["command_type"] == "int"
+    assert ev_int["outcome"] == {"status": "ok"}
+
+    # 3. List command
+    list_payload = {
+        **REAL_CLAUDE_POST_TOOL_USE_PAYLOAD,
+        "tool_input": {"command": ["echo", "hello"]},
+    }
+    list_events = normalize("claude", "PostToolUse", list_payload, {})
+    assert len(list_events) == 1
+    ev_list = list_events[0]
+    assert ev_list["kind"] == "command"
+    assert ev_list["target"] == ""
+    assert ev_list["detail"]["command_type"] == "list"
+    assert ev_list["outcome"] == {"status": "ok"}
+
+    # 4. Failure with null command carries error status and stderr_tail
+    failure_null_payload = {
+        **REAL_CLAUDE_POST_TOOL_USE_PAYLOAD,
+        "hook_event_name": "PostToolUseFailure",
+        "tool_input": {"command": None},
+        "error": "command is required",
+    }
+    fail_events = normalize("claude", "PostToolUseFailure", failure_null_payload, {})
+    assert len(fail_events) == 1
+    ev_fail = fail_events[0]
+    assert ev_fail["kind"] == "command"
+    assert ev_fail["target"] == ""
+    assert ev_fail["detail"]["command_type"] == "NoneType"
+    assert ev_fail["detail"]["stderr_tail"] == "command is required"
+    assert ev_fail["outcome"] == {"status": "error"}
 
 
 def test_claude_thinking_blocks_and_transcript_content_absent(tmp_path: Path) -> None:

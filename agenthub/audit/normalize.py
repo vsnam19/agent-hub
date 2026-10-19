@@ -146,11 +146,33 @@ def _normalize_claude(
     if "cwd" not in tool_input and isinstance(cwd, str) and cwd:
         tool_input["cwd"] = cwd
 
-    classified_items = classify("claude", tool_name, tool_input)
     status = "ok" if ev_name == "PostToolUse" else "error"
     description = tool_input.get("description")
-    quote = description if (isinstance(description, str) and description) else None
+    quote: str | None = None
+    if isinstance(description, str) and description:
+        quote = description[:199] + "…" if len(description) > 200 else description
     error_text = _extract_error_text(clean) if ev_name == "PostToolUseFailure" else None
+
+    if tool_name == "Bash" and not isinstance(tool_input.get("command"), str):
+        cmd_val = tool_input.get("command")
+        detail: dict[str, Any] = {"command_type": type(cmd_val).__name__}
+        if "cwd" in tool_input and isinstance(tool_input["cwd"], str) and tool_input["cwd"]:
+            detail["cwd"] = tool_input["cwd"]
+        if ev_name == "PostToolUseFailure" and error_text:
+            detail["stderr_tail"] = error_text[-2000:]
+        ev: dict[str, Any] = {
+            "actor": dict(actor),
+            "parent": dict(parent),
+            "kind": "command",
+            "target": "",
+            "detail": detail,
+            "outcome": {"status": status},
+        }
+        if quote is not None:
+            ev["quote"] = quote
+        return [ev]
+
+    classified_items = classify("claude", tool_name, tool_input)
 
     events: list[dict[str, Any]] = []
     for item in classified_items:
@@ -245,12 +267,12 @@ def _normalize_agy(
 
     raw_args = tool_call.get("args")
     tool_input: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}
-    if "Cwd" not in tool_input and "cwd" not in tool_input and isinstance(cwd, str) and cwd:
+    if not tool_input.get("Cwd") and not tool_input.get("cwd") and isinstance(cwd, str) and cwd:
         tool_input["cwd"] = cwd
 
     classified_items = classify("agy", tool_name, tool_input)
     error_text = _extract_error_text(clean)
-    status = "error" if error_text else "ok"
+    status = "error" if ev_name == "PostToolUseFailure" or error_text else "ok"
 
     events: list[dict[str, Any]] = []
     for item in classified_items:
