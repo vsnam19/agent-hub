@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import json
+import lzma
 import re
+import tarfile
 from collections.abc import Iterable, Iterator, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from agenthub.audit.archive import ArchiveError, load_vault
 from agenthub.audit.writer import audit_root
 
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 _DAY_FILE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.jsonl$")
+_MANIFEST_FILE_RE = re.compile(r"^(\d{4}-\d{2})\.json$")
 _RELATIVE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([smhdw])$", re.IGNORECASE)
 _UNIT_SECONDS = {
     "s": 1.0,
@@ -174,3 +178,114 @@ def outward(
     since: str | None = None,
 ) -> list[dict[str, Any]]:
     return select(events, since=since, kinds=("outward",))
+
+
+def read_events_with_archives(
+    state_dir: Path | str | None = None,
+    since: str | None = None,
+    vault: Path | str | None = None,
+    config_dir: Path | str | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    since_month: str | None = None
+    if since is not None:
+        cleaned = since.strip()
+        if not cleaned:
+            raise ValueError("empty since expression")
+        if _MONTH_RE.match(cleaned):
+            since_month = cleaned
+        else:
+            since_iso = parse_since(cleaned)
+            since_month = since_iso[:7]
+
+    root = audit_root(state_dir)
+    manifests_dir = root / "manifests"
+    manifest_months: list[str] = []
+    if manifests_dir.is_dir():
+        for p in sorted(manifests_dir.iterdir(), key=lambda p: p.name):
+            if p.is_file():
+                m = _MANIFEST_FILE_RE.match(p.name)
+                if m:
+                    manifest_months.append(m.group(1))
+
+    if since_month is None:
+        candidate_months = manifest_months
+    else:
+        candidate_months = [m for m in manifest_months if m >= since_month]
+
+    local_events = list(read_events(state_dir=state_dir))
+
+    if not candidate_months:
+        return local_events, []
+
+    vault_root: Path | None = None
+    if vault is not None:
+        vault_root = Path(vault).expanduser()
+    else:
+        try:
+            vault_root = load_vault(config_dir=config_dir)
+        except ArchiveError:
+            vault_root = None
+
+    try:
+        if vault_root is None or not vault_root.is_dir():
+            return local_events, list(candidate_months)
+        vault_audit_dir = vault_root / "agent-hub-audit"
+        if not vault_audit_dir.is_dir():
+            return local_events, list(candidate_months)
+    except OSError:
+        return local_events, list(candidate_months)
+
+    archived_events: list[dict[str, Any]] = []
+    skipped_months: list[str] = []
+
+    for month in candidate_months:
+        tar_path = vault_audit_dir / f"{month}.tar.xz"
+        try:
+            if not tar_path.is_file():
+                skipped_months.append(month)
+                continue
+        except OSError:
+            skipped_months.append(month)
+            continue
+
+        month_events: list[dict[str, Any]] = []
+        try:
+            with tarfile.open(tar_path, "r:*") as tar:
+                day_members = sorted(
+                    [m for m in tar.getmembers() if m.isfile() and _DAY_FILE_RE.match(Path(m.name).name)],
+                    key=lambda m: Path(m.name).name,
+                )
+                for member in day_members:
+                    f = tar.extractfile(member)
+                    if f is None:
+                        continue
+                    try:
+                        for raw_line in f:
+                            line = raw_line.strip()
+                            if not line:
+                                continue
+                            try:
+                                record = json.loads(line)
+                            except (json.JSONDecodeError, UnicodeDecodeError):
+                                continue
+                            if not isinstance(record, dict):
+                                continue
+                            month_events.append(record)
+                    finally:
+                        f.close()
+            archived_events.extend(month_events)
+        except (tarfile.TarError, OSError, EOFError, lzma.LZMAError):
+            skipped_months.append(month)
+
+    seen_ids: set[str] = set()
+    deduped_events: list[dict[str, Any]] = []
+    for ev in archived_events + local_events:
+        eid = ev.get("event_id")
+        if isinstance(eid, str) and eid:
+            if eid in seen_ids:
+                continue
+            seen_ids.add(eid)
+        deduped_events.append(ev)
+
+    deduped_events.sort(key=lambda ev: str(ev.get("ts", "")))
+    return deduped_events, skipped_months
