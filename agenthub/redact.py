@@ -34,7 +34,8 @@ _KV_SPACE = re.compile(rf"(?i)(?<![\w-])({_NAME})(\s+)(?!-|<redacted>){_VALUE}")
 _KV_JSON = re.compile(rf"(?i)(\"{_NAME}\"\s*:\s*)\"[^\"]*\"")
 _BARE_SECRET_WORDS = {"password", "passwd", "pwd", "passphrase"}
 _EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
-_HOME = re.compile(r"(?:^|(?<=[\s\"'`(=:/\[]))(?:/home/[^/\s]+|/Users/[^/\s]+|/root(?![\w.-]))")
+HOME_PATH = re.compile(r"(?:^|(?<=[\s\"'`(=:/\[]))(?:/home/[^/\s]+|/Users/[^/\s]+|/root(?![\w.-]))")
+_HOME = HOME_PATH
 
 # Token rule. Text is split on whitespace, quotes, backticks and `=:,;()<>[]{}?&`; each token is then split on
 # `. / @ # *` (Markdown, paths, extensions, `...`) and only a piece is redacted, when ALL hold:
@@ -119,7 +120,7 @@ def redact(text: str) -> str:
     text = _KV_JSON.sub(r'\1"<redacted>"', text)
     text = _EMAIL.sub("<email>", text)
     text = _TOKEN.sub(lambda m: _redact_token(m.group(0)), text)
-    return _HOME.sub("~", text)
+    return HOME_PATH.sub("~", text)
 
 
 def _redact_space_value(match: re.Match) -> str:
@@ -176,6 +177,19 @@ def _identifier_part(part: str) -> bool:
     return part.isalpha() and (len(part) == 1 or _IDENT_WORD.fullmatch(part) is not None)
 
 
+def _is_secret_flag(flag: str) -> bool:
+    """Whether `flag` matches secret flags (e.g. `--token`, `--client-secret`)."""
+    if not flag.startswith("-"):
+        return False
+    if flag in _SECRET_FLAGS:
+        return True
+    name = flag.lstrip("-")
+    if not name:
+        return False
+    name_norm = name.replace("-", "_")
+    return bool(_SECRET_KEY.search(name_norm))
+
+
 def redact_argv(argv: list[str]) -> list[str]:
     """Redact secret flags, env prefixes and embedded secrets in an argv list."""
     if not argv:
@@ -191,34 +205,10 @@ def redact_argv(argv: list[str]) -> list[str]:
             res.append(redact(argv[i]))
         i += 1
 
-    is_pw_prog = False
-    if os.path.basename(argv[0]) in _PASSWORD_PROGRAMS:
-        is_pw_prog = True
-    elif i < len(argv) and os.path.basename(argv[i]) in _PASSWORD_PROGRAMS:
-        is_pw_prog = True
+    is_pw_prog = any(os.path.basename(arg) in _PASSWORD_PROGRAMS for arg in argv)
 
     while i < len(argv):
         arg = argv[i]
-
-        if arg in _SECRET_FLAGS:
-            res.append(arg)
-            if i + 1 < len(argv):
-                res.append("<redacted>")
-                i += 2
-            else:
-                i += 1
-            continue
-
-        matched_eq = False
-        for flag in _SECRET_FLAGS:
-            prefix = flag + "="
-            if arg.startswith(prefix):
-                res.append(f"{flag}=<redacted>")
-                matched_eq = True
-                break
-        if matched_eq:
-            i += 1
-            continue
 
         if is_pw_prog:
             if arg == "-p":
@@ -229,10 +219,26 @@ def redact_argv(argv: list[str]) -> list[str]:
                 else:
                     i += 1
                 continue
-            if arg.startswith("-p") and len(arg) > 2:
+            if arg.startswith("-p") and not arg.startswith("--") and len(arg) > 2:
                 res.append("-p<redacted>")
                 i += 1
                 continue
+
+        if arg.startswith("-") and "=" in arg:
+            flag_name, _ = arg.split("=", 1)
+            if _is_secret_flag(flag_name):
+                res.append(f"{flag_name}=<redacted>")
+                i += 1
+                continue
+
+        if arg.startswith("-") and "=" not in arg and _is_secret_flag(arg):
+            res.append(arg)
+            if i + 1 < len(argv):
+                res.append("<redacted>")
+                i += 2
+            else:
+                i += 1
+            continue
 
         res.append(redact(arg))
         i += 1
