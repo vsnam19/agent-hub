@@ -93,22 +93,13 @@ def _extract_error_text(clean_payload: Mapping[str, Any]) -> str | None:
     return None
 
 
-def normalize(
-    host: str,
-    event_name: str,
-    payload: Mapping[str, Any] | None,
+def _normalize_claude(
+    ev_name: str | None,
+    clean: Mapping[str, Any],
     env: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    if (host or "").strip().lower() != "claude":
-        return []
-    if not isinstance(payload, Mapping):
-        return []
-
-    clean = scrub(payload)
-
     session_id = clean.get("session_id")
     cwd = clean.get("cwd")
-    ev_name = event_name if (isinstance(event_name, str) and event_name) else clean.get("hook_event_name")
     model = clean.get("model")
 
     trace = trace_context(env)
@@ -189,3 +180,127 @@ def normalize(
         events.append(ev)
 
     return events
+
+
+def _normalize_agy(
+    ev_name: str | None,
+    clean: Mapping[str, Any],
+    env: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    session_id = clean.get("conversationId") or clean.get("session_id")
+    model = clean.get("modelName") or clean.get("model")
+    workspace_paths = clean.get("workspacePaths") or clean.get("workspace_paths")
+    cwd: str | None = None
+    if isinstance(workspace_paths, list) and workspace_paths and isinstance(workspace_paths[0], str):
+        cwd = workspace_paths[0]
+    elif isinstance(clean.get("cwd"), str):
+        cwd = clean.get("cwd")
+
+    trace = trace_context(env)
+    actor: dict[str, Any] = {
+        "role": trace.actor_role,
+        "host": "agy",
+    }
+    if isinstance(session_id, str) and session_id:
+        actor["session_id"] = session_id
+    if isinstance(model, str) and model.strip():
+        m = model.strip()
+        actor["model"] = m.removeprefix("agy:")
+        actor["agent"] = m if m.startswith("agy:") else f"agy:{m}"
+    if trace.pool_role is not None:
+        actor["pool_role"] = trace.pool_role
+
+    parent: dict[str, Any] = dict(trace.parent)
+
+    if ev_name in ("SessionStart", "Stop"):
+        session_ev = "start" if ev_name == "SessionStart" else "stop"
+        detail: dict[str, Any] = {"event": session_ev}
+        if ev_name == "Stop":
+            term_reason = clean.get("terminationReason") or clean.get("termination_reason")
+            if isinstance(term_reason, str) and term_reason:
+                detail["reason"] = term_reason
+        error_text = _extract_error_text(clean)
+        status = "error" if error_text else "ok"
+        return [
+            {
+                "actor": dict(actor),
+                "parent": dict(parent),
+                "kind": "session",
+                "target": session_ev,
+                "detail": detail,
+                "outcome": {"status": status},
+            }
+        ]
+
+    if ev_name not in ("PostToolUse", "PostToolUseFailure"):
+        return []
+
+    tool_call = clean.get("toolCall") or clean.get("tool_call")
+    if not isinstance(tool_call, Mapping):
+        return []
+
+    tool_name = tool_call.get("name")
+    if not isinstance(tool_name, str) or not tool_name:
+        return []
+
+    raw_args = tool_call.get("args")
+    tool_input: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}
+    if "Cwd" not in tool_input and "cwd" not in tool_input and isinstance(cwd, str) and cwd:
+        tool_input["cwd"] = cwd
+
+    classified_items = classify("agy", tool_name, tool_input)
+    error_text = _extract_error_text(clean)
+    status = "error" if error_text else "ok"
+
+    events: list[dict[str, Any]] = []
+    for item in classified_items:
+        detail = dict(item.detail)
+        if item.kind == "command" and error_text:
+            detail["stderr_tail"] = error_text[-2000:]
+        if item.kind in ("file_read", "file_write"):
+            detail.pop("sha256_before", None)
+            file_path = detail.get("path") or item.target
+            if isinstance(file_path, str) and file_path:
+                sha = file_sha256(file_path)
+                if sha is None and isinstance(cwd, str) and cwd and not os.path.isabs(file_path):
+                    sha = file_sha256(os.path.join(cwd, file_path))
+                if sha is not None:
+                    detail["sha256_after"] = sha
+
+        ev: dict[str, Any] = {
+            "actor": dict(actor),
+            "parent": dict(parent),
+            "kind": item.kind,
+            "target": item.target,
+            "detail": detail,
+            "outcome": {"status": status},
+        }
+        events.append(ev)
+
+    return events
+
+
+def normalize(
+    host: str,
+    event_name: str,
+    payload: Mapping[str, Any] | None,
+    env: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    host_norm = (host or "").strip().lower()
+    if host_norm not in ("claude", "agy"):
+        return []
+    if not isinstance(payload, Mapping):
+        return []
+
+    clean = scrub(payload)
+    ev_name = (
+        event_name
+        if (isinstance(event_name, str) and event_name)
+        else (clean.get("hook_event_name") or clean.get("eventName") or clean.get("event"))
+    )
+
+    if host_norm == "claude":
+        return _normalize_claude(ev_name, clean, env)
+    if host_norm == "agy":
+        return _normalize_agy(ev_name, clean, env)
+    return []
