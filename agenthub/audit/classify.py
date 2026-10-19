@@ -113,17 +113,39 @@ _WRAPPERS = {"command", "nohup", "time", "exec", "nice", "setsid"}
 
 
 def _strip_leading_prefixes(tokens: list[str]) -> list[str]:
+    tokens = list(tokens)
+    while tokens and tokens[-1] == ")":
+        tokens.pop()
+    if tokens and tokens[-1].endswith(")") and "(" not in tokens[-1]:
+        tokens[-1] = tokens[-1].rstrip(")")
+
     i = 0
     n = len(tokens)
     while i < n:
         tok = tokens[i]
+        if not tok:
+            i += 1
+            continue
+
+        if tok.startswith("("):
+            stripped_tok = tok.lstrip("(")
+            if not stripped_tok:
+                i += 1
+                continue
+            tokens[i] = stripped_tok
+            continue
+
         base = os.path.basename(tok)
         if base == "sudo":
             i += 1
             while i < n and tokens[i].startswith("-"):
                 flag = tokens[i]
                 i += 1
-                if flag in ("-u", "-g", "-C") and i < n:
+                if (
+                    flag in ("-u", "-g", "-C", "-p", "-c", "-a", "-r", "-t", "-T", "-D", "-U")
+                    and i < n
+                    and not tokens[i].startswith("-")
+                ):
                     i += 1
             continue
         if base == "env":
@@ -131,7 +153,64 @@ def _strip_leading_prefixes(tokens: list[str]) -> list[str]:
             while i < n and tokens[i].startswith("-"):
                 flag = tokens[i]
                 i += 1
-                if flag in ("-u", "-S") and i < n:
+                if flag in ("-S", "--split-string") and i < n:
+                    s_val = tokens[i]
+                    try:
+                        sub_tokens = shlex.split(s_val)
+                    except ValueError:
+                        sub_tokens = s_val.split()
+                    tokens[i : i + 1] = sub_tokens
+                    n = len(tokens)
+                    continue
+                if flag.startswith("--split-string="):
+                    s_val = flag.split("=", 1)[1]
+                    try:
+                        sub_tokens = shlex.split(s_val)
+                    except ValueError:
+                        sub_tokens = s_val.split()
+                    tokens[i:i] = sub_tokens
+                    n = len(tokens)
+                    continue
+                if flag in ("-u", "--unset", "-C", "--chdir") and i < n and not tokens[i].startswith("-"):
+                    i += 1
+            continue
+        if base == "timeout":
+            i += 1
+            while i < n and tokens[i].startswith("-"):
+                flag = tokens[i]
+                i += 1
+                if flag in ("-k", "--kill-after", "-s", "--signal") and i < n and not tokens[i].startswith("-"):
+                    i += 1
+            if i < n and not tokens[i].startswith("-"):
+                i += 1
+            continue
+        if base == "xargs":
+            i += 1
+            while i < n and tokens[i].startswith("-"):
+                flag = tokens[i]
+                i += 1
+                if (
+                    flag
+                    in (
+                        "-n",
+                        "--max-args",
+                        "-L",
+                        "--max-lines",
+                        "-I",
+                        "--replace",
+                        "-s",
+                        "--max-chars",
+                        "-P",
+                        "--max-procs",
+                        "-E",
+                        "-d",
+                        "--delimiter",
+                        "-a",
+                        "--arg-file",
+                    )
+                    and i < n
+                    and not tokens[i].startswith("-")
+                ):
                     i += 1
             continue
         if base in _WRAPPERS:
@@ -154,7 +233,7 @@ def _extract_sh_c_command(tokens: list[str]) -> str | None:
     if not stripped:
         return None
     prog = os.path.basename(stripped[0])
-    if prog not in ("bash", "sh"):
+    if prog not in ("sh", "bash", "zsh"):
         return None
     args = stripped[1:]
     i = 0
@@ -199,6 +278,8 @@ _CURL_OPT_WITH_ARG = {
     "--data",
     "--data-raw",
     "--data-binary",
+    "--data-urlencode",
+    "--data-ascii",
     "-u",
     "--user",
     "-o",
@@ -216,11 +297,13 @@ _CURL_OPT_WITH_ARG = {
     "--cookie-jar",
     "-F",
     "--form",
+    "--form-string",
     "-T",
     "--upload-file",
     "--cacert",
     "--cert",
     "--key",
+    "--capath",
     "-w",
     "--write-out",
     "--resolve",
@@ -229,13 +312,103 @@ _CURL_OPT_WITH_ARG = {
     "--proxy",
     "-x",
     "--retry",
+    "--retry-delay",
+    "--retry-max-time",
     "-r",
     "--range",
     "-C",
+    "--continue-at",
+    "--proto",
+    "--proto-default",
+    "--proto-redir",
+    "--ciphers",
+    "--tls13-ciphers",
+    "--interface",
+    "--limit-rate",
+    "--local-port",
+    "--unix-socket",
+    "--abstract-unix-socket",
+    "--pinnedpubkey",
+    "--oauth2-bearer",
+    "--trace",
+    "--trace-ascii",
+}
+
+_WGET_OPT_WITH_ARG = {
+    "-O",
+    "--output-document",
+    "-o",
+    "--output-file",
+    "-a",
+    "--append-output",
+    "-e",
+    "--execute",
+    "-P",
+    "--directory-prefix",
+    "-U",
+    "--user-agent",
+    "--header",
+    "--post-data",
+    "--post-file",
+    "--body-data",
+    "--body-file",
+    "-t",
+    "--tries",
+    "-T",
+    "--timeout",
+    "-w",
+    "--wait",
+    "--waitretry",
+    "-i",
+    "--input-file",
+    "-B",
+    "--base",
+    "--bind-address",
+    "--limit-rate",
+    "--dns-timeout",
+    "--connect-timeout",
+    "--read-timeout",
+    "--http-user",
+    "--http-password",
+    "--proxy-user",
+    "--proxy-password",
+    "--ca-certificate",
+    "--ca-directory",
+    "--certificate",
+    "--certificate-type",
+    "--private-key",
+    "--private-key-type",
+    "--secure-protocol",
+    "--ciphers",
+    "--user",
+    "--password",
+    "--load-cookies",
+    "--save-cookies",
+    "--progress",
+    "--regex-type",
+    "-D",
+    "--domains",
+    "--exclude-domains",
+    "-I",
+    "--include-directories",
+    "-X",
+    "--exclude-directories",
+    "-A",
+    "--accept",
+    "-R",
+    "--reject",
+    "--accept-regex",
+    "--reject-regex",
+    "-l",
+    "--level",
+    "-Q",
+    "--quota",
+    "--cut-dirs",
+    "--default-page",
 }
 
 
-def _extract_curl_wget_domains(tokens: list[str]) -> list[str]:
+def _extract_domains_with_opts(tokens: list[str], opt_with_arg: set[str]) -> list[str]:
     domains: list[str] = []
     args = tokens[1:]
 
@@ -244,9 +417,13 @@ def _extract_curl_wget_domains(tokens: list[str]) -> list[str]:
         if skip_next:
             skip_next = False
             continue
-        if arg in _CURL_OPT_WITH_ARG:
+        if arg in opt_with_arg:
             skip_next = True
             continue
+        if arg.startswith("--") and "=" in arg:
+            opt_name = arg.split("=", 1)[0]
+            if opt_name in opt_with_arg:
+                continue
         if "://" in arg:
             host = _extract_domain(arg)
             if host:
@@ -258,9 +435,13 @@ def _extract_curl_wget_domains(tokens: list[str]) -> list[str]:
             if skip_next:
                 skip_next = False
                 continue
-            if arg in _CURL_OPT_WITH_ARG:
+            if arg in opt_with_arg:
                 skip_next = True
                 continue
+            if arg.startswith("--") and "=" in arg:
+                opt_name = arg.split("=", 1)[0]
+                if opt_name in opt_with_arg:
+                    continue
             if arg.startswith("-"):
                 continue
             host = _extract_domain(arg)
@@ -268,6 +449,22 @@ def _extract_curl_wget_domains(tokens: list[str]) -> list[str]:
                 domains.append(host)
 
     return domains
+
+
+def _extract_curl_domains(tokens: list[str]) -> list[str]:
+    return _extract_domains_with_opts(tokens, _CURL_OPT_WITH_ARG)
+
+
+def _extract_wget_domains(tokens: list[str]) -> list[str]:
+    return _extract_domains_with_opts(tokens, _WGET_OPT_WITH_ARG)
+
+
+def _extract_curl_wget_domains(tokens: list[str]) -> list[str]:
+    if tokens:
+        prog = os.path.basename(tokens[0])
+        if prog == "wget":
+            return _extract_wget_domains(tokens)
+    return _extract_curl_domains(tokens)
 
 
 def _is_outward_segment(tokens: list[str]) -> bool:
@@ -321,8 +518,12 @@ def _is_outward_segment(tokens: list[str]) -> bool:
                 return True
         return False
 
-    if prog in ("curl", "wget"):
-        domains = _extract_curl_wget_domains(stripped)
+    if prog == "curl":
+        domains = _extract_curl_domains(stripped)
+        return any(not _is_allowlisted_domain(d) for d in domains)
+
+    if prog == "wget":
+        domains = _extract_wget_domains(stripped)
         return any(not _is_allowlisted_domain(d) for d in domains)
 
     return False
