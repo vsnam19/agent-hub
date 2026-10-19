@@ -150,7 +150,7 @@ def _normalize_claude(
     description = tool_input.get("description")
     quote: str | None = None
     if isinstance(description, str) and description:
-        quote = description[:199] + "…" if len(description) > 200 else description
+        quote = description
     error_text = _extract_error_text(clean) if ev_name == "PostToolUseFailure" else None
 
     if tool_name == "Bash" and not isinstance(tool_input.get("command"), str):

@@ -792,3 +792,15 @@ def test_classify_shlex_failure_argv_rules() -> None:
 
     events = classify_command("app --token abcd1234 # it's")
     assert "abcd1234" not in events[0].detail["argv"]
+
+
+def test_outward_detected_when_shlex_fails() -> None:
+    events = classify_command("git push origin main  # don't wait")
+    outward = [ev for ev in events if ev.kind == "outward"]
+    assert len(outward) == 1
+    assert outward[0].target == "git push origin main  # don't wait"
+
+    chained = classify_command("echo hello && git push origin main  # don't wait")
+    outward_chained = [ev for ev in chained if ev.kind == "outward"]
+    assert len(outward_chained) == 1
+    assert "git push origin main" in outward_chained[0].target

@@ -226,7 +226,7 @@ def redact_argv(argv: list[str]) -> list[str]:
         if is_pw_prog:
             if arg == "-p":
                 res.append("-p")
-                if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                if i + 1 < len(argv) and not argv[i + 1].startswith("--"):
                     res.append("<redacted>")
                     i += 2
                 else:
@@ -249,7 +249,7 @@ def redact_argv(argv: list[str]) -> list[str]:
                 clean_name = arg.lstrip("-")
                 if clean_name and _is_secret_flag_name(clean_name):
                     res.append(arg)
-                    if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                    if i + 1 < len(argv) and not argv[i + 1].startswith("--"):
                         res.append("<redacted>")
                         i += 2
                     else:

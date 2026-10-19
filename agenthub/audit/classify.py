@@ -655,7 +655,7 @@ def classify_command(command: str, cwd: str | None = None) -> list[Classified]:
         try:
             seg_tokens = shlex.split(seg)
         except ValueError:
-            seg_tokens = [seg]
+            seg_tokens = seg.split()
         inner_cmd = _extract_sh_c_command(seg_tokens)
         if inner_cmd:
             inner_segs = _split_command_segments(inner_cmd)
@@ -666,7 +666,7 @@ def classify_command(command: str, cwd: str | None = None) -> list[Classified]:
         try:
             seg_tokens = shlex.split(seg)
         except ValueError:
-            seg_tokens = [seg]
+            seg_tokens = seg.split()
 
         if _is_outward_segment(seg_tokens):
             events.append(Classified(kind="outward", target=seg, detail=_copy_detail(primary_detail)))

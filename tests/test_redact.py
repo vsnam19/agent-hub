@@ -281,8 +281,8 @@ def test_secret_flag_next_item_is_flag():
         "--verbose",
         "arg",
     ]
-    assert redact_argv(["tool", "--password", "-v"]) == ["tool", "--password", "-v"]
-    assert redact_argv(["tool", "--api-key", "-f", "val"]) == ["tool", "--api-key", "-f", "val"]
+    assert redact_argv(["tool", "--password", "-v"]) == ["tool", "--password", "<redacted>"]
+    assert redact_argv(["tool", "--api-key", "-f", "val"]) == ["tool", "--api-key", "<redacted>", "val"]
     assert redact_argv(["tool", "--token", "--password", "secret2"]) == [
         "tool",
         "--token",
@@ -291,6 +291,23 @@ def test_secret_flag_next_item_is_flag():
     ]
     assert redact_argv(["tool", "--token"]) == ["tool", "--token"]
     assert redact_argv(["tool", "--client-secret"]) == ["tool", "--client-secret"]
+
+
+def test_secret_flag_value_starting_with_dash():
+    from agenthub.redact import redact_argv
+
+    # Next item starts with single dash: treated as value and redacted
+    assert redact_argv(["app", "--password", "-hunter2"]) == ["app", "--password", "<redacted>"]
+    assert redact_argv(["deploy", "--token", "-Xk9a"]) == ["deploy", "--token", "<redacted>"]
+    assert redact_argv(["cmd", "--api-key", "-secret"]) == ["cmd", "--api-key", "<redacted>"]
+
+    # Password programs with -p followed by single dash value
+    assert redact_argv(["mysql", "-p", "-hunter2"]) == ["mysql", "-p", "<redacted>"]
+    assert redact_argv(["sudo", "mysql", "-p", "-hunter2"]) == ["sudo", "mysql", "-p", "<redacted>"]
+
+    # Next item starts with -- (long option): not treated as value
+    assert redact_argv(["app", "--password", "--verbose"]) == ["app", "--password", "--verbose"]
+    assert redact_argv(["mysql", "-p", "--help"]) == ["mysql", "-p", "--help"]
 
 
 def test_mysql_p_behind_sudo_env_and_path():

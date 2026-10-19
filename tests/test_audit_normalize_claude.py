@@ -7,6 +7,7 @@ from typing import Any
 
 from agenthub.audit.normalize import file_sha256, normalize, scrub
 from agenthub.audit.trace import trace_env
+from agenthub.audit.writer import sanitize
 
 # Real captured payload from:
 # claude -p 'run: echo hi' --allowedTools Bash
@@ -155,7 +156,10 @@ def test_claude_quote_from_description() -> None:
     }
     events = normalize("claude", "PostToolUse", with_desc, {})
     assert len(events) == 1
-    assert events[0]["quote"] == ("D" * 199) + "…"
+    assert events[0]["quote"] == long_desc
+    sanitized = sanitize(events[0])
+    assert sanitized["quote"] == ("D" * 199) + "…"
+    assert len(sanitized["quote"]) == 200
 
     without_desc = {
         **REAL_CLAUDE_POST_TOOL_USE_PAYLOAD,
@@ -185,9 +189,11 @@ def test_quote_cut_to_200_with_ellipsis() -> None:
     )
     assert len(events_200) == 1
     assert events_200[0]["quote"] == desc_200
-    assert len(events_200[0]["quote"]) == 200
+    sanitized_200 = sanitize(events_200[0])
+    assert sanitized_200["quote"] == desc_200
+    assert len(sanitized_200["quote"]) == 200
 
-    # 201 chars cut to 199 chars + ellipsis
+    # 201 chars kept full in normalize, cut to 199 chars + ellipsis in writer sanitize
     desc_201 = ("B" * 199) + "XY"
     events_201 = normalize(
         "claude",
@@ -196,10 +202,12 @@ def test_quote_cut_to_200_with_ellipsis() -> None:
         {},
     )
     assert len(events_201) == 1
-    assert events_201[0]["quote"] == ("B" * 199) + "…"
-    assert len(events_201[0]["quote"]) == 200
+    assert events_201[0]["quote"] == desc_201
+    sanitized_201 = sanitize(events_201[0])
+    assert sanitized_201["quote"] == ("B" * 199) + "…"
+    assert len(sanitized_201["quote"]) == 200
 
-    # 350 chars cut to 199 chars + ellipsis
+    # 350 chars kept full in normalize, cut to 199 chars + ellipsis in writer sanitize
     desc_350 = "C" * 350
     events_350 = normalize(
         "claude",
@@ -208,8 +216,32 @@ def test_quote_cut_to_200_with_ellipsis() -> None:
         {},
     )
     assert len(events_350) == 1
-    assert events_350[0]["quote"] == ("C" * 199) + "…"
-    assert len(events_350[0]["quote"]) == 200
+    assert events_350[0]["quote"] == desc_350
+    sanitized_350 = sanitize(events_350[0])
+    assert sanitized_350["quote"] == ("C" * 199) + "…"
+    assert len(sanitized_350["quote"]) == 200
+
+
+def test_secret_across_quote_cut_is_redacted() -> None:
+    # A secret that spans the 200-character cut (e.g. at index 190-210)
+    # If cut before redaction, the secret is truncated and its prefix leaks.
+    # normalize() must pass the full description, and sanitize() redacts before cutting.
+    secret = "AKIAABCDEFGHIJKLMNOP"
+    prefix = "word " * 37  # 185 chars ending in space; secret spans 185..205 across the 200-char boundary
+    full_desc = prefix + secret + " ending text exceeding limit"
+    payload = {
+        **REAL_CLAUDE_POST_TOOL_USE_PAYLOAD,
+        "tool_input": {"command": "echo hi", "description": full_desc},
+    }
+    events = normalize("claude", "PostToolUse", payload, {})
+    assert len(events) == 1
+    assert events[0]["quote"] == full_desc
+
+    sanitized = sanitize(events[0])
+    assert "AKIA" not in sanitized["quote"]
+    assert "<redacted>" in sanitized["quote"]
+    assert len(sanitized["quote"]) <= 200
+    assert sanitized["quote"].endswith("…")
 
 
 def test_non_string_command_does_not_raise() -> None:
