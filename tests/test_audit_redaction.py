@@ -343,10 +343,10 @@ def test_argv_mixed_types_keeps_pairing() -> None:
     sanitized = sanitize(event)
     expected_argv = [
         "curl",
-        "123",
+        123,
         "--token",
         "<redacted>",
-        "False",
+        False,
         "--password",
         "<redacted>",
         "/path/to/cert",
@@ -359,7 +359,7 @@ def test_argv_mixed_types_keeps_pairing() -> None:
         }
     }
     sanitized_tuple = sanitize(event_tuple)
-    assert sanitized_tuple["detail"]["argv"] == ("api", "456", "--token", "<redacted>")
+    assert sanitized_tuple["detail"]["argv"] == ("api", 456, "--token", "<redacted>")
 
 
 def test_target_argv_aware() -> None:
@@ -378,7 +378,8 @@ def test_target_argv_aware() -> None:
     # 3. Flag with equals
     ev3 = {"target": "curl --api-key=secret123 https://example.com"}
     s3 = sanitize(ev3)
-    assert s3["target"] == "curl '--api-key=<redacted>' https://example.com"
+    assert "secret123" not in s3["target"]
+    assert s3["target"] == "curl --api-key=<redacted> https://example.com"
 
     # 4. ValueError on unmatched quote falls back to redact()
     raw_secret = "sec-tok-targetunmatched1"
@@ -504,3 +505,56 @@ def test_digest_fields_not_redacted(tmp_path: Path) -> None:
     assert hex40.encode("utf-8") in file_bytes
     assert f"sha256:{hex64}".encode("utf-8") in file_bytes
     assert b"sec-tok-digestnonhex" not in file_bytes
+
+
+def test_target_kv_space_rule_still_applies() -> None:
+    event = {"target": "git config user.password hunter2"}
+    sanitized = sanitize(event)
+    assert "hunter2" not in sanitized["target"]
+    assert sanitized["target"] == "git config user.password <redacted>"
+
+
+def test_target_keeps_original_text() -> None:
+    event = {"target": "ls | grep x && rm y"}
+    sanitized = sanitize(event)
+    assert sanitized["target"] == "ls | grep x && rm y"
+
+    event_with_secret = {"target": "ls | grep --password my_secret && rm y"}
+    sanitized_secret = sanitize(event_with_secret)
+    assert "my_secret" not in sanitized_secret["target"]
+    assert sanitized_secret["target"] == "ls | grep --password <redacted> && rm y"
+
+
+def test_argv_non_string_items_sanitized() -> None:
+    home_path = Path("/home/alice/secret_file.txt")
+    secret_dict = {"password": "secret_pw", "other_key": "safe_val"}
+    event = {
+        "detail": {
+            "argv": [
+                "run",
+                home_path,
+                secret_dict,
+                123,
+                True,
+            ]
+        }
+    }
+    sanitized = sanitize(event)
+    argv = sanitized["detail"]["argv"]
+
+    assert "/home/alice" not in str(argv)
+    assert argv[0] == "run"
+    assert argv[1] == "~/secret_file.txt"
+
+    assert argv[2]["password"] == "<redacted>"
+    assert argv[2]["other_key"] == "safe_val"
+    assert "secret_pw" not in str(argv)
+
+    assert argv[3] == 123
+    assert argv[4] is True
+
+    serialized = canonical_json(sanitized)
+    assert "/home/alice" not in serialized
+    assert "secret_pw" not in serialized
+    assert "~/secret_file.txt" in serialized
+    assert '"password":"<redacted>"' in serialized

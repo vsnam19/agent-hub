@@ -319,7 +319,7 @@ def _sanitize_argv(v: Any) -> Any:
         if isinstance(x, str):
             res.append(next(redacted_strings))
         else:
-            res.append(str(x))
+            res.append(_sanitize_nested(x))
     return type(v)(res) if isinstance(v, tuple) else res
 
 
@@ -379,12 +379,25 @@ def sanitize(event: Mapping[str, Any]) -> dict[str, Any]:
     if "target" in out:
         target = out["target"]
         if isinstance(target, str):
+            redacted_target = redact(target)
             try:
                 tokens = shlex.split(target)
                 redacted_tokens = redact_argv(tokens)
-                redacted_target = shlex.join(redacted_tokens).replace("'<redacted>'", "<redacted>")
+                for tok, red in zip(tokens, redacted_tokens, strict=True):
+                    if tok != red:
+                        if red == "<redacted>":
+                            if tok:
+                                redacted_target = redacted_target.replace(tok, "<redacted>")
+                        elif tok.startswith("-p") and red == "-p<redacted>":
+                            val = tok[2:]
+                            if val:
+                                redacted_target = redacted_target.replace(val, "<redacted>")
+                        elif "=" in tok and red == f"{tok.split('=', 1)[0]}=<redacted>":
+                            val = tok.split("=", 1)[1]
+                            if val:
+                                redacted_target = redacted_target.replace(val, "<redacted>")
             except ValueError:
-                redacted_target = redact(target)
+                pass
             if len(redacted_target) > 500:
                 redacted_target = redacted_target[:500]
             out["target"] = redacted_target
