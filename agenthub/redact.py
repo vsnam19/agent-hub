@@ -64,6 +64,16 @@ _IDENT_WORD = re.compile(r"(?:[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]{3,})+")
 _JOB_ID = re.compile(r"\d{8}-\d{6}-[a-z]+(?:-[a-z]+)*-[0-9a-f]{4}(?:\.\w+)?")
 
 _SECRET_FLAGS = {"--token", "--password", "--passwd", "--secret", "--api-key"}
+_SECRET_FLAG_WORDS = (
+    "secret",
+    "token",
+    "password",
+    "passwd",
+    "api-key",
+    "apikey",
+    "credential",
+    "private-key",
+)
 _PASSWORD_PROGRAMS = {"mysql", "mysqldump", "mysqladmin", "sshpass"}
 _SECRET_KEY = re.compile(rf"(?i)^{_NAME}$")
 _ENV_VAR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
@@ -177,17 +187,34 @@ def _identifier_part(part: str) -> bool:
     return part.isalpha() and (len(part) == 1 or _IDENT_WORD.fullmatch(part) is not None)
 
 
-def _is_secret_flag(flag: str) -> bool:
-    """Whether `flag` matches secret flags (e.g. `--token`, `--client-secret`)."""
-    if not flag.startswith("-"):
-        return False
-    if flag in _SECRET_FLAGS:
-        return True
-    name = flag.lstrip("-")
-    if not name:
-        return False
-    name_norm = name.replace("-", "_")
-    return bool(_SECRET_KEY.search(name_norm))
+def _is_secret_flag_name(name: str) -> bool:
+    """Whether a long flag name contains secret keywords."""
+    name_lower = name.lower()
+    name_norm = name_lower.replace("_", "-")
+    return any(w in name_lower or w in name_norm for w in _SECRET_FLAG_WORDS)
+
+
+def _is_password_program(argv: list[str]) -> bool:
+    """Return True if argv executes one of _PASSWORD_PROGRAMS after skipping sudo, env, and KEY=val."""
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if _ENV_VAR.match(arg):
+            i += 1
+            continue
+        base = os.path.basename(arg)
+        if base == "sudo":
+            i += 1
+            while i < len(argv) and argv[i].startswith("-"):
+                i += 1
+            continue
+        if base == "env":
+            i += 1
+            while i < len(argv) and argv[i].startswith("-"):
+                i += 1
+            continue
+        return base in _PASSWORD_PROGRAMS
+    return False
 
 
 def redact_argv(argv: list[str]) -> list[str]:
@@ -195,25 +222,26 @@ def redact_argv(argv: list[str]) -> list[str]:
     if not argv:
         return []
 
+    is_pw_prog = _is_password_program(argv)
     res: list[str] = []
     i = 0
-    while i < len(argv) and _ENV_VAR.match(argv[i]):
-        k, _ = argv[i].split("=", 1)
-        if _SECRET_KEY.fullmatch(k):
-            res.append(f"{k}=<redacted>")
-        else:
-            res.append(redact(argv[i]))
-        i += 1
-
-    is_pw_prog = any(os.path.basename(arg) in _PASSWORD_PROGRAMS for arg in argv)
 
     while i < len(argv):
         arg = argv[i]
 
+        if _ENV_VAR.match(arg):
+            k, _ = arg.split("=", 1)
+            if _SECRET_KEY.fullmatch(k):
+                res.append(f"{k}=<redacted>")
+            else:
+                res.append(redact(arg))
+            i += 1
+            continue
+
         if is_pw_prog:
             if arg == "-p":
                 res.append("-p")
-                if i + 1 < len(argv):
+                if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
                     res.append("<redacted>")
                     i += 2
                 else:
@@ -224,21 +252,22 @@ def redact_argv(argv: list[str]) -> list[str]:
                 i += 1
                 continue
 
-        if arg.startswith("-") and "=" in arg:
-            flag_name, _ = arg.split("=", 1)
-            if _is_secret_flag(flag_name):
-                res.append(f"{flag_name}=<redacted>")
-                i += 1
-                continue
-
-        if arg.startswith("-") and "=" not in arg and _is_secret_flag(arg):
-            res.append(arg)
-            if i + 1 < len(argv):
-                res.append("<redacted>")
-                i += 2
+        if arg.startswith("--"):
+            if "=" in arg:
+                flag_name, _ = arg.split("=", 1)
+                if _is_secret_flag_name(flag_name[2:]):
+                    res.append(f"{flag_name}=<redacted>")
+                    i += 1
+                    continue
             else:
-                i += 1
-            continue
+                if _is_secret_flag_name(arg[2:]):
+                    res.append(arg)
+                    if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                        res.append("<redacted>")
+                        i += 2
+                    else:
+                        i += 1
+                    continue
 
         res.append(redact(arg))
         i += 1

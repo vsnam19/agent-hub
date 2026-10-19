@@ -188,3 +188,175 @@ def test_redact_argv_password_program_after_sudo():
         "-p",
         "dir",
     ]
+
+
+def test_generic_secret_long_flags():
+    from agenthub.redact import redact_argv
+
+    flags = [
+        "--secret",
+        "--client-secret",
+        "--token",
+        "--auth-token",
+        "--password",
+        "--db-password",
+        "--passwd",
+        "--admin-passwd",
+        "--api-key",
+        "--service-api-key",
+        "--apikey",
+        "--google-apikey",
+        "--credential",
+        "--user-credential",
+        "--private-key",
+        "--ssl-private-key",
+    ]
+    for flag in flags:
+        assert redact_argv(["cmd", flag, "secret_value"]) == ["cmd", flag, "<redacted>"]
+
+    argv = [
+        "tool",
+        "--client-secret",
+        "s3cr3t",
+        "--output",
+        "dir",
+        "--auth-token",
+        "tok123",
+        "--sort",
+        "name",
+        "--private-key",
+        "pkval",
+    ]
+    assert redact_argv(argv) == [
+        "tool",
+        "--client-secret",
+        "<redacted>",
+        "--output",
+        "dir",
+        "--auth-token",
+        "<redacted>",
+        "--sort",
+        "name",
+        "--private-key",
+        "<redacted>",
+    ]
+
+
+def test_secret_flag_equals_form():
+    from agenthub.redact import redact_argv
+
+    flags = [
+        "--secret",
+        "--client-secret",
+        "--token",
+        "--auth-token",
+        "--password",
+        "--db-password",
+        "--passwd",
+        "--admin-passwd",
+        "--api-key",
+        "--service-api-key",
+        "--apikey",
+        "--google-apikey",
+        "--credential",
+        "--user-credential",
+        "--private-key",
+        "--ssl-private-key",
+    ]
+    for flag in flags:
+        assert redact_argv(["cmd", f"{flag}=secret_value"]) == ["cmd", f"{flag}=<redacted>"]
+
+    assert redact_argv(["tool", "--token="]) == ["tool", "--token=<redacted>"]
+    assert redact_argv(["tool", "--client-secret=foo=bar"]) == ["tool", "--client-secret=<redacted>"]
+    assert redact_argv(["tool", "--output=dir", "--sort=size"]) == ["tool", "--output=dir", "--sort=size"]
+
+
+def test_secret_flag_next_item_is_flag():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["tool", "--token", "--other-flag"]) == ["tool", "--token", "--other-flag"]
+    assert redact_argv(["tool", "--client-secret", "--verbose", "arg"]) == [
+        "tool",
+        "--client-secret",
+        "--verbose",
+        "arg",
+    ]
+    assert redact_argv(["tool", "--password", "-v"]) == ["tool", "--password", "-v"]
+    assert redact_argv(["tool", "--api-key", "-f", "val"]) == ["tool", "--api-key", "-f", "val"]
+    assert redact_argv(["tool", "--token", "--password", "secret2"]) == [
+        "tool",
+        "--token",
+        "--password",
+        "<redacted>",
+    ]
+    assert redact_argv(["tool", "--token"]) == ["tool", "--token"]
+    assert redact_argv(["tool", "--client-secret"]) == ["tool", "--client-secret"]
+
+
+def test_mysql_p_behind_sudo_env_and_path():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["sudo", "mysql", "-p", "secret123"]) == ["sudo", "mysql", "-p", "<redacted>"]
+    assert redact_argv(["sudo", "mysql", "-psecret123"]) == ["sudo", "mysql", "-p<redacted>"]
+    assert redact_argv(["sudo", "-E", "mysql", "-p", "secret123"]) == ["sudo", "-E", "mysql", "-p", "<redacted>"]
+    assert redact_argv(["sudo", "-E", "-n", "mysqldump", "-psecret123"]) == [
+        "sudo",
+        "-E",
+        "-n",
+        "mysqldump",
+        "-p<redacted>",
+    ]
+    assert redact_argv(["env", "A=1", "mysql", "-p", "secret123"]) == [
+        "env",
+        "A=1",
+        "mysql",
+        "-p",
+        "<redacted>",
+    ]
+    assert redact_argv(["env", "mysqladmin", "-psecret123"]) == [
+        "env",
+        "mysqladmin",
+        "-p<redacted>",
+    ]
+    assert redact_argv(["/usr/bin/mysql", "-p", "secret123"]) == ["/usr/bin/mysql", "-p", "<redacted>"]
+    assert redact_argv(["/usr/local/bin/mysqldump", "-psecret123"]) == [
+        "/usr/local/bin/mysqldump",
+        "-p<redacted>",
+    ]
+    assert redact_argv(["sudo", "env", "FOO=bar", "/usr/bin/mysql", "-p", "secret123"]) == [
+        "sudo",
+        "env",
+        "FOO=bar",
+        "/usr/bin/mysql",
+        "-p",
+        "<redacted>",
+    ]
+    assert redact_argv(["sshpass", "-p", "secret123", "ssh", "host"]) == [
+        "sshpass",
+        "-p",
+        "<redacted>",
+        "ssh",
+        "host",
+    ]
+    assert redact_argv(["sudo", "sshpass", "-psecret123", "ssh", "host"]) == [
+        "sudo",
+        "sshpass",
+        "-p<redacted>",
+        "ssh",
+        "host",
+    ]
+
+
+def test_p_flag_untouched_for_other_programs():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["mkdir", "-p", "my/dir"]) == ["mkdir", "-p", "my/dir"]
+    assert redact_argv(["mkdir", "-pdir"]) == ["mkdir", "-pdir"]
+    assert redact_argv(["/bin/mkdir", "-p", "dir"]) == ["/bin/mkdir", "-p", "dir"]
+    assert redact_argv(["sudo", "mkdir", "-p", "my/dir"]) == ["sudo", "mkdir", "-p", "my/dir"]
+    assert redact_argv(["sudo", "-E", "mkdir", "-p", "my/dir"]) == ["sudo", "-E", "mkdir", "-p", "my/dir"]
+    assert redact_argv(["env", "A=1", "mkdir", "-p", "my/dir"]) == ["env", "A=1", "mkdir", "-p", "my/dir"]
+    assert redact_argv(["grep", "-p", "pattern"]) == ["grep", "-p", "pattern"]
+    assert redact_argv(["python", "app.py", "-p", "arg"]) == ["python", "app.py", "-p", "arg"]
+    assert redact_argv(["echo", "mysql", "-p", "secret"]) == ["echo", "mysql", "-p", "secret"]
+    assert redact_argv(["ls", "mysqldump", "-p"]) == ["ls", "mysqldump", "-p"]
