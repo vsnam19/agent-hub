@@ -401,3 +401,87 @@ def test_fix_9_record_pending_survives_sigalrm(tmp_path: Path, monkeypatch: pyte
     lines = (tmp_path / "audit-pending-gap.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0])["reason"] == "hook timeout"
+
+
+def test_gap_write_does_not_mark_caller_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "audit-pending-gap.jsonl").write_text(_pending_entry("2026-10-18T00:00:00.000Z", "x"))
+    real = writer._append_locked
+
+    def spy(event, root):  # type: ignore[no-untyped-def]
+        if event.get("kind") != "gap":
+            raise _Boom("caller append failed after the gap was written")
+        return real(event, root)
+
+    monkeypatch.setattr(writer, "_append_locked", spy)
+    ok = writer.write({"ts": "2026-10-19T10:00:00.000Z", "kind": "command"}, state_dir=tmp_path)
+    monkeypatch.undo()
+
+    assert ok is False
+    assert [e["kind"] for e in _day_events(tmp_path)] == ["gap"]
+    lines = (tmp_path / "audit-pending-gap.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert "caller append failed" in json.loads(lines[0])["reason"]
+
+
+def test_gap_and_event_share_one_deadline_fake_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = audit_root(tmp_path)
+    root.mkdir(parents=True)
+    (tmp_path / "audit-pending-gap.jsonl").write_text(_pending_entry("2026-10-18T00:00:00.000Z", "x"))
+    clock = {"now": 1000.0, "slept": 0.0}
+
+    def fake_sleep(seconds: float) -> None:
+        clock["now"] += seconds
+        clock["slept"] += seconds
+
+    class _FakeTime:
+        monotonic = staticmethod(lambda: clock["now"])
+        sleep = staticmethod(fake_sleep)
+
+    with (root / "chain.lock").open("a+b") as lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            monkeypatch.setattr(writer, "time", _FakeTime)
+            ok = writer.write({"ts": "2026-10-19T10:00:00.000Z", "kind": "command"}, state_dir=tmp_path)
+            monkeypatch.undo()
+        finally:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+
+    assert ok is False
+    assert clock["slept"] >= writer._LOCK_DEADLINE_S - 1e-9
+    assert clock["slept"] <= writer._LOCK_DEADLINE_S + writer._LOCK_RETRY_INTERVAL_S
+
+
+def test_stale_claim_by_mtime_picked_up(tmp_path: Path) -> None:
+    # the owner pid (our parent) is alive, so only the age can mark this claim as orphaned
+    stale = tmp_path / f"audit-pending-gap.{os.getppid()}.claimed"
+    stale.write_text(_pending_entry("2026-10-18T00:00:00.000Z", "a"))
+    old = time.time() - 120
+    os.utime(stale, (old, old))
+
+    assert writer.write({"ts": "2026-10-19T10:00:00.000Z", "kind": "command"}, state_dir=tmp_path) is True
+
+    gaps = [e for e in _day_events(tmp_path) if e["kind"] == "gap"]
+    assert len(gaps) == 1
+    assert gaps[0]["detail"]["lost"] == 1  # type: ignore[index]
+    assert not stale.exists()
+
+
+def test_pending_line_into_claimed_inode_is_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pending = tmp_path / "audit-pending-gap.jsonl"
+    pending.write_text(_pending_entry("2026-10-18T00:00:00.000Z", "old"))
+    real = writer._append_locked
+    late = _pending_entry("2026-10-18T00:00:05.000Z", "late")
+
+    def spy(event, root):  # type: ignore[no-untyped-def]
+        if event.get("kind") == "gap":
+            for claimed in tmp_path.glob("*.claimed"):
+                with claimed.open("ab") as f:
+                    f.write(late.encode("utf-8"))
+        return real(event, root)
+
+    monkeypatch.setattr(writer, "_append_locked", spy)
+    assert writer.write({"ts": "2026-10-19T10:00:00.000Z", "kind": "command"}, state_dir=tmp_path) is True
+    monkeypatch.undo()
+
+    assert pending.read_text(encoding="utf-8") == late
+    assert not list(tmp_path.glob("*.claimed"))

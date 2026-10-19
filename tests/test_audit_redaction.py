@@ -558,3 +558,19 @@ def test_argv_non_string_items_sanitized() -> None:
     assert "secret_pw" not in serialized
     assert "~/secret_file.txt" in serialized
     assert '"password":"<redacted>"' in serialized
+
+
+def test_target_short_value_token_bound() -> None:
+    sanitized = sanitize({"target": "cmd --token=a --name abc banana"})
+    assert sanitized["target"] == "cmd --token=<redacted> --name abc banana"
+
+    two = sanitize({"target": "cmd --token=ab --password=abc x"})
+    assert two["target"] == "cmd --token=<redacted> --password=<redacted> x"
+
+
+def test_target_escaped_value_falls_back() -> None:
+    sanitized = sanitize({"target": "app --token sec\\ ret42 --verbose"})
+    assert "sec" not in sanitized["target"]
+    assert "ret42" not in sanitized["target"]
+    assert "<redacted>" in sanitized["target"]
+    assert "--verbose" in sanitized["target"]

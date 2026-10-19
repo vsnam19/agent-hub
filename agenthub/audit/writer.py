@@ -25,6 +25,7 @@ _MANIFEST_FILE_RE = re.compile(r"^(\d{4}-\d{2})\.json$")
 _LOCK_RETRY_INTERVAL_S = 0.005
 _LOCK_DEADLINE_S = 0.2
 _SEEK_CHUNK_BYTES = 4096
+_CLAIM_STALE_S = 60.0
 
 
 class AuditLockTimeout(Exception):
@@ -374,30 +375,48 @@ def _sanitize_detail(detail: Mapping[str, Any]) -> dict[str, Any]:
     return _sanitize_mapping(detail)
 
 
+def _redact_target(target: str) -> str:
+    redacted_target = redact(target)
+    try:
+        tokens = shlex.split(target)
+        redacted_tokens = redact_argv(tokens)
+    except ValueError:
+        return redacted_target
+    if len(tokens) != len(redacted_tokens):
+        return redacted_target
+    entries: list[tuple[str, str]] = []  # (literal prefix kept, secret value)
+    for tok, red in zip(tokens, redacted_tokens, strict=True):
+        if tok == red:
+            continue
+        if red == "<redacted>":
+            val = tok
+            prefix = ""
+        elif tok.startswith("-p") and red == "-p<redacted>":
+            prefix, val = "-p", tok[2:]
+        elif "=" in tok and red == f"{tok.split('=', 1)[0]}=<redacted>":
+            prefix, val = "", tok.split("=", 1)[1]
+        else:
+            continue
+        if val:
+            entries.append((prefix, val))
+    entries.sort(key=lambda e: len(e[1]), reverse=True)
+    patterns = [
+        re.compile(r"(?<![^\s'\"=])(" + re.escape(prefix) + r")" + re.escape(val) + r"(?![^\s'\"])")
+        for prefix, val in entries
+    ]
+    if any(pat.search(target) is None for pat in patterns):
+        return shlex.join(redacted_tokens)
+    for pat in patterns:
+        redacted_target = pat.sub(lambda m: m.group(1) + "<redacted>", redacted_target)
+    return redacted_target
+
+
 def sanitize(event: Mapping[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = dict(event)
     if "target" in out:
         target = out["target"]
         if isinstance(target, str):
-            redacted_target = redact(target)
-            try:
-                tokens = shlex.split(target)
-                redacted_tokens = redact_argv(tokens)
-                for tok, red in zip(tokens, redacted_tokens, strict=True):
-                    if tok != red:
-                        if red == "<redacted>":
-                            if tok:
-                                redacted_target = redacted_target.replace(tok, "<redacted>")
-                        elif tok.startswith("-p") and red == "-p<redacted>":
-                            val = tok[2:]
-                            if val:
-                                redacted_target = redacted_target.replace(val, "<redacted>")
-                        elif "=" in tok and red == f"{tok.split('=', 1)[0]}=<redacted>":
-                            val = tok.split("=", 1)[1]
-                            if val:
-                                redacted_target = redacted_target.replace(val, "<redacted>")
-            except ValueError:
-                pass
+            redacted_target = _redact_target(target)
             if len(redacted_target) > 500:
                 redacted_target = redacted_target[:500]
             out["target"] = redacted_target
@@ -450,7 +469,8 @@ def sanitize(event: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-_caller_writes = 0
+_caller_written = False
+_emitting_gap = False
 
 
 def _write_record_to_file(
@@ -462,7 +482,7 @@ def _write_record_to_file(
     *,
     caller: bool = False,
 ) -> tuple[dict[str, Any], str, str]:
-    global _caller_writes
+    global _caller_written
     day = _day_from_ts(record["ts"])
     month_dir = root / day[:7]
     _ensure_dir_0700(month_dir)
@@ -486,7 +506,7 @@ def _write_record_to_file(
             line_bytes = b"\n" + line_bytes
         os.write(fd, line_bytes)
         if caller:
-            _caller_writes += 1
+            _caller_written = True
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -538,7 +558,7 @@ def _append_locked(event: Mapping[str, Any], root: Path) -> dict[str, Any]:
         record["event_id"] = uuid.uuid4().hex
     _stamp_ts(record, last_ev)
 
-    caller_rec, _, _ = _write_record_to_file(record, root, last_ev, last_day, prev_hash, caller=True)
+    caller_rec, _, _ = _write_record_to_file(record, root, last_ev, last_day, prev_hash, caller=not _emitting_gap)
     return caller_rec
 
 
@@ -578,14 +598,41 @@ def _pid_is_dead(pid: int) -> bool:
     return False
 
 
+def _claim_is_stale(path: Path) -> bool:
+    try:
+        return time.time() - path.stat().st_mtime > _CLAIM_STALE_S
+    except OSError:
+        return False
+
+
 def _orphaned_claims(pending_path: Path) -> list[Path]:
     """Claimed pending files left by processes that no longer exist."""
     found: list[Path] = []
     for path in sorted(pending_path.parent.glob("audit-pending-gap.*.claimed")):
         pid_text = path.name[len("audit-pending-gap.") : -len(".claimed")]
-        if pid_text.isdigit() and int(pid_text) != os.getpid() and _pid_is_dead(int(pid_text)):
+        if not pid_text.isdigit() or int(pid_text) == os.getpid():
+            continue
+        if _pid_is_dead(int(pid_text)) or _claim_is_stale(path):
             found.append(path)
     return found
+
+
+def _release_claims(claims: list[Path], sizes: dict[Path, int], pending_path: Path) -> None:
+    """Unlink claims; bytes that landed in a claimed inode after it was read go back to the pending file."""
+    for path in claims:
+        try:
+            extra = path.read_bytes()[sizes[path] :] if path in sizes else b""
+        except (OSError, ValueError):
+            extra = b""
+        if extra:
+            fd = os.open(pending_path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+                os.write(fd, extra)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        path.unlink(missing_ok=True)
 
 
 def _claim_pending_and_emit_gap(root: Path, state_dir: Path | str | None) -> None:
@@ -607,12 +654,14 @@ def _claim_pending_and_emit_gap(root: Path, state_dir: Path | str | None) -> Non
         return
     raw = b""
     unreadable = False
+    sizes: dict[Path, int] = {}
     for path in claims:
         try:
             chunk = path.read_bytes()
         except (OSError, ValueError):
             unreadable = True
             continue
+        sizes[path] = len(chunk)
         raw += chunk if chunk.endswith(b"\n") or not chunk else chunk + b"\n"
     entries: list[dict[str, Any]] = []
     for line in raw.decode("utf-8", errors="replace").splitlines():
@@ -643,9 +692,12 @@ def _claim_pending_and_emit_gap(root: Path, state_dir: Path | str | None) -> Non
             "lost": len(entries) if entries and not unreadable else "unknown",
         },
     }
+    global _emitting_gap
+    _emitting_gap = True
     try:
         _append_locked(gap_event, root)
     except BaseException:
+        _emitting_gap = False
         if raw:
             fd = os.open(pending_path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
             try:
@@ -654,11 +706,10 @@ def _claim_pending_and_emit_gap(root: Path, state_dir: Path | str | None) -> Non
                 os.fsync(fd)
             finally:
                 os.close(fd)
-        for path in claims:
-            path.unlink(missing_ok=True)
+        _release_claims(claims, sizes, pending_path)
         raise
-    for path in claims:
-        path.unlink(missing_ok=True)
+    _emitting_gap = False
+    _release_claims(claims, sizes, pending_path)
 
 
 def record_pending(event: Mapping[str, Any], reason: str, state_dir: Path | str | None = None) -> None:
@@ -702,18 +753,19 @@ def _record_pending_failure(event: Mapping[str, Any], exc: Exception, state_dir:
 
 
 def write(event: Mapping[str, Any], state_dir: Path | str | None = None) -> bool:
-    written_before = _caller_writes
+    global _caller_written, _emitting_gap
+    _caller_written = False
+    _emitting_gap = False
     try:
         deadline = time.monotonic() + _LOCK_DEADLINE_S
         root, lock_fd = _locked_root(state_dir, deadline)
         try:
             _claim_pending_and_emit_gap(root, state_dir)
-            written_before = _caller_writes
             _append_locked(event, root)
         finally:
             _release_lock(lock_fd)
         return True
     except Exception as exc:
-        if _caller_writes == written_before:
+        if not _caller_written:
             record_pending(event, str(exc) or type(exc).__name__, state_dir=state_dir)
         return False
