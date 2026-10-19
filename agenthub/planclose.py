@@ -3,6 +3,8 @@ from pathlib import Path
 from typing import Callable
 
 from agenthub import planreport
+from agenthub.audit.emit import emit
+from agenthub.config import paths
 from agenthub.plan import Plan, Task
 from agenthub.planrun import merge_order
 from agenthub.planstate import State
@@ -190,4 +192,22 @@ def close(
         for t in plan.tasks
     )
     ok = not cancelled and not stale and not cascade_blocked and all(t.name in approved for t in implement_tasks)
+    plan_name = plan.path.parent.name if plan.path else plan.slug
+    try:
+        emit(
+            "plan",
+            "close",
+            state_dir=paths().state_dir,
+            parent={"plan": plan_name},
+            status="ok" if ok else "error",
+            detail={
+                "ok": ok,
+                "cancelled": cancelled,
+                "stale": stale,
+                "approved": len(approved),
+                "total": len(implement_tasks),
+            },
+        )
+    except Exception:
+        pass
     return CloseResult(ok=ok, report=report_path, stale=stale, cancelled=cancelled)
