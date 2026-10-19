@@ -21,23 +21,6 @@ class VerifyResult:
     message: str
 
 
-def _prev_month(month_str: str) -> str:
-    year, month = map(int, month_str.split("-"))
-    if month == 1:
-        return f"{year - 1:04d}-12"
-    return f"{year:04d}-{month - 1:02d}"
-
-
-def _has_local_month(root: Path, month: str) -> bool:
-    m_dir = root / month
-    return m_dir.is_dir() and any(p.is_file() and _DAY_FILE_RE.match(p.name) for p in m_dir.iterdir())
-
-
-def _has_manifest(root: Path, month: str) -> bool:
-    manifest_file = root / "manifests" / f"{month}.json"
-    return manifest_file.is_file()
-
-
 def _parse_ts(ts: str) -> datetime:
     if not isinstance(ts, str) or not ts:
         raise ValueError(f"invalid ts: {ts!r}")
@@ -49,26 +32,7 @@ def _parse_ts(ts: str) -> datetime:
     return dt
 
 
-def _read_last_event_hash(day_file: Path) -> str | None:
-    if not day_file.is_file():
-        return None
-    with day_file.open("r", encoding="utf-8") as f:
-        last_line = ""
-        for line in f:
-            stripped = line.strip()
-            if stripped:
-                last_line = stripped
-        if not last_line:
-            return None
-        try:
-            record = json.loads(last_line)
-            h = record.get("hash")
-            return str(h) if isinstance(h, str) and h else None
-        except Exception:
-            return None
-
-
-def _latest_earlier_local_day_hash(root: Path, before_day: str) -> tuple[str, str] | None:
+def _latest_earlier_local_day_hash(root: Path, before_day: str) -> tuple[str, str, str] | VerifyResult | None:
     if not root.is_dir():
         return None
     month_dirs = sorted(
@@ -84,15 +48,56 @@ def _latest_earlier_local_day_hash(root: Path, before_day: str) -> tuple[str, st
                 candidates.append((m.group(1), entry))
         candidates.sort(key=lambda item: item[0], reverse=True)
         for _, path in candidates:
-            h = _read_last_event_hash(path)
-            if h is not None:
-                return path.parent.name, h
+            with path.open("r", encoding="utf-8") as f:
+                lines = f.readlines()
+            non_empty = [(i, line.strip()) for i, line in enumerate(lines, 1) if line.strip()]
+            if not non_empty:
+                # empty day file: writer treats as absent
+                continue
+
+            # First non-empty earlier file: writer would have chained from this file.
+            # Stop here and report break if unreadable.
+            rel_path = path.relative_to(root).as_posix()
+            last_line_no, last_line_str = non_empty[-1]
+            try:
+                record = json.loads(last_line_str)
+            except Exception as e:
+                seq_val = last_line_no
+                for _, prev_l in reversed(non_empty[:-1]):
+                    try:
+                        prev_rec = json.loads(prev_l)
+                        if isinstance(prev_rec, dict) and isinstance(prev_rec.get("seq"), int):
+                            seq_val = prev_rec["seq"] + 1
+                            break
+                    except Exception:
+                        pass
+                return VerifyResult(
+                    ok=False,
+                    message=f"{rel_path}:{last_line_no} seq={seq_val}: invalid JSON: {e}",
+                )
+
+            if not isinstance(record, dict):
+                return VerifyResult(
+                    ok=False,
+                    message=f"{rel_path}:{last_line_no} seq={last_line_no}: event is not a JSON object",
+                )
+
+            h = record.get("hash")
+            if not isinstance(h, str) or not h:
+                record_seq = record.get("seq", last_line_no)
+                return VerifyResult(
+                    ok=False,
+                    message=f"{rel_path}:{last_line_no} seq={record_seq}: missing hash",
+                )
+
+            return path.parent.name, h, rel_path
     return None
 
 
 @dataclass
 class _ChainState:
     expected_prev_hash: str | None = None
+    expected_source: str | None = None
     prev_dt: datetime | None = None
     prev_ts_str: str | None = None
     total_events: int = 0
@@ -106,13 +111,10 @@ def _verify_day_lines(
     current_month: str,
     state: _ChainState,
     initial_check_reason: str | None = None,
-    allow_zero_hash_predecessor_message: bool = True,
 ) -> VerifyResult | None:
-    if not lines:
-        return VerifyResult(
-            ok=False,
-            message=f"{rel_path}:1 seq=1: empty day file",
-        )
+    non_empty_lines = [line for line in lines if line.strip()]
+    if not non_empty_lines:
+        return None
 
     expected_seq = 1
 
@@ -161,18 +163,17 @@ def _verify_day_lines(
                 message=f"{rel_path}:{line_no} seq={seq_val}: {initial_check_reason}",
             )
 
-        if allow_zero_hash_predecessor_message and actual_prev_hash != state.expected_prev_hash and line_no == 1:
-            prev_m = _prev_month(current_month)
-            return VerifyResult(
-                ok=False,
-                message=(
-                    f"{rel_path}:{line_no} seq={seq_val}: "
-                    f"prev_hash mismatch (missing local month or manifest for {prev_m}): "
-                    f"expected {state.expected_prev_hash}, got {actual_prev_hash!r}"
-                ),
-            )
-
         if actual_prev_hash != state.expected_prev_hash:
+            if line_no == 1 and state.expected_source:
+                prefix = state.expected_prev_hash[:8] if state.expected_prev_hash else ""
+                return VerifyResult(
+                    ok=False,
+                    message=(
+                        f"{rel_path}:{line_no} seq={seq_val}: "
+                        f"prev_hash mismatch (expected from {state.expected_source} {prefix}...): "
+                        f"expected {state.expected_prev_hash}, got {actual_prev_hash!r}"
+                    ),
+                )
             return VerifyResult(
                 ok=False,
                 message=(
@@ -192,7 +193,7 @@ def _verify_day_lines(
                 ),
             )
 
-        # 6. ts is not earlier than the previous ts by more than 2 seconds
+        # 6. ts is non-decreasing along the chain (D-123)
         raw_ts = record.get("ts")
         try:
             cur_dt = _parse_ts(str(raw_ts))
@@ -203,14 +204,12 @@ def _verify_day_lines(
             )
 
         if state.prev_dt is not None:
-            skew_s = (state.prev_dt - cur_dt).total_seconds()
-            if skew_s > 2.0:
+            if cur_dt < state.prev_dt:
                 return VerifyResult(
                     ok=False,
                     message=(
                         f"{rel_path}:{line_no} seq={seq_val}: "
-                        f"clock skew: ts {raw_ts} is earlier than previous ts {state.prev_ts_str} "
-                        f"by {skew_s:.3f}s (> 2s)"
+                        f"ts went backwards: ts {raw_ts} is earlier than previous ts {state.prev_ts_str}"
                     ),
                 )
 
@@ -310,7 +309,10 @@ def _verify_archived_month(
                 return VerifyResult(ok=False, message=f"no day files found in archive for {month}")
 
             first_prev_hash = manifest_data.get("first_prev_hash")
-            state = _ChainState(expected_prev_hash=str(first_prev_hash) if first_prev_hash is not None else None)
+            state = _ChainState(
+                expected_prev_hash=str(first_prev_hash) if first_prev_hash is not None else None,
+                expected_source=f"manifests/{month}.json",
+            )
 
             for _, member in day_members:
                 f = tar.extractfile(member)
@@ -324,6 +326,9 @@ def _verify_archived_month(
                     rel_p = f"{month}/{Path(member.name).name}"
                     return VerifyResult(ok=False, message=f"{rel_p}:1 seq=1: invalid UTF-8: {e}")
 
+                if not any(line.strip() for line in lines):
+                    continue
+
                 rel_path = f"{month}/{Path(member.name).name}"
                 res = _verify_day_lines(
                     rel_path=rel_path,
@@ -331,7 +336,6 @@ def _verify_archived_month(
                     current_month=month,
                     state=state,
                     initial_check_reason=None,
-                    allow_zero_hash_predecessor_message=False,
                 )
                 if res is not None:
                     return res
@@ -380,15 +384,18 @@ def verify(
         if not _MONTH_RE.match(month):
             raise ValueError(f"invalid month format: {month!r}, expected YYYY-MM")
         month_dir = root / month
-        if not month_dir.is_dir():
-            manifest_file = root / "manifests" / f"{month}.json"
+        manifest_file = root / "manifests" / f"{month}.json"
+        has_local = month_dir.is_dir() and any(p.is_file() and _DAY_FILE_RE.match(p.name) for p in month_dir.iterdir())
+        if not has_local:
             if manifest_file.is_file():
-                return _verify_archived_month(
-                    root=root,
-                    month=month,
-                    vault=vault,
-                    config_dir=config_dir,
-                )
+                if vault is not None or config_dir is not None:
+                    return _verify_archived_month(
+                        root=root,
+                        month=month,
+                        vault=vault,
+                        config_dir=config_dir,
+                    )
+                return VerifyResult(ok=True, message=f"month {month} is not local and was not checked")
             return VerifyResult(ok=True, message="ok: 0 events")
         target_months = [month]
     else:
@@ -406,6 +413,7 @@ def verify(
     state = _ChainState()
     prev_hash_for_next_day: str | None = None
     last_verified_day: str | None = None
+    last_verified_rel_path: str | None = None
 
     for day_file in target_day_files:
         rel_path = day_file.relative_to(root).as_posix()
@@ -417,22 +425,19 @@ def verify(
         with day_file.open("r", encoding="utf-8") as f:
             lines = f.readlines()
 
+        # Skip empty day files: the writer treats an empty file as absent
+        if not any(line.strip() for line in lines):
+            continue
+
         # Determine expected prev_hash for line 1 of this day file
         is_month_start = last_verified_day is None or last_verified_day[:7] != current_month
         if not is_month_start:
             # Continuing within the same month from previous verified day
             state.expected_prev_hash = prev_hash_for_next_day
-            initial_check_reason: str | None = None
-            allow_zero_msg = False
+            state.expected_source = last_verified_rel_path
+            initial_check_reason = None
         else:
             # First day of this month
-            prev_m = _prev_month(current_month)
-            allow_zero_msg = not _has_local_month(root, prev_m) and not _has_manifest(root, prev_m)
-            if last_verified_day is not None and prev_hash_for_next_day is not None:
-                day_hit: tuple[str, str] | None = (last_verified_day[:7], prev_hash_for_next_day)
-            else:
-                day_hit = _latest_earlier_local_day_hash(root, current_day)
-
             manifests_dir = root / "manifests"
             manifest_candidates: list[tuple[str, Path]] = []
             if manifests_dir.is_dir():
@@ -442,30 +447,49 @@ def verify(
                         manifest_candidates.append((m.group(1), entry))
             manifest_candidates.sort(key=lambda item: item[0], reverse=True)
 
+            if last_verified_day is not None and prev_hash_for_next_day is not None:
+                day_hit: tuple[str, str, str] | None = (
+                    last_verified_day[:7],
+                    prev_hash_for_next_day,
+                    last_verified_rel_path or f"{last_verified_day[:7]}/{last_verified_day}.jsonl",
+                )
+            else:
+                earlier_hit = _latest_earlier_local_day_hash(root, current_day)
+                if isinstance(earlier_hit, VerifyResult):
+                    return earlier_hit
+                day_hit = earlier_hit
+
             if manifest_candidates:
                 latest_m_name, latest_m_path = manifest_candidates[0]
                 if day_hit is None or day_hit[0] < latest_m_name:
+                    manifest_rel = latest_m_path.relative_to(root).as_posix()
                     try:
                         m_data = json.loads(latest_m_path.read_text(encoding="utf-8"))
                         last_h = m_data.get("last_hash")
                         if isinstance(last_h, str) and last_h:
                             state.expected_prev_hash = last_h
+                            state.expected_source = manifest_rel
                             initial_check_reason = None
                         else:
                             state.expected_prev_hash = None
+                            state.expected_source = manifest_rel
                             initial_check_reason = f"manifest for {latest_m_name} missing last_hash"
                     except Exception as e:
                         state.expected_prev_hash = None
+                        state.expected_source = manifest_rel
                         initial_check_reason = f"invalid manifest for {latest_m_name}: {e}"
                 else:
                     state.expected_prev_hash = day_hit[1]
+                    state.expected_source = day_hit[2]
                     initial_check_reason = None
             else:
                 if day_hit is not None:
                     state.expected_prev_hash = day_hit[1]
+                    state.expected_source = day_hit[2]
                     initial_check_reason = None
                 else:
                     state.expected_prev_hash = ZERO_HASH
+                    state.expected_source = "initial zero hash"
                     initial_check_reason = None
 
         res = _verify_day_lines(
@@ -474,12 +498,12 @@ def verify(
             current_month=current_month,
             state=state,
             initial_check_reason=initial_check_reason,
-            allow_zero_hash_predecessor_message=allow_zero_msg,
         )
         if res is not None:
             return res
 
         prev_hash_for_next_day = state.expected_prev_hash
         last_verified_day = current_day
+        last_verified_rel_path = rel_path
 
     return VerifyResult(ok=True, message=f"ok: {state.total_events} events")
