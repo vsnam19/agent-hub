@@ -205,3 +205,85 @@ def append(event: Mapping[str, Any], state_dir: Path | str | None = None) -> dic
             os.close(lock_fd)
 
     return record
+
+
+def _pending_gap_path(state_dir: Path | str | None = None) -> Path:
+    base = paths().state_dir if state_dir is None else Path(state_dir)
+    return base / "audit-pending-gap.jsonl"
+
+
+def _read_pending_gap_entries(pending_path: Path) -> list[dict[str, Any]]:
+    if not pending_path.is_file():
+        return []
+    try:
+        lines = pending_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    entries: list[dict[str, Any]] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+            if isinstance(item, dict):
+                entries.append(item)
+        except Exception:
+            continue
+    return entries
+
+
+def _record_pending_failure(event: Mapping[str, Any], exc: Exception, state_dir: Path | str | None = None) -> None:
+    try:
+        base = paths().state_dir if state_dir is None else Path(state_dir)
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        path = base / "audit-pending-gap.jsonl"
+        event_ts = event.get("ts") if isinstance(event, Mapping) else None
+        ts = str(event_ts) if event_ts else _utc_now_iso()
+        reason = str(exc) or type(exc).__name__
+        line = canonical_json({"ts": ts, "reason": reason}) + "\n"
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            os.write(fd, line.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
+
+
+def write(event: Mapping[str, Any], state_dir: Path | str | None = None) -> bool:
+    try:
+        pending_path = _pending_gap_path(state_dir)
+        if pending_path.is_file():
+            entries = _read_pending_gap_entries(pending_path)
+            if entries:
+                first_ts = entries[0].get("ts", "")
+                first_reason = entries[0].get("reason", "")
+                lost_count = len(entries)
+                now = _utc_now_iso()
+                gap_event = {
+                    "ts": now,
+                    "kind": "gap",
+                    "actor": {"role": "agent-hub", "host": "agent-hub"},
+                    "target": "",
+                    "outcome": {"status": "ok"},
+                    "detail": {
+                        "from": first_ts,
+                        "to": now,
+                        "reason": first_reason,
+                        "lost": lost_count,
+                    },
+                }
+                append(gap_event, state_dir=state_dir)
+            pending_path.unlink(missing_ok=True)
+
+        append(event, state_dir=state_dir)
+        return True
+    except Exception as exc:
+        _record_pending_failure(event, exc, state_dir=state_dir)
+        return False
