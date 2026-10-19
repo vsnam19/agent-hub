@@ -3,6 +3,7 @@ import contextlib
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -14,6 +15,9 @@ from typing import TYPE_CHECKING, Any
 from agenthub import brief as briefmod
 from agenthub import guards
 from agenthub.agents import registry
+from agenthub.audit.archive import archive_month
+from agenthub.audit.show import parse_since, read_events_with_archives, select
+from agenthub.audit.writer import _read_last_event, audit_root
 from agenthub.cli import ALL_JOBS, WAIT_APPEAR_S, UsageError, _job_repo, _repo_of
 from agenthub.config import ConfigError, Paths, parse_duration, paths, role_kind
 from agenthub.jobs import dead_job_result, get_job, list_jobs
@@ -89,6 +93,209 @@ def show_job_data(job_id: str, p: Paths | None = None) -> dict[str, Any]:
     validate_job_id(job_id, p)
     job = get_job(p, job_id)
     return job.read_json("result.json")
+
+
+_MANIFEST_MONTH_RE = re.compile(r"^(\d{4}-\d{2})\.json$")
+
+
+def audit_status_data(
+    p: Paths | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    p = p or paths()
+    state_dir = p.state_dir
+    root = audit_root(state_dir)
+
+    now_utc = (datetime.now(timezone.utc) if now is None else now).astimezone(timezone.utc)
+    day = now_utc.strftime("%Y-%m-%d")
+    month = day[:7]
+
+    day_file = root / month / f"{day}.jsonl"
+    last_seq: int | None = None
+    last_hash: str | None = None
+
+    if day_file.is_file():
+        try:
+            last_ev = _read_last_event(day_file)
+            if last_ev is not None:
+                last_seq = last_ev.get("seq")
+                last_hash = last_ev.get("hash")
+        except Exception:
+            pass
+
+    pending_path = state_dir / "audit-pending-gap.jsonl"
+    pending_exists = pending_path.is_file()
+    pending_lines = 0
+    if pending_exists:
+        try:
+            content = pending_path.read_text(encoding="utf-8")
+            pending_lines = len([line for line in content.splitlines() if line.strip()])
+        except OSError:
+            pass
+
+    manifests_dir = root / "manifests"
+    latest_archive_month: str | None = None
+    if manifests_dir.is_dir():
+        manifest_months = []
+        for f in manifests_dir.iterdir():
+            if f.is_file():
+                m = _MANIFEST_MONTH_RE.match(f.name)
+                if m:
+                    manifest_months.append(m.group(1))
+        manifest_months.sort()
+        if manifest_months:
+            latest_archive_month = manifest_months[-1]
+
+    return {
+        "day_file": str(day_file),
+        "last_seq": last_seq,
+        "last_hash": last_hash,
+        "pending_gap_exists": pending_exists,
+        "pending_gap_lines": pending_lines,
+        "latest_archive_month": latest_archive_month,
+    }
+
+
+def audit_show_data(
+    plan: str | None = None,
+    job: str | None = None,
+    session: str | None = None,
+    since: str | None = None,
+    kinds: list[str] | str | None = None,
+    p: Paths | None = None,
+    vault: Path | str | None = None,
+    config_dir: Path | str | None = None,
+) -> dict[str, Any]:
+    p = p or paths()
+    state_dir = p.state_dir
+
+    since_iso: str | None = None
+    if since is not None:
+        cleaned = since.strip()
+        if not cleaned:
+            raise UsageError("empty since expression")
+        try:
+            since_iso = parse_since(cleaned)
+        except ValueError as err:
+            raise UsageError(f"invalid since expression: {since!r}") from err
+
+    all_events, skipped = read_events_with_archives(
+        state_dir=state_dir,
+        since=since_iso,
+        vault=vault,
+        config_dir=config_dir,
+    )
+
+    allowed_kinds = ()
+    if kinds is not None:
+        if isinstance(kinds, str):
+            allowed_kinds = (kinds,)
+        else:
+            allowed_kinds = tuple(kinds)
+
+    matched = select(
+        all_events,
+        plan=plan,
+        job=job,
+        session=session,
+        since=since_iso,
+        kinds=allowed_kinds,
+    )
+
+    if len(matched) > 500:
+        events = matched[-500:]
+        truncated = True
+    else:
+        events = matched
+        truncated = False
+
+    return {
+        "events": events,
+        "skipped_months": skipped,
+        "truncated": truncated,
+    }
+
+
+def audit_archive_status_data(p: Paths | None = None) -> list[dict[str, Any]]:
+    p = p or paths()
+    state_dir = p.state_dir
+    root = audit_root(state_dir)
+    manifests_dir = root / "manifests"
+
+    if not manifests_dir.is_dir():
+        return []
+
+    entries: list[tuple[str, dict[str, Any]]] = []
+    for f in manifests_dir.iterdir():
+        if not f.is_file():
+            continue
+        m = _MANIFEST_MONTH_RE.match(f.name)
+        if not m:
+            continue
+        month = m.group(1)
+        try:
+            content = f.read_text(encoding="utf-8")
+            data = json.loads(content)
+            if not isinstance(data, dict):
+                continue
+            count = int(data.get("count", 0))
+            sha256 = str(data.get("sha256", ""))
+            created = str(data.get("created", ""))
+            entries.append(
+                (
+                    month,
+                    {
+                        "month": str(data.get("month", month)),
+                        "count": count,
+                        "sha256": sha256,
+                        "created": created,
+                    },
+                )
+            )
+        except (OSError, json.JSONDecodeError, ValueError, TypeError):
+            continue
+
+    entries.sort(key=lambda item: item[0])
+    return [entry[1] for entry in entries]
+
+
+_ARCHIVE_RERUN_MONTH_RE = re.compile(r"^(\d{4})-(\d{2})$")
+
+
+def audit_archive_rerun_data(
+    month: str,
+    p: Paths | None = None,
+    vault: Path | str | None = None,
+    today: Any = None,
+) -> dict[str, Any]:
+    if not isinstance(month, str) or isinstance(month, bool):
+        raise UsageError(f"invalid month: {month!r}, expected string YYYY-MM")
+
+    if any(c in month for c in ("/", "\\", "\0")) or ".." in month:
+        raise UsageError(f"invalid month: {month!r}, paths not allowed")
+
+    m = _ARCHIVE_RERUN_MONTH_RE.match(month)
+    if not m:
+        raise UsageError(f"invalid month: {month!r}, expected YYYY-MM")
+
+    m_val = int(m.group(2))
+    if m_val < 1 or m_val > 12:
+        raise UsageError(f"invalid month: {month!r}, month must be between 01 and 12")
+
+    p = p or paths()
+    state_dir = p.state_dir
+
+    res = archive_month(
+        month=month,
+        state_dir=state_dir,
+        vault=vault,
+        today=today,
+    )
+    return {
+        "status": res.status,
+        "message": res.message,
+        "exit_code": res.exit_code,
+    }
 
 
 MAX_WAIT_S = 100
@@ -1236,7 +1443,7 @@ async def plan_wait_async(
     return {"state": "running"}
 
 
-def build_server() -> "MCPServer":
+def build_server(audit: bool = False) -> "MCPServer":
     try:
         from mcp.server.mcpserver import MCPServer
         from mcp.types import ToolAnnotations
@@ -1407,9 +1614,57 @@ def build_server() -> "MCPServer":
     def plan_close_tool(plan_path: str, rounds: int = 3) -> dict[str, Any]:
         return plan_close(plan_path=plan_path, rounds=rounds)
 
+    if audit:
+
+        @server.tool(
+            name="audit_status",
+            description="Show audit log status (day file, seq, hash, pending gaps, last archive)",
+            annotations=ToolAnnotations(readOnlyHint=True),
+        )
+        def audit_status() -> dict[str, Any]:
+            return audit_status_data()
+
+        @server.tool(
+            name="audit_show",
+            description=(
+                "Show audit log events filtered by plan, job, session, since, or kinds (bounded to last 500 events)"
+            ),
+            annotations=ToolAnnotations(readOnlyHint=True),
+        )
+        def audit_show(
+            plan: str | None = None,
+            job: str | None = None,
+            session: str | None = None,
+            since: str | None = None,
+            kinds: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return audit_show_data(
+                plan=plan,
+                job=job,
+                session=session,
+                since=since,
+                kinds=kinds,
+            )
+
+        @server.tool(
+            name="audit_archive_status",
+            description="List archived months from local manifests (month, count, sha256, created)",
+            annotations=ToolAnnotations(readOnlyHint=True),
+        )
+        def audit_archive_status() -> list[dict[str, Any]]:
+            return audit_archive_status_data()
+
+        @server.tool(
+            name="audit_archive_rerun",
+            description="Re-run monthly archival for a given month YYYY-MM",
+            annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
+        )
+        def audit_archive_rerun(month: str) -> dict[str, Any]:
+            return audit_archive_rerun_data(month=month)
+
     return server
 
 
 def run_stdio() -> None:
-    server = build_server()
+    server = build_server(audit=True)
     server.run("stdio")
