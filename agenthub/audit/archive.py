@@ -250,6 +250,15 @@ def _build_archive_locked(
         raise
 
 
+def _month_snapshot(month_dir: Path) -> dict[str, tuple[int, int]]:
+    snap: dict[str, tuple[int, int]] = {}
+    for p in month_dir.iterdir():
+        if p.is_file() and _DAY_FILE_RE.match(p.name):
+            st = p.stat()
+            snap[p.name] = (st.st_size, st.st_mtime_ns)
+    return snap
+
+
 def _sha256_file(path: Path) -> str:
     hasher = hashlib.sha256()
     with path.open("rb") as f:
@@ -372,6 +381,8 @@ def archive_month(
         finally:
             _release_lock(chain_fd)
             chain_fd = None
+        month_dir = root / resolved_month
+        packed_snapshot = _month_snapshot(month_dir) if month_dir.is_dir() else {}
         built = _build_archive_locked(resolved_month, state_dir=resolved_state_dir)
 
         # (c) Copy to <name>.tar.xz.part in vault, fsync, rename, and compare sha256
@@ -400,6 +411,23 @@ def archive_month(
 
         # (d) Write the manifest and copy it to <state>/audit/manifests/YYYY-MM.json; it and the delete hold the lock
         chain_fd = _acquire_chain_lock(root)
+        if _month_snapshot(month_dir) != packed_snapshot:
+            vault_tar.unlink(missing_ok=True)
+            vault_manifest.unlink(missing_ok=True)
+            _release_lock(chain_fd)
+            chain_fd = None
+            retry_reason = "month changed during archive"
+            emit(
+                "archive",
+                "archive",
+                state_dir=resolved_state_dir,
+                target=resolved_month,
+                status="retry",
+                exit_code=1,
+                actor_role="archiver",
+                detail={"month": resolved_month, "reason": retry_reason},
+            )
+            return ArchiveResult(status="retry", message=retry_reason, exit_code=1)
         created_iso = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         manifest_obj = {
             "month": resolved_month,
@@ -433,7 +461,6 @@ def archive_month(
         os.replace(local_manifest_part, local_manifest)
 
         # (e) ONLY THEN delete the local month directory <state>/audit/YYYY-MM/ and write an archive event status ok
-        month_dir = root / resolved_month
         shutil.rmtree(month_dir)
         _release_lock(chain_fd)
         chain_fd = None

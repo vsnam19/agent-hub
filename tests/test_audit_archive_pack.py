@@ -290,3 +290,42 @@ def test_archive_packs_without_holding_chain_lock(tmp_path: Path, monkeypatch: p
     assert len(appended) == 1
     assert not (root / "2026-09").exists()
     assert (root / "2026-10" / "2026-10-19.jsonl").is_file()
+
+
+def test_archive_aborts_when_month_changes_during_pack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state_dir = tmp_path / "state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    append({"ts": "2026-09-01T10:00:00.000Z", "kind": "command", "target": "c1"}, state_dir=state_dir)
+    root = audit_root(state_dir)
+    real_pack = archive_mod._build_archive_locked
+
+    def pack_then_late_event(*args, **kwargs):  # type: ignore[no-untyped-def]
+        built = real_pack(*args, **kwargs)
+        append({"ts": "2026-09-01T11:00:00.000Z", "kind": "command", "target": "late"}, state_dir=state_dir)
+        return built
+
+    monkeypatch.setattr(archive_mod, "_build_archive_locked", pack_then_late_event)
+    res = archive_month("2026-09", state_dir=state_dir, vault=vault, today=date(2026, 10, 19))
+
+    assert res.status == "retry"
+    assert res.exit_code != 0
+    day_file = root / "2026-09" / "2026-09-01.jsonl"
+    assert "late" in day_file.read_text(encoding="utf-8")
+    assert not (vault / "agent-hub-audit" / "2026-09.tar.xz").exists()
+    assert not (vault / "agent-hub-audit" / "2026-09.json").exists()
+    assert not (root / "manifests" / "2026-09.json").exists()
+    events = [
+        json.loads(line)
+        for f in root.glob("*/*.jsonl")
+        for line in f.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    retry = [e for e in events if e.get("kind") == "archive" and e.get("outcome", {}).get("status") == "retry"]
+    assert len(retry) == 1
+    assert retry[0]["detail"]["reason"] == "month changed during archive"
+
+    monkeypatch.setattr(archive_mod, "_build_archive_locked", real_pack)
+    res2 = archive_month("2026-09", state_dir=state_dir, vault=vault, today=date(2026, 10, 19))
+    assert res2.status == "ok"
+    assert not (root / "2026-09").exists()

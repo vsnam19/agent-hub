@@ -593,3 +593,26 @@ def test_target_shlex_failure_still_applies_argv_rules() -> None:
 
     flagged = sanitize({"target": "app --token abcd1234 run # it's"})
     assert "abcd1234" not in flagged["target"]
+
+
+def test_target_curl_user_password_redacted() -> None:
+    for cmd in (
+        "curl -u alice:hunter2 http://x",
+        "curl -ualice:hunter2 http://x",
+        "curl --user=alice:hunter2 http://x",
+        "curl --proxy-user alice:hunter2 http://x",
+        "x && curl -u alice:hunter2 http://x",
+    ):
+        out = sanitize({"target": cmd})["target"]
+        assert "hunter2" not in out, cmd
+        assert "<redacted>" in out, cmd
+        assert "http://x" in out, cmd
+    assert sanitize({"target": "x && curl -u alice:hunter2 http://x"})["target"].startswith("x && curl -u ")
+
+
+def test_target_any_changed_token_replaced() -> None:
+    out = sanitize({"target": "curl -u alice:hunter2 http://x"})["target"]
+    assert out == "curl -u alice:<redacted> http://x"
+    out2 = sanitize({"target": "a --token abcd1234 && b --token abcd1234 c"})["target"]
+    assert "abcd1234" not in out2
+    assert out2 == "a --token <redacted> && b --token <redacted> c"

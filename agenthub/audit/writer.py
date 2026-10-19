@@ -384,31 +384,18 @@ def _redact_target(target: str) -> str:
     redacted_tokens = redact_argv(tokens)
     if len(tokens) != len(redacted_tokens):
         return redact(target)
-    entries: list[tuple[str, str]] = []  # (literal prefix kept, secret value)
+    changed: dict[str, str] = {}  # original token -> redacted token
     for tok, red in zip(tokens, redacted_tokens, strict=True):
-        if tok == red:
-            continue
-        if red == "<redacted>":
-            val = tok
-            prefix = ""
-        elif tok.startswith("-p") and red == "-p<redacted>":
-            prefix, val = "-p", tok[2:]
-        elif "=" in tok and red == f"{tok.split('=', 1)[0]}=<redacted>":
-            prefix, val = "", tok.split("=", 1)[1]
-        else:
-            continue
-        if val:
-            entries.append((prefix, val))
-    entries.sort(key=lambda e: len(e[1]), reverse=True)
-    patterns = [
-        re.compile(r"(?<![^\s'\"=])(" + re.escape(prefix) + r")" + re.escape(val) + r"(?![^\s'\"])")
-        for prefix, val in entries
-    ]
+        if tok != red and tok:
+            changed[tok] = red
+    if not changed:
+        return redact(target)
+    ordered = sorted(changed, key=len, reverse=True)
+    patterns = [re.compile(r"(?<![^\s'\"=])" + re.escape(tok) + r"(?![^\s'\"])") for tok in ordered]
     if any(pat.search(target) is None for pat in patterns):
         return redact(shlex.join(redacted_tokens))
-    result = target
-    for pat in patterns:
-        result = pat.sub(lambda m: m.group(1) + "<redacted>", result)
+    combined = re.compile(r"(?<![^\s'\"=])(?:" + "|".join(re.escape(tok) for tok in ordered) + r")(?![^\s'\"])")
+    result = combined.sub(lambda m: changed[m.group(0)], target)  # one pass: never rewrites an inserted <redacted>
     return redact(result)
 
 
