@@ -43,7 +43,7 @@ def test_archived_month_events_included_oldest_first(tmp_path: Path, monkeypatch
     (config_dir / "audit.toml").write_text(f'vault = "{vault_dir}"\n', encoding="utf-8")
     monkeypatch.setenv("AGENT_HUB_CONFIG", str(config_dir))
 
-    # 1. Archived month 2026-09 via archive_month
+    # 1. Events in 2026-09 and 2026-10
     e_sep1 = append(
         {"ts": "2026-09-01T10:00:00.000Z", "kind": "command", "target": "ls"},
         state_dir=state_dir,
@@ -52,6 +52,16 @@ def test_archived_month_events_included_oldest_first(tmp_path: Path, monkeypatch
         {"ts": "2026-09-15T12:00:00.000Z", "kind": "tool", "target": "edit"},
         state_dir=state_dir,
     )
+    e_oct1 = append(
+        {"ts": "2026-10-01T08:00:00.000Z", "kind": "session", "target": "start"},
+        state_dir=state_dir,
+    )
+    e_oct2 = append(
+        {"ts": "2026-10-02T09:00:00.000Z", "kind": "outward", "target": "push"},
+        state_dir=state_dir,
+    )
+
+    # 2. Archived month 2026-09 via archive_month
     res = archive_month("2026-09", state_dir=state_dir, vault=vault_dir, today=date(2026, 10, 19))
     assert isinstance(res, ArchiveResult)
     assert res.status == "ok"
@@ -61,16 +71,6 @@ def test_archived_month_events_included_oldest_first(tmp_path: Path, monkeypatch
     tar_path = vault_audit_dir / "2026-09.tar.xz"
     assert tar_path.is_file()
     _make_tarball_with_bad_line(tar_path, "2026-09", [e_sep1, e_sep2])
-
-    # 2. Local events in 2026-10
-    e_oct1 = append(
-        {"ts": "2026-10-01T08:00:00.000Z", "kind": "session", "target": "start"},
-        state_dir=state_dir,
-    )
-    e_oct2 = append(
-        {"ts": "2026-10-02T09:00:00.000Z", "kind": "outward", "target": "push"},
-        state_dir=state_dir,
-    )
 
     # 3. Call read_events_with_archives
     events, skipped = read_events_with_archives(state_dir=state_dir, since=None)

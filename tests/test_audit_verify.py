@@ -1,9 +1,11 @@
 import json
 import shutil
+import uuid
 from pathlib import Path
+from typing import Any
 
 from agenthub.audit.verify import VerifyResult, verify
-from agenthub.audit.writer import append, audit_root, canonical_json
+from agenthub.audit.writer import ZERO_HASH, append, audit_root, canonical_json, event_hash
 
 
 def test_clean_log_verifies(tmp_path: Path) -> None:
@@ -93,23 +95,48 @@ def test_reordered_events_are_detected(tmp_path: Path) -> None:
     assert any(err in res.message for err in ("seq mismatch", "prev_hash mismatch", "hash mismatch"))
 
 
+def _append_raw(state_dir: Path, event: dict[str, Any]) -> dict[str, Any]:
+    record = dict(event)
+    record.setdefault("schema_version", 1)
+    record.setdefault("event_id", uuid.uuid4().hex)
+    day = str(record["ts"])[:10]
+    month = day[:7]
+    month_dir = audit_root(state_dir) / month
+    month_dir.mkdir(parents=True, exist_ok=True)
+    day_file = month_dir / f"{day}.jsonl"
+    if day_file.exists() and day_file.stat().st_size > 0:
+        lines = [line.strip() for line in day_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+        last_ev = json.loads(lines[-1])
+        seq = int(last_ev["seq"]) + 1
+        prev_hash = str(last_ev["hash"])
+    else:
+        seq = 1
+        prev_hash = ZERO_HASH
+    record["seq"] = seq
+    record["prev_hash"] = prev_hash
+    record["hash"] = event_hash(prev_hash, record)
+    with day_file.open("a", encoding="utf-8") as f:
+        f.write(canonical_json(record) + "\n")
+    return record
+
+
 def test_clock_skew_over_two_seconds_fails(tmp_path: Path) -> None:
     # Within 2.0s skew tolerance (1.5s earlier) -> passes
-    append({"ts": "2026-10-18T10:00:05.000Z", "kind": "command", "target": "first"}, state_dir=tmp_path)
-    append({"ts": "2026-10-18T10:00:03.500Z", "kind": "command", "target": "second"}, state_dir=tmp_path)
+    _append_raw(tmp_path, {"ts": "2026-10-18T10:00:05.000Z", "kind": "command", "target": "first"})
+    _append_raw(tmp_path, {"ts": "2026-10-18T10:00:03.500Z", "kind": "command", "target": "second"})
 
     res_ok = verify(state_dir=tmp_path)
     assert res_ok.ok is True
     assert res_ok.message == "ok: 2 events"
 
     # Exactly 2.0s earlier is within tolerance -> passes
-    append({"ts": "2026-10-18T10:00:01.500Z", "kind": "command", "target": "third"}, state_dir=tmp_path)
+    _append_raw(tmp_path, {"ts": "2026-10-18T10:00:01.500Z", "kind": "command", "target": "third"})
     res_ok2 = verify(state_dir=tmp_path)
     assert res_ok2.ok is True
     assert res_ok2.message == "ok: 3 events"
 
     # More than 2.0s earlier (e.g. 2.1s earlier than 10:00:01.500Z) -> fails
-    append({"ts": "2026-10-18T09:59:59.400Z", "kind": "command", "target": "fourth"}, state_dir=tmp_path)
+    _append_raw(tmp_path, {"ts": "2026-10-18T09:59:59.400Z", "kind": "command", "target": "fourth"})
     res_fail = verify(state_dir=tmp_path)
     assert res_fail.ok is False
     assert "2026-10/2026-10-18.jsonl:4 seq=4:" in res_fail.message
