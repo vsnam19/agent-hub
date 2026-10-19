@@ -185,6 +185,8 @@ D-036 `wait` robustness · D-037 Jev · D-038 gate guard · D-039–D-056 gwen h
 routing, escalation, standing orders, pstack-style skills · D-069–D-070, D-079 gwen's model and limits · D-071–D-076,
 D-080 pstack trust mechanics (enforced rules, escape hatch, decision trail, verdicts on commits) · D-077 automotive
 repos · D-078 scoped cancel · D-079 gwen on small repos · D-081–D-082 no gate bypass · D-083–D-089 one skill set for
-every worker (Phase B).
+every worker (Phase B) · D-090–D-104 see `docs/decisions.md` · D-105–D-125 Phase G audit log (scope: every host's
+director session; fail-open, hash chain, redaction at write time; one chain lock and monotonic `ts`; monthly archive to
+the vault; merge through one integration branch).
 agent-plugins (`docs/decisions.md`): P-001–P-007 marketplace and the TelAF/ASPICE rewrite · P-008–P-011 evaluation
 · P-012 everything-claude-code (not installed; ideas taken) · P-013 token-audit · token audit T-001–T-007.

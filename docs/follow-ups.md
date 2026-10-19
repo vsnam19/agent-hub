@@ -177,3 +177,13 @@ log one whenever a task blocks or fails for a reason that is not the implementer
   path its lock-free property). Revisit if gaps ever disagree with host-side counts.
 - Final review covered `4562504...HEAD` (hardening and its fix rounds); the 34 Phase G branches were each reviewed once
   in plan `phase-g` (D-124).
+
+## From the Phase G final review (2026-10-19, review job 20261019-225727-review-b4ea, verdict approve)
+- **Unreadable claim file can vanish** when the gap append fails before the gap line is written: only readable claims
+  are restored, `_release_claims` unlinks all (writer `_claim_pending_and_emit_gap`).
+- **Target keeps a quoted secret** when the same value also appears plain elsewhere in the command (`user:'pass'`);
+  the fallback check only asks whether each changed token matches somewhere (writer `_redact_target`).
+- **curl `-E/--cert <file>:<password>`** is not redacted (only the `-u` family is).
+- **Plan id in audit events is the plan file's directory name** (`plan.path.parent.name` in `planrun.py`,
+  `planclose.py`, `triagerun.py`), not `plan.slug`; equal only under the standard `plans/<slug>/plan.json` layout.
+- **Real codex `PostToolUse` fixture** still missing (codex quota until 2026-11-06).

@@ -3,22 +3,20 @@
 The owner wants the next session to run on its own from a one-word prompt. Do exactly this, without asking, until
 every task is merged or a limit stops you (quota, a decision only the owner can make). Report in Vietnamese.
 
-**State at hand-off (2026-10-19, released):** **v0.11.0 released** (commit `b90c040`; Claude Code plugin updated to
-0.11.0 — restart loads the SessionStart/Stop hooks and the 100 s MCP wait cap; MCP server and both hooks smoke-tested
-from the plugin cache). `agent-hub hub install --apply` ran: the agent-hub MCP server is registered with codex and agy
-(`hub status` → `mcp:agent-hub current` on both); agy plugins worker/telaf/aspice/learned-worker are installed (see the
-agy list-format follow-up: `hub status` still shows them missing). Master clean, no worktrees, no `orch/*` branches,
-nothing running, nothing pushed. Owner: F6 before G; Phase G is discussed at v0.12 — do not start it.
+**State at hand-off (2026-10-20): v0.12.0 on master (local, not pushed, plugin cache not yet updated).** Phase G
+(audit log) merged as `0afc8aa` through `orch/phase-g-hardening/integrate` (D-124): `ready` b62e17c, final review
+`20261019-225727-review-b4ea` (claude:opus, approve), lint + 1534 tests green on master. Real check done: one real plan
+(`realcheck-g`, scratch repo) → `audit show --plan`, a director hook payload → `audit show --session` (secret redacted,
+thinking dropped, 2 outward events), `audit verify` → ok on the real state; archive proven in a temp state + temp
+vault (no config / missing vault keep data and exit 1; success; re-run no-op; verify spans the archive).
+`audit schedule` printed only. Leftover worktrees/branches: `.worktrees/phg-integrate`, `.worktrees/phg-preview`,
+`.worktrees/phase-g-*`, `.worktrees/phase-g-hardening-*`, `orch/phase-g/*`, `orch/phase-g-hardening/*` — deleting them
+is the owner's call.
 
-**Current work (2026-10-19, 13:40 UTC): Phase G hardening (owner chose option 2, D-124).** Spec
-`docs/superpowers/specs/2026-10-18-phase-g-audit-log-design.md`, decisions D-105..D-125. All 34 `orch/phase-g/*`
-branches are merged into `orch/phase-g-hardening/integrate` (worktree `.worktrees/phg-integrate`, HEAD 4562504;
-conflicts resolved by job `20261019-131505-implement-hard-191a`). Plan
-`~/.local/state/agent-hub/plans/phase-g-hardening/plan.json` (base = that branch, 11 tasks, one per open finding
-group) is running. Next: `plan wait` → `plan review` → `plan triage`/`close` → merge each approved
-`orch/phase-g-hardening/*` into the integration branch → `agent-hub gate` + review (base = 4562504) + `ready` on its
-HEAD → merge to master → real check (spec §10.4) → docs → v0.12.0. Old report:
-`~/.local/state/agent-hub/plans/phase-g/report.md`. Argon review quota out until 2026-10-24.
+**Next (owner to start):** release v0.12.0 (update the plugin cache, restart Claude Code), then the owner steps in
+README "Audit log" (hub install --apply for codex/agy hooks, trust the codex hook, `audit.toml` vault, `audit schedule
+--apply`). After that: D-121 (one source of truth for model ids) + D-122 (`incident add`, weekly reads
+`incidents.jsonl`), then `docs/follow-ups.md` "From the Phase G final review" and "From plan phase-g-hardening".
 
 The steps below describe how `followups-1` was run; reuse them for the next plan (new slug, new spec).
 
