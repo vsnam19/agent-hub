@@ -630,3 +630,46 @@ def test_fix_9_timeout_during_normalize_exits_zero(tmp_path: Path, monkeypatch: 
 
     assert audit_hook.main(["--host", "claude", "PostToolUse"]) == 0
     assert _read_day_events(tmp_path) == []
+
+
+def test_timeout_before_normalize_records_pending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    audit_hook = _load_audit_hook()
+    monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(REAL_CLAUDE_POST_TOOL_USE_PAYLOAD)))
+
+    def slow_normalize(*_a: Any, **_k: Any) -> list[dict[str, Any]]:
+        raise audit_hook.HookTimeout("hook timeout")
+
+    monkeypatch.setattr(audit_hook, "normalize", slow_normalize)
+    assert audit_hook.main(["--host", "claude", "PostToolUse"]) == 0
+
+    assert _read_day_events(tmp_path) == []
+    lines = (tmp_path / "audit-pending-gap.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["reason"] for line in lines] == ["hook timeout before normalize"]
+
+
+def test_alarm_in_finally_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    audit_hook = _load_audit_hook()
+    monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path))
+    monkeypatch.setattr(sys, "argv", ["audit-hook.py", "--host", "agy", "PostToolUse"])
+
+    def alarm_escapes(_argv: Any = None) -> int:
+        raise audit_hook.HookTimeout("alarm in finally")
+
+    monkeypatch.setattr(audit_hook, "main", alarm_escapes)
+    assert audit_hook._safe_main() == 0
+    assert capsys.readouterr().out == "{}"
+
+    # the alarm is also cancelled safely when signal.alarm itself raises
+    monkeypatch.undo()
+    monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+
+    def alarm_raises(_seconds: int) -> int:
+        raise audit_hook.HookTimeout("alarm in finally")
+
+    monkeypatch.setattr(audit_hook.signal, "alarm", alarm_raises)
+    assert audit_hook.main(["--host", "agy", "PostToolUse"]) == 0
+    assert capsys.readouterr().out == "{}"

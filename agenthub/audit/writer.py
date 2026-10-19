@@ -376,14 +376,13 @@ def _sanitize_detail(detail: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _redact_target(target: str) -> str:
-    redacted_target = redact(target)
     try:
         tokens = shlex.split(target)
-        redacted_tokens = redact_argv(tokens)
     except ValueError:
-        return redacted_target
+        tokens = target.split()
+    redacted_tokens = redact_argv(tokens)
     if len(tokens) != len(redacted_tokens):
-        return redacted_target
+        return redact(target)
     entries: list[tuple[str, str]] = []  # (literal prefix kept, secret value)
     for tok, red in zip(tokens, redacted_tokens, strict=True):
         if tok == red:
@@ -405,10 +404,11 @@ def _redact_target(target: str) -> str:
         for prefix, val in entries
     ]
     if any(pat.search(target) is None for pat in patterns):
-        return shlex.join(redacted_tokens)
+        return redact(shlex.join(redacted_tokens))
+    result = target
     for pat in patterns:
-        redacted_target = pat.sub(lambda m: m.group(1) + "<redacted>", redacted_target)
-    return redacted_target
+        result = pat.sub(lambda m: m.group(1) + "<redacted>", result)
+    return redact(result)
 
 
 def sanitize(event: Mapping[str, Any]) -> dict[str, Any]:
@@ -471,6 +471,7 @@ def sanitize(event: Mapping[str, Any]) -> dict[str, Any]:
 
 _caller_written = False
 _emitting_gap = False
+_gap_written = False
 
 
 def _write_record_to_file(
@@ -481,8 +482,9 @@ def _write_record_to_file(
     prev_hash: str,
     *,
     caller: bool = False,
+    claimed_gap: bool = False,
 ) -> tuple[dict[str, Any], str, str]:
-    global _caller_written
+    global _caller_written, _gap_written
     day = _day_from_ts(record["ts"])
     month_dir = root / day[:7]
     _ensure_dir_0700(month_dir)
@@ -507,6 +509,8 @@ def _write_record_to_file(
         os.write(fd, line_bytes)
         if caller:
             _caller_written = True
+        if claimed_gap:
+            _gap_written = True
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -558,7 +562,9 @@ def _append_locked(event: Mapping[str, Any], root: Path) -> dict[str, Any]:
         record["event_id"] = uuid.uuid4().hex
     _stamp_ts(record, last_ev)
 
-    caller_rec, _, _ = _write_record_to_file(record, root, last_ev, last_day, prev_hash, caller=not _emitting_gap)
+    caller_rec, _, _ = _write_record_to_file(
+        record, root, last_ev, last_day, prev_hash, caller=not _emitting_gap, claimed_gap=_emitting_gap
+    )
     return caller_rec
 
 
@@ -664,22 +670,25 @@ def _claim_pending_and_emit_gap(root: Path, state_dir: Path | str | None) -> Non
         sizes[path] = len(chunk)
         raw += chunk if chunk.endswith(b"\n") or not chunk else chunk + b"\n"
     entries: list[dict[str, Any]] = []
+    non_empty = 0
     for line in raw.decode("utf-8", errors="replace").splitlines():
         line = line.strip()
         if not line:
             continue
+        non_empty += 1
         try:
             item = json.loads(line)
         except (ValueError, RecursionError):
             continue
         if isinstance(item, dict):
             entries.append(item)
-    if not entries and not raw.strip() and not unreadable:
+    unparsable = non_empty - len(entries)
+    if non_empty == 0 and not raw.strip() and not unreadable:
         for path in claims:
             path.unlink(missing_ok=True)
         return
     now = _utc_now_iso()
-    gap_event = {
+    gap_event: dict[str, Any] = {
         "ts": now,
         "kind": "gap",
         "actor": {"role": "agent-hub", "host": "agent-hub"},
@@ -689,15 +698,22 @@ def _claim_pending_and_emit_gap(root: Path, state_dir: Path | str | None) -> Non
             "from": entries[0].get("ts", now) if entries else now,
             "to": now,
             "reason": entries[0].get("reason", "") if entries else "unreadable pending file",
-            "lost": len(entries) if entries and not unreadable else "unknown",
+            "lost": non_empty if not unreadable else "unknown",
         },
     }
-    global _emitting_gap
+    if unparsable:
+        gap_event["detail"]["unparsable"] = unparsable
+    global _emitting_gap, _gap_written
     _emitting_gap = True
+    _gap_written = False
     try:
         _append_locked(gap_event, root)
     except BaseException:
         _emitting_gap = False
+        if _gap_written:
+            # the gap is in the chain: the claimed lines are reported, not restored
+            _release_claims(claims, sizes, pending_path)
+            raise
         if raw:
             fd = os.open(pending_path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
             try:

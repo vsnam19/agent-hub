@@ -574,3 +574,22 @@ def test_target_escaped_value_falls_back() -> None:
     assert "ret42" not in sanitized["target"]
     assert "<redacted>" in sanitized["target"]
     assert "--verbose" in sanitized["target"]
+
+
+def test_target_secret_with_at_sign_fully_redacted() -> None:
+    sanitized = sanitize({"target": "mysql -pabc@Xk9pLmQ2vR7tY4wZq db"})
+    assert "abc" not in sanitized["target"]
+    assert "Xk9pLmQ2vR7tY4wZq" not in sanitized["target"]
+    assert sanitized["target"] == "mysql -p<redacted> db"
+
+
+def test_target_shlex_failure_still_applies_argv_rules() -> None:
+    sanitized = sanitize({"target": "mysql -phunter2 db # don't"})
+    assert "hunter2" not in sanitized["target"]
+    assert sanitized["target"].startswith("mysql -p<redacted> db")
+
+    spaced = sanitize({"target": "mysql -p hunter2 db # don't"})
+    assert "hunter2" not in spaced["target"]
+
+    flagged = sanitize({"target": "app --token abcd1234 run # it's"})
+    assert "abcd1234" not in flagged["target"]

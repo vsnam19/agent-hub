@@ -261,4 +261,38 @@ def test_unreadable_pending_still_reports_gap(tmp_path: Path) -> None:
     assert not pending.exists()
     events = [json.loads(line) for line in _all_lines(tmp_path)]
     assert [e["kind"] for e in events] == ["gap", "tool"]
-    assert events[0]["detail"]["lost"] == "unknown"
+    assert events[0]["detail"]["lost"] == 2
+    assert events[0]["detail"]["unparsable"] == 2
+
+
+def test_gap_written_then_error_does_not_restore(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pending = tmp_path / "audit-pending-gap.jsonl"
+    pending.write_text('{"ts":"2026-01-01T00:00:00.000Z","reason":"old"}\n', encoding="utf-8")
+    real = writer._write_record_to_file
+
+    def boom_after_gap(record, *args, **kwargs):  # type: ignore[no-untyped-def]
+        result = real(record, *args, **kwargs)
+        if record.get("kind") == "gap":
+            raise RuntimeError("after gap line")
+        return result
+
+    monkeypatch.setattr(writer, "_write_record_to_file", boom_after_gap)
+    assert write({"kind": "tool", "target": "x"}, state_dir=tmp_path) is False
+    events = [json.loads(line) for line in _all_lines(tmp_path)]
+    assert [e["kind"] for e in events] == ["gap"]
+    kept = [json.loads(line) for line in pending.read_text(encoding="utf-8").splitlines()]
+    assert [k["reason"] for k in kept] == ["after gap line"]
+    assert not list(tmp_path.glob("*.claimed"))
+
+
+def test_unparsable_pending_lines_counted(tmp_path: Path) -> None:
+    pending = tmp_path / "audit-pending-gap.jsonl"
+    pending.write_text(
+        '{"ts":"2026-01-01T00:00:00.000Z","reason":"old"}\n{broken\n\nnot json\n',
+        encoding="utf-8",
+    )
+    assert write({"kind": "tool", "target": "x"}, state_dir=tmp_path) is True
+    gap = json.loads(_all_lines(tmp_path)[0])
+    assert gap["kind"] == "gap"
+    assert gap["detail"]["lost"] == 3
+    assert gap["detail"]["unparsable"] == 2

@@ -6,6 +6,8 @@ import shlex
 import urllib.parse
 from typing import Any, NamedTuple
 
+from agenthub.redact import redact_argv
+
 _ENV_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*")
 _RSYNC_HOST_RE = re.compile(r"^(?:[a-zA-Z0-9_.-]+@)?[a-zA-Z0-9_.-]+(?:::|:)")
 _ALLOWLISTED_EXACT_DOMAINS = {
@@ -613,7 +615,9 @@ def classify_command(command: str, cwd: str | None = None) -> list[Classified]:
     try:
         argv = shlex.split(command)
     except ValueError:
-        argv = [command]
+        # unbalanced quote, heredoc, trailing backslash: whitespace tokens, so the argv rules still fire
+        fallback = redact_argv(command.split())
+        argv = fallback if fallback != command.split() else [command]
 
     segments = _split_command_segments(command)
 

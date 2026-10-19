@@ -63,6 +63,7 @@ class HookTimeout(Exception):
 
 
 _timed_out = False
+_acked = False
 
 
 def _alarm_handler(_signum: int, _frame: Any) -> None:
@@ -72,8 +73,9 @@ def _alarm_handler(_signum: int, _frame: Any) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    global _timed_out
+    global _timed_out, _acked
     _timed_out = False
+    _acked = False
     host = ""
     events: list[dict[str, Any]] = []
     i = 0
@@ -114,6 +116,12 @@ def main(argv: list[str] | None = None) -> int:
     except HookTimeout:
         _timed_out = True
         try:
+            if not events:
+                # timed out before normalize() returned: keep one trace of the lost call
+                record_pending(
+                    {"kind": "tool", "actor": {"host": host}, "target": "", "ts": _utc_now_iso()},
+                    "hook timeout before normalize",
+                )
             for ev in events[i:]:
                 if not ev.get("ts"):
                     ev["ts"] = _utc_now_iso()
@@ -124,19 +132,34 @@ def main(argv: list[str] | None = None) -> int:
     except BaseException:
         return 0
     finally:
-        if hasattr(signal, "alarm"):
-            try:
+        try:
+            if hasattr(signal, "alarm"):
                 signal.alarm(0)
-            except BaseException:
-                pass
+        except BaseException:
+            pass
         if host == "agy":
             try:
                 sys.stdout.write("{}")
                 sys.stdout.flush()
+                _acked = True
             except BaseException:
                 pass
     return 0
 
 
+def _safe_main() -> int:
+    try:
+        return main()
+    except BaseException:
+        # an alarm that fires after main()'s own handlers: still ack agy and exit 0
+        try:
+            if not _acked and _parse_args(sys.argv[1:])[0] == "agy":
+                sys.stdout.write("{}")
+                sys.stdout.flush()
+        except BaseException:
+            pass
+        return 0
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_safe_main())

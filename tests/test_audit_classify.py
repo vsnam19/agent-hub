@@ -780,3 +780,15 @@ def test_env_dash_s_command_classified() -> None:
     events_flags = classify_command('env -S "-i git push"')
     outward_flags = [ev for ev in events_flags if ev.kind == "outward"]
     assert len(outward_flags) >= 1
+
+
+def test_classify_shlex_failure_argv_rules() -> None:
+    events = classify_command("mysql -phunter2 db # don't")
+    assert "-phunter2" not in events[0].detail["argv"]
+    assert "-p<redacted>" in events[0].detail["argv"]
+
+    events = classify_command("mysql -p hunter2 db # don't")
+    assert "hunter2" not in events[0].detail["argv"]
+
+    events = classify_command("app --token abcd1234 # it's")
+    assert "abcd1234" not in events[0].detail["argv"]
