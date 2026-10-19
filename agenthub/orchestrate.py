@@ -16,6 +16,7 @@ from typing import Callable
 from agenthub import brief as briefmod
 from agenthub import env, gateguard, guards, handoff, process
 from agenthub.agents import Classified, Outcome, Request, registry
+from agenthub.audit.trace import trace_env
 from agenthub.config import ConfigError, Paths, Pool
 from agenthub.jobs import Job, list_jobs, new_job
 from agenthub.pool import Cooldowns, Link
@@ -436,6 +437,7 @@ def run_job(
                 else:
                     inv = adapter.build(req)
                     child_env, _ = env.child_env(os.environ, adapter.config.env_passthrough)
+                    child_env.update(trace_env(job=job.id, role=args.role, attempt=n))
 
                     def on_start(pgid: int, n=n, link=link, attempt_dir=attempt_dir) -> None:
                         cancel.pgid = pgid
