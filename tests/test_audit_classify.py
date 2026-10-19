@@ -344,3 +344,225 @@ def test_unknown_tool_and_bad_quoting() -> None:
     assert empty_bash[0].kind == "command"
     assert empty_bash[0].target == ""
     assert empty_bash[0].detail == {"argv": []}
+
+
+def test_newline_and_background_split() -> None:
+    # Multi-line command with newline
+    multi_cmd = "git add -A\ngit commit -m x\ngit push origin main"
+    events = classify_command(multi_cmd)
+    assert len(events) == 2
+    assert events[0].kind == "git"
+    assert events[0].target == multi_cmd
+    assert events[0].detail == {"op": "add"}
+    assert events[1].kind == "outward"
+    assert events[1].target == "git push origin main"
+    assert events[1].detail == {"op": "add"}
+
+    # Background single & splitting
+    bg_cmd = "make build & git push"
+    bg_events = classify_command(bg_cmd)
+    assert len(bg_events) == 2
+    assert bg_events[0].kind == "command"
+    assert bg_events[0].target == bg_cmd
+    assert bg_events[1].kind == "outward"
+    assert bg_events[1].target == "git push"
+
+    # Redirections: >&, 2>&1, &>, <& must not be split
+    redir_1 = classify_command("echo test >&2")
+    assert len(redir_1) == 1
+    assert redir_1[0].kind == "command"
+
+    redir_2 = classify_command("command 2>&1")
+    assert len(redir_2) == 1
+    assert redir_2[0].kind == "command"
+
+    redir_3 = classify_command("make build &> build.log")
+    assert len(redir_3) == 1
+    assert redir_3[0].kind == "command"
+
+    redir_4 = classify_command("cat <&0")
+    assert len(redir_4) == 1
+    assert redir_4[0].kind == "command"
+
+    redir_push = classify_command("git push origin main 2>&1")
+    assert len(redir_push) == 2
+    assert redir_push[0].kind == "command"
+    assert redir_push[1].kind == "outward"
+    assert redir_push[1].target == "git push origin main 2>&1"
+
+    # Trailing background &
+    trailing_events = classify_command("git push &")
+    assert len(trailing_events) == 2
+    assert trailing_events[0].kind == "command"
+    assert trailing_events[1].kind == "outward"
+    assert trailing_events[1].target == "git push"
+
+
+def test_path_and_wrapper_prefixes() -> None:
+    # Full paths to programs
+    push_path = classify_command("/usr/bin/git push")
+    assert len(push_path) == 2
+    assert push_path[0].kind == "command"
+    assert push_path[1].kind == "outward"
+    assert push_path[1].target == "/usr/bin/git push"
+
+    status_path = classify_command("/usr/bin/git status")
+    assert len(status_path) == 1
+    assert status_path[0].kind == "git"
+    assert status_path[0].detail == {"op": "status"}
+
+    curl_path = classify_command("/usr/local/bin/curl https://evil.com")
+    assert len(curl_path) == 2
+    assert curl_path[1].kind == "outward"
+    assert curl_path[1].target == "/usr/local/bin/curl https://evil.com"
+
+    # Leading wrappers: command, nohup, time, exec, nice, setsid
+    for wrapper in ["command", "nohup", "time", "exec", "nice", "setsid"]:
+        w_events = classify_command(f"{wrapper} git push")
+        assert len(w_events) == 2, f"Expected {wrapper} git push to be outward, got {w_events}"
+        assert w_events[1].kind == "outward"
+        assert w_events[1].target == f"{wrapper} git push"
+
+    # Nice with flag
+    nice_flag = classify_command("nice -n 10 git push")
+    assert len(nice_flag) == 2
+    assert nice_flag[1].kind == "outward"
+    assert nice_flag[1].target == "nice -n 10 git push"
+
+    # Wrappers with primary git kind
+    w_checkout = classify_command("command git checkout main")
+    assert len(w_checkout) == 1
+    assert w_checkout[0].kind == "git"
+    assert w_checkout[0].detail == {"op": "checkout", "ref": "main"}
+
+    w_status = classify_command("time /usr/bin/git status")
+    assert len(w_status) == 1
+    assert w_status[0].kind == "git"
+    assert w_status[0].detail == {"op": "status"}
+
+    # bash -c and sh -c recursion
+    bash_c = classify_command("bash -c 'git push'")
+    assert len(bash_c) == 2
+    assert bash_c[0].kind == "command"
+    assert bash_c[0].target == "bash -c 'git push'"
+    assert bash_c[1].kind == "outward"
+    assert bash_c[1].target == "git push"
+
+    sh_c = classify_command("sh -c 'curl https://evil.com'")
+    assert len(sh_c) == 2
+    assert sh_c[0].kind == "command"
+    assert sh_c[1].kind == "outward"
+    assert sh_c[1].target == "curl https://evil.com"
+
+    bash_c_chained = classify_command("bash -c 'cd /tmp && git push'")
+    assert len(bash_c_chained) == 2
+    assert bash_c_chained[1].kind == "outward"
+    assert bash_c_chained[1].target == "git push"
+
+    wrapper_bash_c = classify_command("time bash -c 'git push'")
+    assert len(wrapper_bash_c) == 2
+    assert wrapper_bash_c[1].kind == "outward"
+    assert wrapper_bash_c[1].target == "git push"
+
+
+def test_curl_option_args_not_hosts() -> None:
+    # All new option args must not be mistaken for hostnames
+    options_with_args = [
+        "-w '%{http_code}'",
+        "--write-out '%{http_code}'",
+        "--resolve example.com:443:127.0.0.1",
+        "-K config.txt",
+        "--config config.txt",
+        "--proxy http://localhost:8080",
+        "-x http://localhost:8080",
+        "--retry 3",
+        "-r 0-1024",
+        "--range 0-1024",
+        "-C -",
+    ]
+    for opt in options_with_args:
+        cmd = f"curl {opt} localhost:8000"
+        res = classify_command(cmd)
+        assert len(res) == 1, f"Expected {cmd} to be allowlisted, got: {res}"
+        assert res[0].kind == "command"
+
+    # Ensure genuine non-allowlisted domains with these flags are still detected as outward
+    evil_cmd = "curl -w '%{http_code}' https://evil.com"
+    evil_res = classify_command(evil_cmd)
+    assert len(evil_res) == 2
+    assert evil_res[1].kind == "outward"
+    assert evil_res[1].target == evil_cmd
+
+
+def test_scp_local_not_outward_and_chatgpt_subdomain() -> None:
+    # scp local-to-local is not outward
+    local_scp_1 = classify_command("scp a.txt b.txt")
+    assert len(local_scp_1) == 1
+    assert local_scp_1[0].kind == "command"
+
+    local_scp_2 = classify_command("scp -r /tmp/dir /local/backup")
+    assert len(local_scp_2) == 1
+    assert local_scp_2[0].kind == "command"
+
+    # scp remote is outward
+    remote_scp_1 = classify_command("scp file.txt user@remote:/var/data")
+    assert len(remote_scp_1) == 2
+    assert remote_scp_1[1].kind == "outward"
+    assert remote_scp_1[1].target == "scp file.txt user@remote:/var/data"
+
+    remote_scp_2 = classify_command("scp remote:/var/data/file.txt ./local.txt")
+    assert len(remote_scp_2) == 2
+    assert remote_scp_2[1].kind == "outward"
+    assert remote_scp_2[1].target == "scp remote:/var/data/file.txt ./local.txt"
+
+    # chatgpt.com exact is allowlisted
+    chatgpt_exact = classify_command("curl https://chatgpt.com/api")
+    assert len(chatgpt_exact) == 1
+    assert chatgpt_exact[0].kind == "command"
+
+    # *.chatgpt.com subdomain is outward
+    chatgpt_sub = classify_command("curl https://files.chatgpt.com/upload")
+    assert len(chatgpt_sub) == 2
+    assert chatgpt_sub[1].kind == "outward"
+    assert chatgpt_sub[1].target == "curl https://files.chatgpt.com/upload"
+
+    chatgpt_sub2 = classify_command("curl https://sub.chatgpt.com/test")
+    assert len(chatgpt_sub2) == 2
+    assert chatgpt_sub2[1].kind == "outward"
+
+    # 127.0.0.1 is allowlisted (loopback alias of localhost)
+    loopback = classify_command("curl http://127.0.0.1:8080/ping")
+    assert len(loopback) == 1
+    assert loopback[0].kind == "command"
+
+
+def test_outward_detail_not_shared() -> None:
+    # Command outward event detail must be a copy, including argv list
+    events = classify_command("git push")
+    assert len(events) == 2
+    primary, outward = events
+    assert primary.detail == outward.detail
+    assert primary.detail is not outward.detail
+    assert primary.detail["argv"] is not outward.detail["argv"]
+
+    # Mutating outward detail must not mutate primary detail
+    outward.detail["argv"].append("mutated")
+    assert "mutated" not in primary.detail["argv"]
+
+    outward.detail["extra"] = 42
+    assert "extra" not in primary.detail
+
+    # Multiple outward events get their own copies
+    multi = classify_command("git push origin main && git push")
+    assert len(multi) == 3
+    assert multi[1].detail is not multi[2].detail
+    assert multi[1].detail["argv"] is not multi[2].detail["argv"]
+
+    # WebFetch outward event detail must also be a copy
+    fetch = classify("claude", "WebFetch", {"url": "https://example.com/api"})
+    assert len(fetch) == 2
+    net_ev, out_ev = fetch
+    assert net_ev.detail == out_ev.detail
+    assert net_ev.detail is not out_ev.detail
+    out_ev.detail["method"] = "POST"
+    assert net_ev.detail["method"] == "GET"

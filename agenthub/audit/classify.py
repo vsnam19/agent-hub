@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os.path
 import re
 import shlex
 import urllib.parse
@@ -12,7 +13,7 @@ _ALLOWLISTED_EXACT_DOMAINS = {
     "api.openai.com",
     "chatgpt.com",
     "localhost",
-    "127.0.0.1",
+    "127.0.0.1",  # loopback alias of localhost
 }
 
 
@@ -38,8 +39,6 @@ def _is_allowlisted_domain(domain: str) -> bool:
     if d in _ALLOWLISTED_EXACT_DOMAINS:
         return True
     if d == "googleapis.com" or d.endswith(".googleapis.com"):
-        return True
-    if d.endswith(".chatgpt.com"):
         return True
     return False
 
@@ -83,13 +82,22 @@ def _split_command_segments(command: str) -> list[str]:
                 current = []
                 i += 2
                 continue
-            if c in (";", "|"):
+            if c in (";", "|", "\n"):
                 seg = "".join(current).strip()
                 if seg:
                     segments.append(seg)
                 current = []
                 i += 1
                 continue
+            if c == "&":
+                is_redir = (i > 0 and command[i - 1] in (">", "<")) or (i + 1 < n and command[i + 1] == ">")
+                if not is_redir:
+                    seg = "".join(current).strip()
+                    if seg:
+                        segments.append(seg)
+                    current = []
+                    i += 1
+                    continue
         current.append(c)
         i += 1
 
@@ -101,12 +109,16 @@ def _split_command_segments(command: str) -> list[str]:
     return segments or [command.strip()] if command.strip() else []
 
 
+_WRAPPERS = {"command", "nohup", "time", "exec", "nice", "setsid"}
+
+
 def _strip_leading_prefixes(tokens: list[str]) -> list[str]:
     i = 0
     n = len(tokens)
     while i < n:
         tok = tokens[i]
-        if tok == "sudo":
+        base = os.path.basename(tok)
+        if base == "sudo":
             i += 1
             while i < n and tokens[i].startswith("-"):
                 flag = tokens[i]
@@ -114,12 +126,20 @@ def _strip_leading_prefixes(tokens: list[str]) -> list[str]:
                 if flag in ("-u", "-g", "-C") and i < n:
                     i += 1
             continue
-        if tok == "env":
+        if base == "env":
             i += 1
             while i < n and tokens[i].startswith("-"):
                 flag = tokens[i]
                 i += 1
                 if flag in ("-u", "-S") and i < n:
+                    i += 1
+            continue
+        if base in _WRAPPERS:
+            i += 1
+            while i < n and tokens[i].startswith("-"):
+                flag = tokens[i]
+                i += 1
+                if flag in ("-n", "--adjustment", "-a", "-u") and i < n and not tokens[i].startswith("-"):
                     i += 1
             continue
         if _ENV_VAR_RE.match(tok):
@@ -129,17 +149,104 @@ def _strip_leading_prefixes(tokens: list[str]) -> list[str]:
     return tokens[i:]
 
 
+def _extract_sh_c_command(tokens: list[str]) -> str | None:
+    stripped = _strip_leading_prefixes(tokens)
+    if not stripped:
+        return None
+    prog = os.path.basename(stripped[0])
+    if prog not in ("bash", "sh"):
+        return None
+    args = stripped[1:]
+    i = 0
+    n = len(args)
+    while i < n:
+        arg = args[i]
+        if arg == "-c":
+            if i + 1 < n:
+                return args[i + 1]
+            return None
+        if arg.startswith("-") and not arg.startswith("--"):
+            if "c" in arg[1:]:
+                if i + 1 < n:
+                    return args[i + 1]
+                return None
+            if arg in ("-o", "+o") and i + 1 < n:
+                i += 1
+            i += 1
+            continue
+        if arg.startswith("--"):
+            if arg in ("--rcfile",):
+                if i + 1 < n:
+                    i += 1
+            i += 1
+            continue
+        break
+    return None
+
+
 def _is_rsync_host(arg: str) -> bool:
     if arg.startswith(("-", "/", "./", "../")):
         return False
     return bool(_RSYNC_HOST_RE.search(arg))
 
 
+_CURL_OPT_WITH_ARG = {
+    "-X",
+    "--request",
+    "-H",
+    "--header",
+    "-d",
+    "--data",
+    "--data-raw",
+    "--data-binary",
+    "-u",
+    "--user",
+    "-o",
+    "--output",
+    "-A",
+    "--user-agent",
+    "-e",
+    "--referer",
+    "-m",
+    "--max-time",
+    "--connect-timeout",
+    "-b",
+    "--cookie",
+    "-c",
+    "--cookie-jar",
+    "-F",
+    "--form",
+    "-T",
+    "--upload-file",
+    "--cacert",
+    "--cert",
+    "--key",
+    "-w",
+    "--write-out",
+    "--resolve",
+    "-K",
+    "--config",
+    "--proxy",
+    "-x",
+    "--retry",
+    "-r",
+    "--range",
+    "-C",
+}
+
+
 def _extract_curl_wget_domains(tokens: list[str]) -> list[str]:
     domains: list[str] = []
     args = tokens[1:]
 
+    skip_next = False
     for arg in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in _CURL_OPT_WITH_ARG:
+            skip_next = True
+            continue
         if "://" in arg:
             host = _extract_domain(arg)
             if host:
@@ -147,43 +254,11 @@ def _extract_curl_wget_domains(tokens: list[str]) -> list[str]:
 
     if not domains:
         skip_next = False
-        curl_opt_with_arg = {
-            "-X",
-            "--request",
-            "-H",
-            "--header",
-            "-d",
-            "--data",
-            "--data-raw",
-            "--data-binary",
-            "-u",
-            "--user",
-            "-o",
-            "--output",
-            "-A",
-            "--user-agent",
-            "-e",
-            "--referer",
-            "-m",
-            "--max-time",
-            "--connect-timeout",
-            "-b",
-            "--cookie",
-            "-c",
-            "--cookie-jar",
-            "-F",
-            "--form",
-            "-T",
-            "--upload-file",
-            "--cacert",
-            "--cert",
-            "--key",
-        }
         for arg in args:
             if skip_next:
                 skip_next = False
                 continue
-            if arg in curl_opt_with_arg:
+            if arg in _CURL_OPT_WITH_ARG:
                 skip_next = True
                 continue
             if arg.startswith("-"):
@@ -200,7 +275,7 @@ def _is_outward_segment(tokens: list[str]) -> bool:
     if not stripped:
         return False
 
-    prog = stripped[0]
+    prog = os.path.basename(stripped[0])
     args = stripped[1:]
 
     if prog == "git":
@@ -235,7 +310,10 @@ def _is_outward_segment(tokens: list[str]) -> bool:
         return False
 
     if prog == "scp":
-        return True
+        for a in args:
+            if _is_rsync_host(a):
+                return True
+        return False
 
     if prog == "rsync":
         for a in args:
@@ -245,14 +323,7 @@ def _is_outward_segment(tokens: list[str]) -> bool:
 
     if prog in ("curl", "wget"):
         domains = _extract_curl_wget_domains(stripped)
-        if domains:
-            return any(not _is_allowlisted_domain(d) for d in domains)
-        for a in args:
-            if not a.startswith("-"):
-                host = _extract_domain(a)
-                if host and not _is_allowlisted_domain(host):
-                    return True
-        return False
+        return any(not _is_allowlisted_domain(d) for d in domains)
 
     return False
 
@@ -330,6 +401,13 @@ def _parse_git_detail(tokens: list[str]) -> dict[str, Any]:
     return detail
 
 
+def _copy_detail(detail: dict[str, Any]) -> dict[str, Any]:
+    copied = dict(detail)
+    if "argv" in copied and isinstance(copied["argv"], list):
+        copied["argv"] = list(copied["argv"])
+    return copied
+
+
 def classify_command(command: str, cwd: str | None = None) -> list[Classified]:
     try:
         argv = shlex.split(command)
@@ -349,7 +427,7 @@ def classify_command(command: str, cwd: str | None = None) -> list[Classified]:
             first_seg_tokens = [segments[0]]
 
         stripped_first = _strip_leading_prefixes(first_seg_tokens)
-        if stripped_first and stripped_first[0] == "git":
+        if stripped_first and os.path.basename(stripped_first[0]) == "git":
             if not _is_outward_segment(first_seg_tokens):
                 is_git_kind = True
                 git_detail = _parse_git_detail(stripped_first)
@@ -365,15 +443,28 @@ def classify_command(command: str, cwd: str | None = None) -> list[Classified]:
 
     events: list[Classified] = [Classified(kind=primary_kind, target=command, detail=primary_detail)]
 
-    # Check each segment for outward items
+    # Collect segments to scan for outward items
+    segments_to_scan: list[str] = []
     for seg in segments:
+        segments_to_scan.append(seg)
+        try:
+            seg_tokens = shlex.split(seg)
+        except ValueError:
+            seg_tokens = [seg]
+        inner_cmd = _extract_sh_c_command(seg_tokens)
+        if inner_cmd:
+            inner_segs = _split_command_segments(inner_cmd)
+            segments_to_scan.extend(inner_segs)
+
+    # Check each segment for outward items
+    for seg in segments_to_scan:
         try:
             seg_tokens = shlex.split(seg)
         except ValueError:
             seg_tokens = [seg]
 
         if _is_outward_segment(seg_tokens):
-            events.append(Classified(kind="outward", target=seg, detail=primary_detail))
+            events.append(Classified(kind="outward", target=seg, detail=_copy_detail(primary_detail)))
 
     return events
 
@@ -406,7 +497,7 @@ def classify(host: str, tool_name: str, tool_input: dict[str, Any] | None) -> li
             detail = {"domain": domain, "method": "GET"}
             events = [Classified(kind="net", target=domain, detail=detail)]
             if not _is_allowlisted_domain(domain):
-                events.append(Classified(kind="outward", target=domain, detail=detail))
+                events.append(Classified(kind="outward", target=domain, detail=_copy_detail(detail)))
             return events
 
         if tool_name == "WebSearch":
