@@ -290,9 +290,24 @@ def _agy_installed() -> tuple[set[str], str | None]:
     if failure := _failure(proc):
         return set(), f"agy list failed: {failure}"
     try:
-        return {p["name"] for p in json.loads(proc.stdout)["imports"]}, None
+        data = json.loads(proc.stdout)
+        return {p["name"] for p in data["imports"]}, None
     except (ValueError, KeyError, TypeError, AttributeError):
-        return set(), "agy list output not understood"
+        pass
+    lines = proc.stdout.strip().splitlines()
+    if lines and lines[0].strip() == "Installed plugins:":
+        names = set()
+        for line in lines[1:]:
+            if not line.strip() or line.startswith((" ", "\t")):
+                continue
+            if line.startswith("- ") and " (" in line:
+                name = line[2:].split(" (", 1)[0].strip()
+                if name:
+                    names.add(name)
+                    continue
+            return set(), "agy list output not understood"
+        return names, None
+    return set(), "agy list output not understood"
 
 
 def _codex_row(cfg: HubConfig, name: str, directory: Path, listed: set[str], installed: dict[str, str]) -> Row:
