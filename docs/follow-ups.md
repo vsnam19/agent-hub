@@ -154,3 +154,11 @@ Started by hand on 2026-10-19 (4 entries). To build: `agent-hub incident add …
 of kind `incident`); `skillmine.mine` reads it; the weekly report shows counts per kind per week and the top cost,
 and drafts a `learned-director` lesson when one kind repeats ≥ 3 times; the orchestrate skill tells the director to
 log one whenever a task blocks or fails for a reason that is not the implementer's.
+
+## From plan `phase-g` (2026-10-19)
+
+- **Plan runner ignores a `blocked` handoff:** `audit-codex-fixture` ended `done` (gate passed, nothing committed)
+  while its handoff said `Status: blocked`. A blocked handoff should make the task `blocked`.
+- **Real codex `PostToolUse` payload fixture:** not captured (temp `CODEX_HOME` → 401; codex monthly limit until
+  2026-11-06). The codex normaliser uses the schema embedded in the codex 0.152.1 binary. Capture a real payload when
+  quota returns and replace/extend the fixture.
