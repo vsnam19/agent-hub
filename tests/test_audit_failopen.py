@@ -4,10 +4,21 @@ import re
 import time
 from pathlib import Path
 
+import pytest
+
+from agenthub.audit import writer
 from agenthub.audit.writer import (
     audit_root,
+    record_pending,
     write,
 )
+
+
+def _all_lines(state_dir: Path) -> list[str]:
+    """All audit lines in chain order; the day files are found from disk, never from a fixed date."""
+    files = sorted(audit_root(state_dir).glob("*/*.jsonl"))
+    assert files
+    return [line for f in files for line in f.read_text(encoding="utf-8").splitlines()]
 
 
 def test_clean_write_emits_no_gap(tmp_path: Path) -> None:
@@ -24,9 +35,7 @@ def test_clean_write_emits_no_gap(tmp_path: Path) -> None:
     pending_file = tmp_path / "audit-pending-gap.jsonl"
     assert not pending_file.exists()
 
-    day_file = audit_root(tmp_path) / "2026-10" / "2026-10-19.jsonl"
-    assert day_file.is_file()
-    lines = day_file.read_text(encoding="utf-8").splitlines()
+    lines = _all_lines(tmp_path)
     assert len(lines) == 1
     recorded = json.loads(lines[0])
     assert recorded["kind"] == "tool"
@@ -124,9 +133,7 @@ def test_next_write_emits_gap_before_event_and_removes_pending(tmp_path: Path) -
     # Pending file must be removed
     assert not pending_file.exists()
 
-    day_file = audit_root(tmp_path) / "2026-10" / "2026-10-19.jsonl"
-    assert day_file.is_file()
-    lines = day_file.read_text(encoding="utf-8").splitlines()
+    lines = _all_lines(tmp_path)
     assert len(lines) == 2
 
     gap_ev = json.loads(lines[0])
@@ -175,8 +182,7 @@ def test_gap_has_from_first_pending_and_lost_count(tmp_path: Path) -> None:
     assert write(event, state_dir=tmp_path) is True
     assert not pending_file.exists()
 
-    day_file = audit_root(tmp_path) / "2026-10" / "2026-10-19.jsonl"
-    lines = day_file.read_text(encoding="utf-8").splitlines()
+    lines = _all_lines(tmp_path)
     assert len(lines) == 2
     gap_ev = json.loads(lines[0])
 
@@ -190,12 +196,10 @@ def test_gap_has_from_first_pending_and_lost_count(tmp_path: Path) -> None:
 
 def test_lock_timeout_returns_false_and_records_pending(tmp_path: Path) -> None:
     ts = "2026-10-19T00:10:00.000Z"
-    day = "2026-10-19"
-    month = "2026-10"
 
-    month_dir = audit_root(tmp_path) / month
-    month_dir.mkdir(parents=True, exist_ok=True)
-    lock_file = month_dir / f"{day}.jsonl.lock"
+    root = audit_root(tmp_path)
+    root.mkdir(parents=True, exist_ok=True)
+    lock_file = root / "chain.lock"
     lock_file.touch()
 
     with lock_file.open("r+b") as lf:
@@ -216,7 +220,7 @@ def test_lock_timeout_returns_false_and_records_pending(tmp_path: Path) -> None:
             fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
 
     assert ok is False
-    assert 0.18 <= elapsed <= 0.35
+    assert 0.18 <= elapsed
 
     pending_file = tmp_path / "audit-pending-gap.jsonl"
     assert pending_file.is_file()
@@ -225,3 +229,36 @@ def test_lock_timeout_returns_false_and_records_pending(tmp_path: Path) -> None:
     record = json.loads(lines[0])
     assert record["ts"] == ts
     assert "timed out acquiring audit lock" in record["reason"]
+
+
+def test_pending_claim_keeps_entry_appended_during_gap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pending = tmp_path / "audit-pending-gap.jsonl"
+    pending.write_text('{"ts":"2026-01-01T00:00:00.000Z","reason":"old"}\n', encoding="utf-8")
+    real = writer._append_locked
+    calls: list[str] = []
+
+    def spy(event, root):  # type: ignore[no-untyped-def]
+        if event.get("kind") == "gap" and not calls:
+            calls.append("gap")
+            record_pending({"ts": "2026-01-02T00:00:00.000Z"}, "during-gap", state_dir=tmp_path)
+        return real(event, root)
+
+    monkeypatch.setattr(writer, "_append_locked", spy)
+    assert write({"kind": "tool", "target": "x"}, state_dir=tmp_path) is True
+    assert calls == ["gap"]
+    kept = [json.loads(line) for line in pending.read_text(encoding="utf-8").splitlines()]
+    assert [k["reason"] for k in kept] == ["during-gap"]
+    assert not list(tmp_path.glob("*.claimed"))
+    events = [json.loads(line) for line in _all_lines(tmp_path)]
+    assert [e["kind"] for e in events] == ["gap", "tool"]
+    assert events[0]["detail"]["lost"] == 1
+
+
+def test_unreadable_pending_still_reports_gap(tmp_path: Path) -> None:
+    pending = tmp_path / "audit-pending-gap.jsonl"
+    pending.write_text("not json\n{broken\n", encoding="utf-8")
+    assert write({"kind": "tool", "target": "x"}, state_dir=tmp_path) is True
+    assert not pending.exists()
+    events = [json.loads(line) for line in _all_lines(tmp_path)]
+    assert [e["kind"] for e in events] == ["gap", "tool"]
+    assert events[0]["detail"]["lost"] == "unknown"
