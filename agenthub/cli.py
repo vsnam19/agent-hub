@@ -70,6 +70,19 @@ SKILLS_SPEC = ScheduleSpec(
     default_calendar=SCHEDULE_DEFAULT_AT,
 )
 
+AUDIT_SCHEDULE_UNIT = "agent-hub-audit-archive"
+AUDIT_SCHEDULE_DEFAULT_AT = "Sun *-*-01..07 21:17:00"
+
+
+AUDIT_SPEC = ScheduleSpec(
+    unit=AUDIT_SCHEDULE_UNIT,
+    service_description="agent-hub audit log archive, monthly",
+    timer_description="Run agent-hub audit archive monthly",
+    subcommand="audit archive",
+    timeout="1h",
+    default_calendar=AUDIT_SCHEDULE_DEFAULT_AT,
+)
+
 
 class UsageError(Exception):
     pass
@@ -354,6 +367,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
     audit_archive = audit_sub.add_parser("archive", help="archive a month to the vault")
     audit_archive.add_argument("--month", metavar="YYYY-MM", help="month to archive (default: previous calendar month)")
+
+    audit_schedule = audit_sub.add_parser(
+        "schedule", help="archive the audit log monthly on a systemd user timer (dry-run unless --apply)"
+    )
+    audit_schedule_mode = audit_schedule.add_mutually_exclusive_group()
+    audit_schedule_mode.add_argument("--apply", action="store_true", help="write the units and enable the timer")
+    audit_schedule_mode.add_argument("--remove", action="store_true", help="disable the timer and delete its units")
+    audit_schedule.add_argument(
+        "--at",
+        default=AUDIT_SCHEDULE_DEFAULT_AT,
+        help=f'systemd calendar expression (default "{AUDIT_SCHEDULE_DEFAULT_AT}")',
+    )
 
     sub.add_parser("mcp", help="run the MCP server over stdio")
 
@@ -874,6 +899,10 @@ def _cmd_audit_archive(args) -> int:
     return res.exit_code
 
 
+def _cmd_audit_schedule(args) -> int:
+    return _cmd_schedule(args, AUDIT_SPEC)
+
+
 def _cmd_audit(args) -> int:
     if args.audit_command == "show":
         return _cmd_audit_show(args)
@@ -883,6 +912,8 @@ def _cmd_audit(args) -> int:
         return _cmd_audit_outward(args)
     if args.audit_command == "archive":
         return _cmd_audit_archive(args)
+    if args.audit_command == "schedule":
+        return _cmd_audit_schedule(args)
     raise UsageError(f"unknown audit command: {args.audit_command}")
 
 
