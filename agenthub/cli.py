@@ -352,6 +352,9 @@ def _build_parser() -> argparse.ArgumentParser:
     audit_outward.add_argument("--since", help="filter events since date, iso timestamp, or relative time")
     audit_outward.add_argument("--json", action="store_true", help="output one JSON object per line")
 
+    audit_archive = audit_sub.add_parser("archive", help="archive a month to the vault")
+    audit_archive.add_argument("--month", metavar="YYYY-MM", help="month to archive (default: previous calendar month)")
+
     sub.add_parser("mcp", help="run the MCP server over stdio")
 
     hook = sub.add_parser("hook", help="Claude Code session hooks")
@@ -854,6 +857,23 @@ def _cmd_audit_outward(args) -> int:
     return 0
 
 
+def _cmd_audit_archive(args) -> int:
+    from agenthub.audit.archive import ArchiveError, archive_month
+
+    state_dir = paths().state_dir
+    try:
+        res = archive_month(month=args.month, state_dir=state_dir)
+    except ArchiveError as exc:
+        print(_safe(str(exc), sys.stderr), file=sys.stderr)
+        return 1
+
+    if res.exit_code != 0:
+        print(_safe(res.message, sys.stderr), file=sys.stderr)
+    else:
+        print(_safe(res.message))
+    return res.exit_code
+
+
 def _cmd_audit(args) -> int:
     if args.audit_command == "show":
         return _cmd_audit_show(args)
@@ -861,6 +881,8 @@ def _cmd_audit(args) -> int:
         return _cmd_audit_verify(args)
     if args.audit_command == "outward":
         return _cmd_audit_outward(args)
+    if args.audit_command == "archive":
+        return _cmd_audit_archive(args)
     raise UsageError(f"unknown audit command: {args.audit_command}")
 
 
