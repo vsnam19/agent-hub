@@ -3,7 +3,10 @@ import json
 import multiprocessing
 import os
 import re
+import signal
 import stat
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -305,3 +308,96 @@ def test_lock_deadline_shared_by_gap_and_event(tmp_path: Path) -> None:
     lines = (tmp_path / "audit-pending-gap.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
     assert not list(tmp_path.glob("*.claimed"))
+
+
+def _pending_entry(ts: str, reason: str) -> str:
+    return canonical_json({"ts": ts, "reason": reason}) + "\n"
+
+
+def _day_events(state_dir: Path) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for df in sorted(audit_root(state_dir).glob("*/*.jsonl")):
+        events.extend(json.loads(line) for line in df.read_text(encoding="utf-8").splitlines() if line.strip())
+    return events
+
+
+def test_fix_5_orphaned_claimed_file_joins_the_gap(tmp_path: Path) -> None:
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    dead = tmp_path / f"audit-pending-gap.{proc.pid}.claimed"
+    dead.write_text(_pending_entry("2026-10-18T00:00:00.000Z", "a") + _pending_entry("2026-10-18T00:00:01.000Z", "b"))
+    alive = tmp_path / f"audit-pending-gap.{os.getppid()}.claimed"
+    alive.write_text(_pending_entry("2026-10-18T00:00:02.000Z", "c"))
+    (tmp_path / "audit-pending-gap.jsonl").write_text(_pending_entry("2026-10-18T00:00:03.000Z", "d"))
+
+    assert writer.write({"ts": "2026-10-19T10:00:00.000Z", "kind": "command"}, state_dir=tmp_path) is True
+
+    events = _day_events(tmp_path)
+    gaps = [e for e in events if e["kind"] == "gap"]
+    assert len(gaps) == 1
+    assert gaps[0]["detail"]["lost"] == 3  # type: ignore[index]
+    assert not dead.exists()
+    assert alive.exists()
+    assert not (tmp_path / "audit-pending-gap.jsonl").exists()
+
+
+class _Boom(Exception):
+    pass
+
+
+def test_fix_9_inner_handlers_do_not_hide_timeouts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "audit-pending-gap.jsonl").write_text(_pending_entry("2026-10-18T00:00:00.000Z", "x"))
+    real_read = Path.read_bytes
+
+    def boom_read(self: Path) -> bytes:
+        if self.name.endswith(".claimed"):
+            raise _Boom("timeout")
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", boom_read)
+    assert writer.write({"ts": "2026-10-19T10:00:00.000Z", "kind": "command"}, state_dir=tmp_path) is False
+    monkeypatch.undo()
+
+    assert _day_events(tmp_path) == []
+
+
+def test_fix_9_no_pending_for_event_already_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom_fsync(fd: int) -> None:
+        raise _Boom("timeout after write")
+
+    monkeypatch.setattr(os, "fsync", boom_fsync)
+    ok = writer.write({"ts": "2026-10-19T10:00:00.000Z", "kind": "command", "target": "x"}, state_dir=tmp_path)
+    monkeypatch.undo()
+
+    assert ok is False
+    assert [e["target"] for e in _day_events(tmp_path)] == ["x"]
+    assert not (tmp_path / "audit-pending-gap.jsonl").exists()
+
+
+def test_fix_9_record_pending_survives_sigalrm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fired: list[bool] = []
+
+    def handler(_signum: int, _frame: object) -> None:
+        fired.append(True)
+        raise _Boom("alarm")
+
+    old = signal.signal(signal.SIGALRM, handler)
+    real_write = os.write
+    state = {"raised": False}
+
+    def alarm_write(fd: int, data: bytes) -> int:
+        if not state["raised"]:
+            state["raised"] = True
+            signal.raise_signal(signal.SIGALRM)
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", alarm_write)
+    try:
+        writer.record_pending({"ts": "2026-10-19T10:00:00.000Z"}, "hook timeout", state_dir=tmp_path)
+    finally:
+        monkeypatch.undo()
+        signal.signal(signal.SIGALRM, old)
+
+    lines = (tmp_path / "audit-pending-gap.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["reason"] == "hook timeout"

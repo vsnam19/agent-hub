@@ -1,6 +1,10 @@
 import json
+import os
 from pathlib import Path
 
+import pytest
+
+from agenthub.audit import writer
 from agenthub.audit.verify import verify
 from agenthub.audit.writer import ZERO_HASH, append, audit_root
 
@@ -169,3 +173,129 @@ def test_unreadable_manifest_falls_back(tmp_path: Path) -> None:
 
     assert ev["seq"] == 1
     assert ev["prev_hash"] == "b" * 64
+
+
+def _ev(ts: str | None, target: str) -> dict[str, object]:
+    ev: dict[str, object] = {"kind": "tool", "target": target}
+    if ts is not None:
+        ev["ts"] = ts
+    return ev
+
+
+def test_fix_2_monotonic_clamp_when_now_is_earlier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    append(_ev("2026-10-18T10:00:00.000Z", "first"), state_dir=tmp_path)
+    monkeypatch.setattr(writer, "_utc_now_iso", lambda: "2026-10-18T09:00:00.000Z")
+
+    rec = append(_ev(None, "second"), state_dir=tmp_path)
+
+    assert rec["ts"] == "2026-10-18T10:00:00.000Z"
+    assert rec["event_ts"] == "2026-10-18T09:00:00.000Z"
+    assert verify(state_dir=tmp_path).ok
+
+
+def test_fix_3_newer_manifest_wins_over_older_local_month(tmp_path: Path) -> None:
+    append(_ev("2026-09-10T10:00:00.000Z", "sept"), state_dir=tmp_path)
+    root = audit_root(tmp_path)
+    manifests = root / "manifests"
+    manifests.mkdir()
+    (manifests / "2026-10.json").write_text(json.dumps({"month": "2026-10", "last_hash": "d" * 64}), encoding="utf-8")
+
+    last_ev, last_day, prev_hash = writer._read_chain_tail(root)
+    assert last_ev is None
+    assert last_day == ""
+    assert prev_hash == "d" * 64
+
+    # an older manifest loses against the newer local month
+    (manifests / "2026-10.json").unlink()
+    (manifests / "2026-08.json").write_text(json.dumps({"month": "2026-08", "last_hash": "e" * 64}), encoding="utf-8")
+    last_ev, last_day, prev_hash = writer._read_chain_tail(root)
+    assert last_ev is not None
+    assert last_day == "2026-09-10"
+    assert prev_hash == last_ev["hash"]
+
+
+def test_fix_4_tail_read_is_chunked_not_whole_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for i in range(60):
+        append(_ev(f"2026-10-18T10:00:{i:02d}.000Z", f"t{i}"), state_dir=tmp_path)
+    root = audit_root(tmp_path)
+    day_file = root / "2026-10" / "2026-10-18.jsonl"
+    monkeypatch.setattr(writer, "_SEEK_CHUNK_BYTES", 64)
+
+    text_opens: list[object] = []
+    real_open = Path.open
+
+    def spy_open(self: Path, mode: str = "r", *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        if self == day_file and "b" not in mode:
+            text_opens.append(mode)
+        return real_open(self, mode, *args, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(Path, "open", spy_open)
+    last_ev, last_day, _ = writer._read_chain_tail(root)
+    assert last_ev is not None
+    assert last_ev["target"] == "t59"
+    assert last_day == "2026-10-18"
+    assert text_opens == []
+
+    # a corrupt last line is the only case that scans further back
+    with real_open(day_file, "a", encoding="utf-8") as f:
+        f.write("{corrupt\n")
+    last_ev, _, _ = writer._read_chain_tail(root)
+    assert last_ev is not None
+    assert last_ev["target"] == "t59"
+    assert text_opens != []
+
+
+def test_fix_6_corrupt_tail_gap_ts_is_monotonic(tmp_path: Path) -> None:
+    append(_ev("2026-10-18T10:00:00.000Z", "first"), state_dir=tmp_path)
+    day_file = audit_root(tmp_path) / "2026-10" / "2026-10-18.jsonl"
+    with day_file.open("a", encoding="utf-8") as f:
+        f.write("{broken\n")
+
+    rec = append(_ev("2026-10-18T09:00:00.000Z", "second"), state_dir=tmp_path)
+
+    lines = _all_day_lines(day_file)
+    gap = json.loads(lines[2])
+    assert gap["kind"] == "gap"
+    assert gap["ts"] == "2026-10-18T10:00:00.000Z"
+    assert gap["event_ts"] == "2026-10-18T09:00:00.000Z"
+    assert rec["ts"] == "2026-10-18T10:00:00.000Z"
+
+
+def test_fix_7_earlier_day_ts_after_corrupt_tail_writes_one_gap(tmp_path: Path) -> None:
+    append(_ev("2026-10-18T10:00:00.000Z", "first"), state_dir=tmp_path)
+    root = audit_root(tmp_path)
+    day_file = root / "2026-10" / "2026-10-18.jsonl"
+    with day_file.open("a", encoding="utf-8") as f:
+        f.write("{broken\n")
+
+    append(_ev("2026-10-17T09:00:00.000Z", "second"), state_dir=tmp_path)
+    append(_ev("2026-10-17T09:00:01.000Z", "third"), state_dir=tmp_path)
+
+    assert not (root / "2026-10" / "2026-10-17.jsonl").exists()
+    events = [json.loads(line) for line in _all_day_lines(day_file) if line.startswith('{"')]
+    assert [e["kind"] for e in events] == ["tool", "gap", "tool", "tool"]
+
+
+def test_fix_8_separator_and_record_share_one_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    append(_ev("2026-10-18T10:00:00.000Z", "first"), state_dir=tmp_path)
+    day_file = audit_root(tmp_path) / "2026-10" / "2026-10-18.jsonl"
+    with day_file.open("a", encoding="utf-8") as f:
+        f.write('{"ts": "torn')
+
+    writes: list[bytes] = []
+    real_write = os.write
+
+    def spy_write(fd: int, data: bytes) -> int:
+        writes.append(bytes(data))
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", spy_write)
+    append(_ev("2026-10-18T10:02:00.000Z", "second"), state_dir=tmp_path)
+
+    assert b"\n" not in writes
+    gap_writes = [w for w in writes if b'"kind":"gap"' in w]
+    assert len(gap_writes) == 1
+    assert gap_writes[0].startswith(b"\n{") and gap_writes[0].endswith(b"}\n")
+    assert verify(state_dir=tmp_path).ok is False
+    lines = day_file.read_text(encoding="utf-8").splitlines()
+    assert lines[1] == '{"ts": "torn'

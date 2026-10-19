@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import time
 import uuid
 from collections.abc import Mapping
@@ -105,14 +106,14 @@ def _parse_valid_event(raw_line: str | bytes) -> dict[str, Any] | None:
     if isinstance(raw_line, bytes):
         try:
             raw_line = raw_line.decode("utf-8")
-        except Exception:
+        except UnicodeDecodeError:
             return None
     stripped = raw_line.strip()
     if not stripped:
         return None
     try:
         record = json.loads(stripped)
-    except Exception:
+    except (ValueError, RecursionError):
         return None
     if _is_valid_event(record):
         return record
@@ -125,7 +126,7 @@ def _read_last_event(day_file: Path) -> dict[str, Any] | None:
     try:
         with day_file.open("r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
-    except Exception:
+    except (OSError, ValueError):
         return None
     for line in reversed(lines):
         record = _parse_valid_event(line)
@@ -152,55 +153,68 @@ def _collect_day_files(root: Path) -> list[tuple[str, Path]]:
     return candidates
 
 
-def _latest_manifest_hash(root: Path) -> str:
+def _latest_manifest(root: Path) -> tuple[str, str] | None:
+    """Return (month, last_hash) of the newest readable manifest."""
     manifests_dir = root / "manifests"
-    if manifests_dir.is_dir():
-        manifests: list[tuple[str, Path]] = []
-        for entry in manifests_dir.iterdir():
-            m = _MANIFEST_FILE_RE.match(entry.name)
-            if m and entry.is_file():
-                manifests.append((m.group(1), entry))
-        manifests.sort(key=lambda item: item[0], reverse=True)
-        for _, path in manifests:
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if not isinstance(data, dict):
-                continue
-            last_hash = data.get("last_hash")
-            if isinstance(last_hash, str) and last_hash:
-                return last_hash
-    return ZERO_HASH
+    if not manifests_dir.is_dir():
+        return None
+    manifests: list[tuple[str, Path]] = []
+    for entry in manifests_dir.iterdir():
+        m = _MANIFEST_FILE_RE.match(entry.name)
+        if m and entry.is_file():
+            manifests.append((m.group(1), entry))
+    manifests.sort(key=lambda item: item[0], reverse=True)
+    for month, path in manifests:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        last_hash = data.get("last_hash")
+        if isinstance(last_hash, str) and last_hash:
+            return month, last_hash
+    return None
 
 
-def _read_chain_tail_with_corrupt(
-    root: Path,
-) -> tuple[dict[str, Any] | None, str, str, list[tuple[str, int]]]:
-    candidates = _collect_day_files(root)
-    if not candidates:
-        prev_hash = _latest_manifest_hash(root)
-        return None, "", prev_hash, []
+def _latest_manifest_hash(root: Path) -> str:
+    manifest = _latest_manifest(root)
+    return manifest[1] if manifest is not None else ZERO_HASH
 
-    last_day_str, last_day_path = candidates[0]
+
+def _last_line(path: Path) -> bytes | None:
+    """Last non-blank line of a file, read backwards in chunks; None if the file has no text."""
+    with path.open("rb") as f:
+        pos = f.seek(0, os.SEEK_END)
+        buf = b""
+        while pos > 0:
+            step = min(_SEEK_CHUNK_BYTES, pos)
+            pos -= step
+            f.seek(pos)
+            buf = f.read(step) + buf
+            if b"\n" in buf.rstrip():
+                break
+    stripped = buf.rstrip()
+    if not stripped:
+        return None
+    return stripped.rsplit(b"\n", 1)[-1]
+
+
+def _scan_day_file(path: Path) -> tuple[dict[str, Any] | None, list[tuple[str, int]]]:
+    """Last valid event of a day file plus the corrupt trailing lines after it (1-based)."""
     try:
-        with last_day_path.open("r", encoding="utf-8", errors="replace") as f:
+        last = _last_line(path)
+    except OSError:
+        last = None
+    if last is not None:
+        ev = _parse_valid_event(last.decode("utf-8", errors="replace"))
+        if ev is not None:
+            return ev, []
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
-    except Exception:
-        lines = []
-
-    if not lines:
-        for day_name, path in candidates[1:]:
-            ev = _read_last_event(path)
-            if ev is not None:
-                return ev, day_name, str(ev["hash"]), []
-        prev_hash = _latest_manifest_hash(root)
-        return None, "", prev_hash, []
-
-    if ev := _parse_valid_event(lines[-1]):
-        return ev, last_day_str, str(ev["hash"]), []
-
-    # Corrupt tail: scan back to find last valid event
+    except OSError:
+        return None, []
     corrupt_indices: list[int] = []
     valid_ev: dict[str, Any] | None = None
     for idx in range(len(lines) - 1, -1, -1):
@@ -209,19 +223,34 @@ def _read_chain_tail_with_corrupt(
             valid_ev = parsed
             break
         corrupt_indices.append(idx)
+    rel_day_file = f"{path.parent.name}/{path.name}"
+    return valid_ev, [(rel_day_file, idx + 1) for idx in reversed(corrupt_indices)]
 
-    rel_day_file = f"{last_day_path.parent.name}/{last_day_path.name}"
-    corrupt_lines = [(rel_day_file, idx + 1) for idx in reversed(corrupt_indices)]
 
-    if valid_ev is not None:
-        return valid_ev, last_day_str, str(valid_ev["hash"]), corrupt_lines
+def _read_chain_tail_with_corrupt(
+    root: Path,
+) -> tuple[dict[str, Any] | None, str, str, list[tuple[str, int]]]:
+    candidates = _collect_day_files(root)
+    local_ev: dict[str, Any] | None = None
+    local_day = ""
+    corrupt_lines: list[tuple[str, int]] = []
+    if candidates:
+        local_ev, corrupt_lines = _scan_day_file(candidates[0][1])
+        local_day = candidates[0][0]
+        if local_ev is None:
+            local_day = ""
+            for day_name, path in candidates[1:]:
+                ev = _read_last_event(path)
+                if ev is not None:
+                    local_ev, local_day = ev, day_name
+                    break
 
-    for day_name, path in candidates[1:]:
-        ev = _read_last_event(path)
-        if ev is not None:
-            return ev, day_name, str(ev["hash"]), corrupt_lines
-    prev_hash = _latest_manifest_hash(root)
-    return None, "", prev_hash, corrupt_lines
+    manifest = _latest_manifest(root)
+    if manifest is not None and (local_ev is None or local_day[:7] < manifest[0]):
+        return None, "", manifest[1], corrupt_lines
+    if local_ev is not None:
+        return local_ev, local_day, str(local_ev["hash"]), corrupt_lines
+    return None, "", ZERO_HASH, corrupt_lines
 
 
 def _read_chain_tail(root: Path) -> tuple[dict[str, Any] | None, str, str]:
@@ -408,13 +437,19 @@ def sanitize(event: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+_caller_writes = 0
+
+
 def _write_record_to_file(
     record: dict[str, Any],
     root: Path,
     last_ev: dict[str, Any] | None,
     last_day: str,
     prev_hash: str,
+    *,
+    caller: bool = False,
 ) -> tuple[dict[str, Any], str, str]:
+    global _caller_writes
     day = _day_from_ts(record["ts"])
     month_dir = root / day[:7]
     _ensure_dir_0700(month_dir)
@@ -429,91 +464,68 @@ def _write_record_to_file(
     record["hash"] = event_hash(prev_hash, record)
 
     line_bytes = (canonical_json(record) + "\n").encode("utf-8")
-    if day_file.is_file() and day_file.stat().st_size > 0:
-        try:
-            with day_file.open("rb") as f:
-                f.seek(-1, os.SEEK_END)
-                last_byte = f.read(1)
-            if last_byte != b"\n":
-                with day_file.open("ab") as f:
-                    f.write(b"\n")
-        except Exception:
-            pass
-
-    fd = os.open(day_file, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+    fd = os.open(day_file, os.O_CREAT | os.O_RDWR | os.O_APPEND, 0o600)
     try:
         os.fchmod(fd, 0o600)
+        size = os.fstat(fd).st_size
+        if size > 0 and os.pread(fd, 1, size - 1) != b"\n":
+            # torn tail: separate it from our record in the same write
+            line_bytes = b"\n" + line_bytes
         os.write(fd, line_bytes)
+        if caller:
+            _caller_writes += 1
         os.fsync(fd)
     finally:
         os.close(fd)
     return record, day, str(record["hash"])
 
 
+def _stamp_ts(record: dict[str, Any], last_ev: dict[str, Any] | None) -> None:
+    """Fill a missing ts with now and keep ts monotonic; the earlier value moves to event_ts."""
+    if not record.get("ts"):
+        record["ts"] = _utc_now_iso()
+    if last_ev is None:
+        return
+    new_dt = _parse_ts(record["ts"])
+    last_dt = _parse_ts(last_ev.get("ts"))
+    if new_dt is not None and last_dt is not None and new_dt < last_dt:
+        record["event_ts"] = record["ts"]
+        record["ts"] = last_ev["ts"]
+
+
 def _append_locked(event: Mapping[str, Any], root: Path) -> dict[str, Any]:
     """Append one event; the caller holds the chain lock."""
     last_ev, last_day, prev_hash, corrupt_lines = _read_chain_tail_with_corrupt(root)
 
-    if corrupt_lines:
-        for rel_day_file, line_no in corrupt_lines:
-            corrupt_day = Path(rel_day_file).stem
-            last_ts = last_ev.get("ts") if (last_ev and "ts" in last_ev) else None
-            caller_ts = event.get("ts")
-            if isinstance(caller_ts, str) and caller_ts:
-                c_day = _day_from_ts(caller_ts)
-                if c_day == corrupt_day:
-                    gap_ts = caller_ts
-                elif c_day > corrupt_day:
-                    gap_ts = (
-                        last_ts
-                        if (last_ts and _day_from_ts(last_ts) == corrupt_day)
-                        else f"{corrupt_day}T23:59:59.999Z"
-                    )
-                else:
-                    gap_ts = last_ts or f"{corrupt_day}T00:00:00.000Z"
-            else:
-                now = _utc_now_iso()
-                if _day_from_ts(now) == corrupt_day:
-                    gap_ts = now
-                else:
-                    gap_ts = (
-                        last_ts
-                        if (last_ts and _day_from_ts(last_ts) == corrupt_day)
-                        else f"{corrupt_day}T23:59:59.999Z"
-                    )
-
-            gap_event = {
-                "ts": gap_ts,
-                "kind": "gap",
-                "actor": {"role": "agent-hub", "host": "agent-hub"},
-                "target": "",
-                "outcome": {"status": "ok"},
-                "detail": {
-                    "from": last_ts or gap_ts,
-                    "to": gap_ts,
-                    "reason": f"corrupt-tail {rel_day_file}:{line_no}",
-                    "lost": 1,
-                },
-                "schema_version": 1,
-                "event_id": uuid.uuid4().hex,
-            }
-            last_ev, last_day, prev_hash = _write_record_to_file(gap_event, root, last_ev, last_day, prev_hash)
+    for rel_day_file, line_no in corrupt_lines:
+        corrupt_day = Path(rel_day_file).stem
+        last_ts = last_ev.get("ts") if last_ev else None
+        gap_event: dict[str, Any] = {
+            "ts": event.get("ts"),
+            "kind": "gap",
+            "actor": {"role": "agent-hub", "host": "agent-hub"},
+            "target": "",
+            "outcome": {"status": "ok"},
+            "detail": {"reason": f"corrupt-tail {rel_day_file}:{line_no}", "lost": 1},
+            "schema_version": 1,
+            "event_id": uuid.uuid4().hex,
+        }
+        _stamp_ts(gap_event, last_ev)
+        if _day_from_ts(gap_event["ts"]) < corrupt_day:
+            # keep the corrupt file from staying the latest one (clock far behind)
+            gap_event.setdefault("event_ts", gap_event["ts"])
+            gap_event["ts"] = f"{corrupt_day}T00:00:00.000Z"
+        gap_event["detail"]["from"] = last_ts or gap_event["ts"]
+        gap_event["detail"]["to"] = gap_event["ts"]
+        last_ev, last_day, prev_hash = _write_record_to_file(gap_event, root, last_ev, last_day, prev_hash)
 
     record: dict[str, Any] = sanitize(event)
     record["schema_version"] = 1
     if "event_id" not in record or record["event_id"] is None:
         record["event_id"] = uuid.uuid4().hex
+    _stamp_ts(record, last_ev)
 
-    if record.get("ts") is None:
-        record["ts"] = _utc_now_iso()
-    elif last_ev is not None:
-        new_dt = _parse_ts(record["ts"])
-        last_dt = _parse_ts(last_ev.get("ts"))
-        if new_dt is not None and last_dt is not None and new_dt < last_dt:
-            record["event_ts"] = record["ts"]
-            record["ts"] = last_ev["ts"]
-
-    caller_rec, _, _ = _write_record_to_file(record, root, last_ev, last_day, prev_hash)
+    caller_rec, _, _ = _write_record_to_file(record, root, last_ev, last_day, prev_hash, caller=True)
     return caller_rec
 
 
@@ -543,6 +555,26 @@ def _pending_gap_path(state_dir: Path | str | None = None) -> Path:
     return base / "audit-pending-gap.jsonl"
 
 
+def _pid_is_dead(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _orphaned_claims(pending_path: Path) -> list[Path]:
+    """Claimed pending files left by processes that no longer exist."""
+    found: list[Path] = []
+    for path in sorted(pending_path.parent.glob("audit-pending-gap.*.claimed")):
+        pid_text = path.name[len("audit-pending-gap.") : -len(".claimed")]
+        if pid_text.isdigit() and int(pid_text) != os.getpid() and _pid_is_dead(int(pid_text)):
+            found.append(path)
+    return found
+
+
 def _claim_pending_and_emit_gap(root: Path, state_dir: Path | str | None) -> None:
     """Move the pending file aside, report one gap for it; the caller holds the chain lock."""
     pending_path = _pending_gap_path(state_dir)
@@ -555,12 +587,20 @@ def _claim_pending_and_emit_gap(root: Path, state_dir: Path | str | None) -> Non
             pending_path.unlink(missing_ok=True)
         else:
             os.replace(pending_path, claimed)
-    if not claimed.is_file():
+    claims = _orphaned_claims(pending_path)
+    if claimed.is_file():
+        claims.append(claimed)
+    if not claims:
         return
-    try:
-        raw = claimed.read_bytes()
-    except Exception:
-        raw = b""
+    raw = b""
+    unreadable = False
+    for path in claims:
+        try:
+            chunk = path.read_bytes()
+        except (OSError, ValueError):
+            unreadable = True
+            continue
+        raw += chunk if chunk.endswith(b"\n") or not chunk else chunk + b"\n"
     entries: list[dict[str, Any]] = []
     for line in raw.decode("utf-8", errors="replace").splitlines():
         line = line.strip()
@@ -568,12 +608,13 @@ def _claim_pending_and_emit_gap(root: Path, state_dir: Path | str | None) -> Non
             continue
         try:
             item = json.loads(line)
-        except Exception:
+        except (ValueError, RecursionError):
             continue
         if isinstance(item, dict):
             entries.append(item)
-    if not entries and not raw.strip():
-        claimed.unlink(missing_ok=True)
+    if not entries and not raw.strip() and not unreadable:
+        for path in claims:
+            path.unlink(missing_ok=True)
         return
     now = _utc_now_iso()
     gap_event = {
@@ -586,30 +627,41 @@ def _claim_pending_and_emit_gap(root: Path, state_dir: Path | str | None) -> Non
             "from": entries[0].get("ts", now) if entries else now,
             "to": now,
             "reason": entries[0].get("reason", "") if entries else "unreadable pending file",
-            "lost": len(entries) if entries else "unknown",
+            "lost": len(entries) if entries and not unreadable else "unknown",
         },
     }
     try:
         _append_locked(gap_event, root)
     except BaseException:
-        fd = os.open(pending_path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
-        try:
-            os.fchmod(fd, 0o600)
-            os.write(fd, raw if raw.endswith(b"\n") or not raw else raw + b"\n")
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        claimed.unlink(missing_ok=True)
+        if raw:
+            fd = os.open(pending_path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+                os.write(fd, raw)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        for path in claims:
+            path.unlink(missing_ok=True)
         raise
-    claimed.unlink(missing_ok=True)
+    for path in claims:
+        path.unlink(missing_ok=True)
 
 
 def record_pending(event: Mapping[str, Any], reason: str, state_dir: Path | str | None = None) -> None:
+    # a hook timeout (SIGALRM) must not interrupt the write that saves this event
+    blocked = False
+    if hasattr(signal, "pthread_sigmask") and hasattr(signal, "SIGALRM"):
+        try:
+            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+            blocked = True
+        except (OSError, ValueError):
+            pass
     try:
         base = paths().state_dir if state_dir is None else Path(state_dir)
         try:
             base.mkdir(parents=True, exist_ok=True)
-        except Exception:
+        except OSError:
             pass
         path = base / "audit-pending-gap.jsonl"
         event_ts = event.get("ts") if isinstance(event, Mapping) else None
@@ -624,6 +676,12 @@ def record_pending(event: Mapping[str, Any], reason: str, state_dir: Path | str 
             os.close(fd)
     except Exception:
         pass
+    finally:
+        if blocked:
+            try:
+                signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
+            except Exception:
+                pass
 
 
 def _record_pending_failure(event: Mapping[str, Any], exc: Exception, state_dir: Path | str | None = None) -> None:
@@ -631,15 +689,18 @@ def _record_pending_failure(event: Mapping[str, Any], exc: Exception, state_dir:
 
 
 def write(event: Mapping[str, Any], state_dir: Path | str | None = None) -> bool:
+    written_before = _caller_writes
     try:
         deadline = time.monotonic() + _LOCK_DEADLINE_S
         root, lock_fd = _locked_root(state_dir, deadline)
         try:
             _claim_pending_and_emit_gap(root, state_dir)
+            written_before = _caller_writes
             _append_locked(event, root)
         finally:
             _release_lock(lock_fd)
         return True
     except Exception as exc:
-        record_pending(event, str(exc) or type(exc).__name__, state_dir=state_dir)
+        if _caller_writes == written_before:
+            record_pending(event, str(exc) or type(exc).__name__, state_dir=state_dir)
         return False

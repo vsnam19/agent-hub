@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -14,6 +13,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from agenthub.audit import writer as _writer
 from agenthub.audit.emit import emit
 from agenthub.audit.verify import verify
 from agenthub.audit.writer import audit_root
@@ -21,10 +21,8 @@ from agenthub.config import paths
 
 _MONTH_RE = re.compile(r"^(\d{4})-(\d{2})$")
 _DAY_FILE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.jsonl$")
-_LOCK_FILE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.jsonl\.lock$")
 
-_LOCK_RETRY_INTERVAL_S = 0.005
-_LOCK_MAX_RETRIES = 1000  # wait up to 5 seconds
+_CHAIN_LOCK_WAIT_S = 30.0  # a batch job may wait for busy writers longer than a hook can
 
 
 class ArchiveError(Exception):
@@ -126,36 +124,19 @@ def check_month(month: str, today: date | datetime | None = None) -> str:
     return month
 
 
-def _acquire_lock(lock_path: Path) -> int:
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+def _acquire_chain_lock(root: Path) -> int:
+    root.mkdir(parents=True, exist_ok=True)
     try:
-        try:
-            os.fchmod(fd, 0o600)
-        except OSError:
-            pass
-        for attempt in range(_LOCK_MAX_RETRIES + 1):
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return fd
-            except BlockingIOError:
-                if attempt == _LOCK_MAX_RETRIES:
-                    break
-                time.sleep(_LOCK_RETRY_INTERVAL_S)
-    except BaseException:
-        os.close(fd)
-        raise
-
-    os.close(fd)
-    raise ArchiveError(f"timed out acquiring audit lock: {lock_path}")
+        return _writer._acquire_lock(root / "chain.lock", time.monotonic() + _CHAIN_LOCK_WAIT_S)
+    except _writer.AuditLockTimeout as e:
+        raise ArchiveError(str(e)) from e
 
 
 def _release_lock(fd: int) -> None:
     try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        _writer._release_lock(fd)
     except OSError:
         pass
-    finally:
-        os.close(fd)
 
 
 def build_archive(
@@ -165,7 +146,19 @@ def build_archive(
 ) -> BuiltArchive:
     if not isinstance(month, str) or not _MONTH_RE.match(month):
         raise ArchiveError(f"invalid month format: {month!r}, expected YYYY-MM")
+    lock_fd = _acquire_chain_lock(audit_root(state_dir))
+    try:
+        return _build_archive_locked(month, state_dir, tmp_dir)
+    finally:
+        _release_lock(lock_fd)
 
+
+def _build_archive_locked(
+    month: str,
+    state_dir: Path | str | None = None,
+    tmp_dir: Path | str | None = None,
+) -> BuiltArchive:
+    """Build the month archive; the caller holds chain.lock."""
     root = audit_root(state_dir)
     month_dir = root / month
     if not month_dir.is_dir():
@@ -175,109 +168,86 @@ def build_archive(
     if not day_files:
         raise ArchiveError(f"no day files found in {month_dir}")
 
-    # Discover all days with .jsonl files or .lock files to lock every day in that month
-    day_names: set[str] = set()
-    for entry in month_dir.iterdir():
-        m_day = _DAY_FILE_RE.match(entry.name)
-        if m_day:
-            day_names.add(m_day.group(1))
-        m_lock = _LOCK_FILE_RE.match(entry.name)
-        if m_lock:
-            day_names.add(m_lock.group(1))
+    # Verify month log
+    verify_result = verify(state_dir=state_dir, month=month)
+    if not verify_result.ok:
+        raise ArchiveError(f"audit verification failed for {month}: {verify_result.message}")
 
-    sorted_days = sorted(day_names)
-    locked_fds: list[int] = []
+    # Prepare tmp destination
+    if tmp_dir is None:
+        tmp_path = root / "tmp"
+    else:
+        tmp_path = Path(tmp_dir)
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(tmp_path, 0o700)
+    except OSError:
+        pass
+
+    archive_path = tmp_path / f"{month}.tar.xz"
+    created_file: Path | None = None
 
     try:
-        # Take every day lock of that month in turn before verifying and building
-        for day in sorted_days:
-            lock_path = month_dir / f"{day}.jsonl.lock"
-            locked_fds.append(_acquire_lock(lock_path))
-
-        # Verify month log
-        verify_result = verify(state_dir=state_dir, month=month)
-        if not verify_result.ok:
-            raise ArchiveError(f"audit verification failed for {month}: {verify_result.message}")
-
-        # Prepare tmp destination
-        if tmp_dir is None:
-            tmp_path = root / "tmp"
-        else:
-            tmp_path = Path(tmp_dir)
-
-        tmp_path.mkdir(parents=True, exist_ok=True)
+        fd = os.open(archive_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        created_file = archive_path
         try:
-            os.chmod(tmp_path, 0o700)
+            os.fchmod(fd, 0o600)
         except OSError:
             pass
 
-        archive_path = tmp_path / f"{month}.tar.xz"
-        created_file: Path | None = None
+        with open(fd, "wb") as fileobj:
+            with tarfile.open(fileobj=fileobj, mode="w:xz") as tar:
+                for day_file in day_files:
+                    tar.add(day_file, arcname=f"{month}/{day_file.name}")
 
         try:
-            fd = os.open(archive_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-            created_file = archive_path
-            try:
-                os.fchmod(fd, 0o600)
-            except OSError:
-                pass
+            os.chmod(archive_path, 0o600)
+        except OSError:
+            pass
 
-            with open(fd, "wb") as fileobj:
-                with tarfile.open(fileobj=fileobj, mode="w:xz") as tar:
-                    for day_file in day_files:
-                        tar.add(day_file, arcname=f"{month}/{day_file.name}")
+        # Calculate sha256 of the tarball
+        hasher = hashlib.sha256()
+        with archive_path.open("rb") as f:
+            while chunk := f.read(65536):
+                hasher.update(chunk)
+        archive_sha256 = hasher.hexdigest()
 
-            try:
-                os.chmod(archive_path, 0o600)
-            except OSError:
-                pass
+        # Compute event count and boundary hashes
+        total_count = 0
+        first_prev_hash: str | None = None
+        first_hash: str | None = None
+        last_hash: str | None = None
 
-            # Calculate sha256 of the tarball
-            hasher = hashlib.sha256()
-            with archive_path.open("rb") as f:
-                while chunk := f.read(65536):
-                    hasher.update(chunk)
-            archive_sha256 = hasher.hexdigest()
+        for day_file in day_files:
+            with day_file.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line_str = line.strip()
+                    if not line_str:
+                        continue
+                    record = json.loads(line_str)
+                    total_count += 1
+                    if first_hash is None:
+                        first_prev_hash = str(record["prev_hash"])
+                        first_hash = str(record["hash"])
+                    last_hash = str(record["hash"])
 
-            # Compute event count and boundary hashes
-            total_count = 0
-            first_prev_hash: str | None = None
-            first_hash: str | None = None
-            last_hash: str | None = None
+        if total_count == 0 or first_hash is None or first_prev_hash is None or last_hash is None:
+            raise ArchiveError(f"no audit events found in month {month}")
 
-            for day_file in day_files:
-                with day_file.open("r", encoding="utf-8") as f:
-                    for line in f:
-                        line_str = line.strip()
-                        if not line_str:
-                            continue
-                        record = json.loads(line_str)
-                        total_count += 1
-                        if first_hash is None:
-                            first_prev_hash = str(record["prev_hash"])
-                            first_hash = str(record["hash"])
-                        last_hash = str(record["hash"])
-
-            if total_count == 0 or first_hash is None or first_prev_hash is None or last_hash is None:
-                raise ArchiveError(f"no audit events found in month {month}")
-
-            return BuiltArchive(
-                path=archive_path,
-                sha256=archive_sha256,
-                files=[p.name for p in day_files],
-                count=total_count,
-                first_hash=first_hash,
-                first_prev_hash=first_prev_hash,
-                last_hash=last_hash,
-            )
-        except BaseException:
-            if created_file is not None and created_file.exists():
-                created_file.unlink(missing_ok=True)
-            raise
-
-    finally:
-        for fd in locked_fds:
-            _release_lock(fd)
+        return BuiltArchive(
+            path=archive_path,
+            sha256=archive_sha256,
+            files=[p.name for p in day_files],
+            count=total_count,
+            first_hash=first_hash,
+            first_prev_hash=first_prev_hash,
+            last_hash=last_hash,
+        )
+    except BaseException:
+        if created_file is not None and created_file.exists():
+            created_file.unlink(missing_ok=True)
+        raise
 
 
 def _sha256_file(path: Path) -> str:
@@ -327,6 +297,7 @@ def archive_month(
     target_month = month if isinstance(month, str) else ""
 
     built: BuiltArchive | None = None
+    chain_fd: int | None = None
     part_path: Path | None = None
     vault_manifest_part: Path | None = None
     local_manifest_part: Path | None = None
@@ -393,8 +364,9 @@ def archive_month(
         if not os.access(vault_dir, os.W_OK | os.X_OK):
             raise ArchiveError(f"vault audit directory is not writable: {vault_dir}")
 
-        # (b) Build via build_archive
-        built = build_archive(resolved_month, state_dir=resolved_state_dir)
+        # (b) Build under chain.lock: no writer may append while the month is read, packed and deleted
+        chain_fd = _acquire_chain_lock(root)
+        built = _build_archive_locked(resolved_month, state_dir=resolved_state_dir)
 
         # (c) Copy to <name>.tar.xz.part in vault, fsync, rename, and compare sha256
         part_path = vault_dir / f"{resolved_month}.tar.xz.part"
@@ -456,6 +428,8 @@ def archive_month(
         # (e) ONLY THEN delete the local month directory <state>/audit/YYYY-MM/ and write an archive event status ok
         month_dir = root / resolved_month
         shutil.rmtree(month_dir)
+        _release_lock(chain_fd)
+        chain_fd = None
 
         emit(
             "archive",
@@ -478,6 +452,9 @@ def archive_month(
             exit_code=0,
         )
     except Exception as exc:
+        if chain_fd is not None:
+            _release_lock(chain_fd)
+            chain_fd = None
         for p in (part_path, vault_manifest_part, local_manifest_part):
             if p is not None and p.exists():
                 try:
@@ -504,6 +481,8 @@ def archive_month(
             exit_code=1,
         )
     finally:
+        if chain_fd is not None:
+            _release_lock(chain_fd)
         if built is not None and built.path.exists():
             try:
                 built.path.unlink(missing_ok=True)

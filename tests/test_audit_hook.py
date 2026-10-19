@@ -592,3 +592,41 @@ def test_timeout_exits_zero_and_prints_agy_ack(
 
     # Day file is empty
     assert _read_day_events(tmp_path) == []
+
+
+def test_fix_9_timeout_outside_write_records_remaining_events(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    audit_hook = _load_audit_hook()
+    monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(REAL_CLAUDE_POST_TOOL_USE_PAYLOAD)))
+    monkeypatch.setattr(audit_hook, "normalize", lambda *a, **k: [{"kind": "tool"}, {"kind": "tool"}])
+    calls = {"n": 0}
+    real_now = audit_hook._utc_now_iso
+
+    def timeout_once() -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise audit_hook.HookTimeout("hook timeout")
+        return real_now()
+
+    monkeypatch.setattr(audit_hook, "_utc_now_iso", timeout_once)
+
+    assert audit_hook.main(["--host", "claude", "PostToolUse"]) == 0
+
+    assert _read_day_events(tmp_path) == []
+    lines = (tmp_path / "audit-pending-gap.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["reason"] for line in lines] == ["hook timeout", "hook timeout"]
+
+
+def test_fix_9_timeout_during_normalize_exits_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    audit_hook = _load_audit_hook()
+    monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(REAL_CLAUDE_POST_TOOL_USE_PAYLOAD)))
+
+    def timeout_normalize(*_a: Any, **_k: Any) -> list[dict[str, Any]]:
+        audit_hook._alarm_handler(signal.SIGALRM, None)
+        return []
+
+    monkeypatch.setattr(audit_hook, "normalize", timeout_normalize)
+
+    assert audit_hook.main(["--host", "claude", "PostToolUse"]) == 0
+    assert _read_day_events(tmp_path) == []
