@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agenthub.cli import _systemd_word, main
+from agenthub.cli import SKILLS_SPEC, ScheduleSpec, _systemd_word, _unit_texts, main
 
 SERVICE = "agent-hub-skills-weekly.service"
 TIMER = "agent-hub-skills-weekly.timer"
@@ -368,3 +368,48 @@ def test_remove_unlink_error_still_reloads(sched, capsys, monkeypatch):
         f"--user disable --now {TIMER}",
         "--user daemon-reload",
     ]
+
+
+def test_skills_unit_texts_are_byte_identical_after_refactor(monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    expected_service = (
+        "[Unit]\n"
+        "Description=agent-hub learned skills, weekly\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "ExecStart=/usr/bin/agent-hub skills weekly\n"
+        "Environment=PATH=/usr/bin:/bin\n"
+        "TimeoutStartSec=6h\n"
+        "Nice=10\n"
+    )
+    expected_timer = (
+        "[Unit]\n"
+        "Description=Run agent-hub learned skills weekly\n"
+        "\n"
+        "[Timer]\n"
+        "OnCalendar=Sun *-*-* 20:17\n"
+        "Persistent=true\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+
+    # Calling with default spec
+    service, timer = _unit_texts("/usr/bin/agent-hub", "Sun *-*-* 20:17")
+    assert service == expected_service
+    assert timer == expected_timer
+
+    # Calling with explicit spec=SKILLS_SPEC
+    service_spec, timer_spec = _unit_texts("/usr/bin/agent-hub", "Sun *-*-* 20:17", spec=SKILLS_SPEC)
+    assert service_spec == expected_service
+    assert timer_spec == expected_timer
+
+    # Verify SKILLS_SPEC fields
+    assert isinstance(SKILLS_SPEC, ScheduleSpec)
+    assert SKILLS_SPEC.unit == "agent-hub-skills-weekly"
+    assert SKILLS_SPEC.service_description == "agent-hub learned skills, weekly"
+    assert SKILLS_SPEC.timer_description == "Run agent-hub learned skills weekly"
+    assert SKILLS_SPEC.subcommand == "skills weekly"
+    assert SKILLS_SPEC.timeout == "6h"
+    assert SKILLS_SPEC.default_calendar == "Sun *-*-* 20:17"
