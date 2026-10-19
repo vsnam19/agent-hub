@@ -10,13 +10,13 @@ from the plugin cache). `agent-hub hub install --apply` ran: the agent-hub MCP s
 agy list-format follow-up: `hub status` still shows them missing). Master clean, no worktrees, no `orch/*` branches,
 nothing running, nothing pushed. Owner: F6 before G; Phase G is discussed at v0.12 — do not start it.
 
-**Current work (2026-10-19): Phase G — plan `phase-g` running** (v0.12 target). Spec
-`docs/superpowers/specs/2026-10-18-phase-g-audit-log-design.md` (§13 = techlead corrections), decisions D-105..D-120.
-Plan `~/.local/state/agent-hub/plans/phase-g/plan.json` (34 tasks, split by techlead job
-`20261018-235854-techlead-0689`; implement pinned to agy Gemini 3.8 Flash, implement-hard on the chain with Gemini 4
-Argon first). Next: `plan wait` until it stops → `plan review` → `plan triage`/`plan close` → `ready` → `plan merge`
-→ real check (spec §10.4) → docs → local v0.12.0. Pool changed (D-119): Argon added; agy `claude-*-4-6` ids are gone.
-Never `audit schedule --apply`, never the owner's vault, never push.
+**Current work (2026-10-19, 12:00 UTC): Phase G — `plan close` finished, waiting on an owner decision.** Spec
+`docs/superpowers/specs/2026-10-18-phase-g-audit-log-design.md` (§13), decisions D-105..D-122. Plan
+`~/.local/state/agent-hub/plans/phase-g/plan.json`; report `~/.local/state/agent-hub/plans/phase-g/report.md`:
+19 approved, 15 blocked (writer cross-day race / pending-gap race / torn tail, classify basename, verify idle month,
+3 fix briefs > 3 files, 6 cascade conflicts on `agenthub/audit/verify.py` from `audit-verify`'s fix round). Nothing
+merged yet. Argon review quota is out until 2026-10-24 (reviews fall back to claude:opus). Incidents logged in
+`~/.local/state/agent-hub/incidents.jsonl`.
 
 The steps below describe how `followups-1` was run; reuse them for the next plan (new slug, new spec).
 
