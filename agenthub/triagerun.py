@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Callable
 
 from agenthub import triage, triageapply, triageinputs
+from agenthub.audit.emit import emit
 from agenthub.config import load_pool, paths
 from agenthub.orchestrate import RunArgs, run_job
 from agenthub.plan import Plan, Task
@@ -48,12 +49,31 @@ def triage_task(
 ) -> dict | None:
     """Run the techlead triage job for a task whose latest review requested changes (or whose gate failed) and apply
     its decision. Returns None when no triage is needed; otherwise the apply summary plus the task name."""
+
+    def _finish(res: dict) -> dict:
+        plan_name = plan.path.parent.name if plan.path else plan.slug
+        decision = res.get("status", "")
+        reason = res.get("reason", "")
+        try:
+            emit(
+                "plan",
+                "triage",
+                state_dir=paths().state_dir,
+                parent={"plan": plan_name, "task": task.name},
+                target=decision,
+                quote=reason if reason else None,
+                detail={"counts": res.get("counts", {})},
+            )
+        except Exception:
+            pass
+        return res
+
     worktree = Path(tstate.worktree)
     inputs = triageinputs.collect(jobs, worktree, head)
     if inputs is None:
         return None
     if inputs.review_job and not inputs.findings:
-        return _blocked(task, tstate, "review requested changes but no finding could be parsed")
+        return _finish(_blocked(task, tstate, "review requested changes but no finding could be parsed"))
 
     plan_dir = plan.path.parent
     task_brief = task.brief.read_text() if task.brief and task.brief.is_file() else ""
@@ -87,17 +107,17 @@ def triage_task(
     )
     result = run(args, paths(), pool, now)
     if result.get("status") != "ok":
-        return _blocked(task, tstate, f"triage job {result.get('status')}")
+        return _finish(_blocked(task, tstate, f"triage job {result.get('status')}"))
     reply_path = result.get("reply_path")
     if not reply_path:
-        return _blocked(task, tstate, f"triage job {result.get('status')}: no reply")
+        return _finish(_blocked(task, tstate, f"triage job {result.get('status')}: no reply"))
     try:
         parsed = triage.parse(Path(reply_path).read_text())
     except (triage.TriageError, OSError) as e:
-        return _blocked(task, tstate, f"triage reply invalid: {e}")
+        return _finish(_blocked(task, tstate, f"triage reply invalid: {e}"))
 
     if inputs.review_job == "" and not parsed.fix_brief.strip():
-        return _blocked(task, tstate, "gate failed and the triage wrote no fix brief")
+        return _finish(_blocked(task, tstate, "gate failed and the triage wrote no fix brief"))
 
     resolution = triage.resolve(
         parsed,
@@ -107,4 +127,4 @@ def triage_task(
         unparsed=triage.unparsed_findings(inputs.review_reply),
     )
     summary = triageapply.apply(plan_dir, task.name, tstate, resolution, inputs.review_job)
-    return {**summary, "task": task.name}
+    return _finish({**summary, "task": task.name})
