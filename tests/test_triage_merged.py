@@ -1,6 +1,6 @@
 import shutil
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import agenthub.planclose
@@ -281,7 +281,7 @@ def test_merged_or_gone_helper(env_sandbox, tmp_path):
     t2_head = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=t2_worktree, capture_output=True, text=True, check=True
     ).stdout.strip()
-    job = new_job(paths(), "gate", datetime(2026, 10, 19, 1, 0, 0))
+    job = new_job(paths(), "gate", datetime.now(timezone.utc) + timedelta(hours=1))
     job.write_json(
         "result.json",
         {
@@ -352,7 +352,7 @@ def test_plan_review_skips_merged_task(env_sandbox, tmp_path, monkeypatch, capsy
     t2_head = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=t2_worktree, capture_output=True, text=True, check=True
     ).stdout.strip()
-    job = new_job(paths(), "gate", datetime(2026, 10, 19, 1, 0, 0))
+    job = new_job(paths(), "gate", datetime.now(timezone.utc) + timedelta(hours=1))
     job.write_json(
         "result.json",
         {
