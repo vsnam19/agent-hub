@@ -167,3 +167,115 @@ def test_emit_archive_actor_role(tmp_path: Path) -> None:
     assert ev["detail"]["files"] == 30
     assert ev["detail"]["size"] == 1024
     assert ev["target"] == "2026-09"
+
+
+def test_evidence_path_coerced_to_str(tmp_path: Path) -> None:
+    evidence_path = tmp_path / "artifacts" / "run.log"
+    emit(
+        "job",
+        "finish",
+        state_dir=tmp_path,
+        evidence=evidence_path,
+    )
+
+    events = _read_all_events(tmp_path)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["evidence"] == str(evidence_path)
+    assert isinstance(ev["evidence"], str)
+
+    # Non-path non-str evidence also coerced to str
+    emit(
+        "job",
+        "finish",
+        state_dir=tmp_path,
+        evidence=12345,
+    )
+    events = _read_all_events(tmp_path)
+    assert len(events) == 2
+    assert events[1]["evidence"] == "12345"
+    assert isinstance(events[1]["evidence"], str)
+
+
+def test_detail_made_json_safe(tmp_path: Path) -> None:
+    class CustomObj:
+        def __str__(self) -> str:
+            return "custom_str_repr"
+
+    detail = {
+        "path_val": tmp_path / "foo.txt",
+        "set_nums": {3, 1, 2},
+        "set_strs": {"cherry", "apple", "banana"},
+        "set_paths": {Path("/z/path"), Path("/a/path")},
+        "tuple_val": (1, "x", True),
+        "nested": {
+            "inner_path": Path("/nested/bar.txt"),
+            "inner_set": {"z", "a"},
+            "inner_tuple": (Path("/inside/tuple"), {20, 10}),
+            "custom": CustomObj(),
+        },
+    }
+    emit(
+        "job",
+        "step",
+        state_dir=tmp_path,
+        detail=detail,
+    )
+
+    events = _read_all_events(tmp_path)
+    assert len(events) == 1
+    ev = events[0]
+    detail_ev = ev["detail"]
+    assert detail_ev["event"] == "step"
+    assert detail_ev["path_val"] == str(tmp_path / "foo.txt")
+    assert detail_ev["set_nums"] == [1, 2, 3]
+    assert detail_ev["set_strs"] == ["apple", "banana", "cherry"]
+    assert detail_ev["set_paths"] == ["/a/path", "/z/path"]
+    assert detail_ev["tuple_val"] == [1, "x", True]
+    assert detail_ev["nested"]["inner_path"] == "/nested/bar.txt"
+    assert detail_ev["nested"]["inner_set"] == ["a", "z"]
+    assert detail_ev["nested"]["inner_tuple"] == ["/inside/tuple", [10, 20]]
+    assert detail_ev["nested"]["custom"] == "custom_str_repr"
+
+
+def test_caller_detail_event_kept(tmp_path: Path) -> None:
+    emit(
+        "job",
+        "finish",
+        state_dir=tmp_path,
+        detail={"event": "subtask_done", "step": 1},
+    )
+
+    events = _read_all_events(tmp_path)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["detail"]["event"] == "finish"
+    assert ev["detail"]["caller_event"] == "subtask_done"
+    assert ev["detail"]["step"] == 1
+
+    emit(
+        "job",
+        "finish",
+        state_dir=tmp_path,
+        detail={"event": "finish", "step": 2},
+    )
+    events = _read_all_events(tmp_path)
+    assert len(events) == 2
+    ev2 = events[1]
+    assert ev2["detail"]["event"] == "finish"
+    assert "caller_event" not in ev2["detail"]
+    assert ev2["detail"]["step"] == 2
+
+    # When detail has no event key
+    emit(
+        "job",
+        "finish",
+        state_dir=tmp_path,
+        detail={"step": 3},
+    )
+    events = _read_all_events(tmp_path)
+    assert len(events) == 3
+    ev3 = events[2]
+    assert ev3["detail"]["event"] == "finish"
+    assert "caller_event" not in ev3["detail"]
+    assert ev3["detail"]["step"] == 3
