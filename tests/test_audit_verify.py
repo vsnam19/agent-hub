@@ -70,8 +70,8 @@ def test_removed_event_names_seq(tmp_path: Path) -> None:
     res = verify(state_dir=tmp_path)
     assert res.ok is False
     assert "2026-10/2026-10-18.jsonl:2" in res.message
-    assert "seq=" in res.message
-    assert "2" in res.message
+    assert "seq=3" in res.message
+    assert "seq mismatch" in res.message
 
 
 def test_reordered_events_are_detected(tmp_path: Path) -> None:
@@ -155,3 +155,79 @@ def test_verify_spans_archived_month_via_local_manifest(tmp_path: Path) -> None:
     res_missing = verify(state_dir=state)
     assert res_missing.ok is False
     assert "2026-10/2026-10-01.jsonl:1 seq=1:" in res_missing.message
+
+
+def test_idle_month_between_local_months_verifies(tmp_path: Path) -> None:
+    append({"ts": "2026-10-18T10:00:00.000Z", "kind": "command", "target": "oct"}, state_dir=tmp_path)
+    append({"ts": "2026-12-01T10:00:00.000Z", "kind": "command", "target": "dec"}, state_dir=tmp_path)
+
+    res = verify(state_dir=tmp_path)
+    assert res.ok is True
+    assert res.message == "ok: 2 events"
+
+    res_dec = verify(state_dir=tmp_path, month="2026-12")
+    assert res_dec.ok is True
+    assert res_dec.message == "ok: 1 events"
+
+
+def test_idle_month_after_archived_manifest_verifies(tmp_path: Path) -> None:
+    state = tmp_path / "audit_state"
+    e1 = append({"ts": "2026-10-31T23:50:00.000Z", "kind": "command", "target": "oct"}, state_dir=state)
+
+    # Delete 2026-10 directory (archived)
+    root = audit_root(state)
+    oct_dir = root / "2026-10"
+    shutil.rmtree(oct_dir)
+    assert not oct_dir.exists()
+
+    # Create local manifest for the archived month
+    manifests_dir = root / "manifests"
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+    manifest_file = manifests_dir / "2026-10.json"
+    manifest_file.write_text(json.dumps({"month": "2026-10", "last_hash": e1["hash"]}), encoding="utf-8")
+
+    # Event in 2026-12 (nothing in 2026-11)
+    e2 = append({"ts": "2026-12-01T10:00:00.000Z", "kind": "command", "target": "dec"}, state_dir=state)
+    assert e2["prev_hash"] == e1["hash"]
+
+    res = verify(state_dir=state)
+    assert res.ok is True
+    assert res.message == "ok: 1 events"
+
+    res_dec = verify(state_dir=state, month="2026-12")
+    assert res_dec.ok is True
+    assert res_dec.message == "ok: 1 events"
+
+    # Manifest missing last_hash fails
+    manifest_file.write_text(json.dumps({"month": "2026-10"}), encoding="utf-8")
+    res_no_hash = verify(state_dir=state)
+    assert res_no_hash.ok is False
+    assert "2026-12/2026-12-01.jsonl:1 seq=1:" in res_no_hash.message
+    assert "manifest for 2026-10 missing last_hash" in res_no_hash.message
+
+    # Invalid manifest JSON fails
+    manifest_file.write_text("invalid json", encoding="utf-8")
+    res_bad_json = verify(state_dir=state)
+    assert res_bad_json.ok is False
+    assert "2026-12/2026-12-01.jsonl:1 seq=1:" in res_bad_json.message
+    assert "invalid manifest for 2026-10" in res_bad_json.message
+
+
+def test_deleted_month_with_events_still_fails(tmp_path: Path) -> None:
+    state = tmp_path / "audit_state"
+    append({"ts": "2026-10-18T10:00:00.000Z", "kind": "command", "target": "oct"}, state_dir=state)
+    append({"ts": "2026-11-15T10:00:00.000Z", "kind": "command", "target": "nov"}, state_dir=state)
+    append({"ts": "2026-12-01T10:00:00.000Z", "kind": "command", "target": "dec"}, state_dir=state)
+
+    # Delete 2026-11 directory without a manifest
+    root = audit_root(state)
+    nov_dir = root / "2026-11"
+    shutil.rmtree(nov_dir)
+    assert not nov_dir.exists()
+
+    res = verify(state_dir=state)
+    assert res.ok is False
+    assert "2026-12/2026-12-01.jsonl:1" in res.message
+    assert "seq=1" in res.message
+    assert "prev_hash mismatch" in res.message
+    assert "missing local month or manifest for 2026-11" in res.message
