@@ -11,6 +11,7 @@ import time
 import unicodedata
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -35,6 +36,38 @@ ALL_JOBS = 100000  # every job record, for filters that must see past any --limi
 SCHEDULE_UNIT = "agent-hub-skills-weekly"
 SCHEDULE_DEFAULT_AT = "Sun *-*-* 20:17"
 SCHEDULE_TIMEOUT_S = 30
+
+
+@dataclass(frozen=True)
+class ScheduleSpec:
+    unit: str
+    service_description: str
+    timer_description: str
+    subcommand: str
+    timeout: str
+    default_calendar: str = SCHEDULE_DEFAULT_AT
+
+    @property
+    def unit_base(self) -> str:
+        return self.unit
+
+    @property
+    def unit_name(self) -> str:
+        return self.unit
+
+    @property
+    def default_at(self) -> str:
+        return self.default_calendar
+
+
+SKILLS_SPEC = ScheduleSpec(
+    unit=SCHEDULE_UNIT,
+    service_description="agent-hub learned skills, weekly",
+    timer_description="Run agent-hub learned skills weekly",
+    subcommand="skills weekly",
+    timeout="6h",
+    default_calendar=SCHEDULE_DEFAULT_AT,
+)
 
 
 class UsageError(Exception):
@@ -503,21 +536,21 @@ def _systemd_word(value: str, *, exec_line: bool = False) -> str:
     return f'"{escaped}"'
 
 
-def _unit_texts(exe: str, at: str) -> tuple[str, str]:
+def _unit_texts(exe: str, at: str, spec: ScheduleSpec = SKILLS_SPEC) -> tuple[str, str]:
     service = (
         "[Unit]\n"
-        "Description=agent-hub learned skills, weekly\n"
+        f"Description={spec.service_description}\n"
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
-        f"ExecStart={_systemd_word(exe, exec_line=True)} skills weekly\n"
+        f"ExecStart={_systemd_word(exe, exec_line=True)} {spec.subcommand}\n"
         f"Environment={_systemd_word('PATH=' + os.environ.get('PATH', ''))}\n"
-        "TimeoutStartSec=6h\n"
+        f"TimeoutStartSec={spec.timeout}\n"
         "Nice=10\n"
     )
     timer = (
         "[Unit]\n"
-        "Description=Run agent-hub learned skills weekly\n"
+        f"Description={spec.timer_description}\n"
         "\n"
         "[Timer]\n"
         f"OnCalendar={at}\n"
@@ -558,13 +591,13 @@ def _read_unit(path: Path) -> str | None:
         return None
 
 
-def _cmd_skills_schedule(args) -> int:
+def _cmd_schedule(args, spec: ScheduleSpec) -> int:
     unit_dir = _unit_dir()
-    service_path = unit_dir / f"{SCHEDULE_UNIT}.service"
-    timer_path = unit_dir / f"{SCHEDULE_UNIT}.timer"
+    service_path = unit_dir / f"{spec.unit}.service"
+    timer_path = unit_dir / f"{spec.unit}.timer"
     timer = timer_path.name
     try:
-        if args.remove:
+        if getattr(args, "remove", False):
             if not (service_path.exists() or timer_path.exists()):
                 print("nothing scheduled")
                 return 0
@@ -588,12 +621,13 @@ def _cmd_skills_schedule(args) -> int:
             print(_safe(f"removed: {timer_path}"))
             return 0
 
-        _check_calendar(args.at)
+        at = args.at if getattr(args, "at", None) is not None else spec.default_calendar
+        _check_calendar(at)
         exe = shutil.which("agent-hub")
         if exe is None:
             raise ScheduleError("agent-hub is not on PATH")
-        service, timer_text = _unit_texts(os.path.abspath(exe), args.at)
-        if not args.apply:
+        service, timer_text = _unit_texts(os.path.abspath(exe), at, spec=spec)
+        if not getattr(args, "apply", False):
             print(_safe(f"# {service_path}\n{service}\n# {timer_path}\n{timer_text}"), end="")
             print(f"would run: systemctl --user daemon-reload; systemctl --user enable --now {timer}")
             print("dry run: nothing written; add --apply to schedule")
@@ -605,7 +639,7 @@ def _cmd_skills_schedule(args) -> int:
         was_active = timer_existed and _schedule_run(["systemctl", "--user", "is-active", timer]).returncode == 0
         files_match = before[service_path] == service and before[timer_path] == timer_text
         if files_match and was_enabled and was_active:
-            print(_safe(f"already scheduled: {timer_path} ({args.at})"))
+            print(_safe(f"already scheduled: {timer_path} ({at})"))
             return 0
         unit_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -639,11 +673,15 @@ def _cmd_skills_schedule(args) -> int:
             for msg in restore_errors:
                 print(_safe(f"agent-hub: {msg}", sys.stderr), file=sys.stderr)
             return 1
-        print(_safe(f"scheduled: {timer_path} ({args.at})"))
+        print(_safe(f"scheduled: {timer_path} ({at})"))
         return 0
     except (ScheduleError, OSError) as e:
         print(_safe(f"agent-hub: {e}", sys.stderr), file=sys.stderr)
         return 1
+
+
+def _cmd_skills_schedule(args) -> int:
+    return _cmd_schedule(args, SKILLS_SPEC)
 
 
 def _cmd_skills(args) -> int:
