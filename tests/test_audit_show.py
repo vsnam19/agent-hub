@@ -320,3 +320,25 @@ def test_outward_only_with_since() -> None:
     # outward with since after all
     none_outward = outward(events, since="2026-10-18T13:00:00.000Z")
     assert none_outward == []
+
+
+def test_parse_since_overflow_is_value_error() -> None:
+    overflow_inputs = [
+        "999999999999999999999999999999999999999d",
+        "100000000000000d",
+        "100000000d",
+    ]
+    for expr in overflow_inputs:
+        with pytest.raises(ValueError, match="invalid since expression"):
+            parse_since(expr)
+
+
+def test_parse_since_bare_month() -> None:
+    assert parse_since("2026-09") == "2026-09-01T00:00:00.000Z"
+    assert parse_since("2025-01") == "2025-01-01T00:00:00.000Z"
+    assert parse_since("  2026-12  ") == "2026-12-01T00:00:00.000Z"
+
+    invalid_months = ["2026-00", "2026-13", "2026-99"]
+    for inv in invalid_months:
+        with pytest.raises(ValueError, match="invalid since expression"):
+            parse_since(inv)
