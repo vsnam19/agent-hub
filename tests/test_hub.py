@@ -478,3 +478,77 @@ def test_status_without_version_uses_hash(env, tmp_path):
     assert codex.detail == "no version in manifest"
     (env.src / "skills" / "a" / "SKILL.md").write_text("changed")
     assert _state(hub.status(env.config, tmp_path / "repo"), "codex") == "stale"
+
+
+AGY_1_4_2_OUTPUT = """Installed plugins:
+- aspice (enabled, 1.0.0)
+    Source:     antigravity
+    Components: 1 skill
+- learned-worker (enabled, 0.1.0)
+    Source:     antigravity
+- superpowers (enabled, 6.4.2)
+    Source:     gemini-cli
+    Components: 15 skills, 1 hook
+- telaf (enabled, 1.0.0)
+    Source:     antigravity
+    Components: 1 skill
+- worker (enabled, 1.0.0)
+    Source:     antigravity
+    Components: 3 skills
+"""
+
+
+def test_agy_installed_parses_text_list(monkeypatch):
+    monkeypatch.setattr(
+        hub,
+        "_run",
+        lambda *args: hub.subprocess.CompletedProcess(args, 0, stdout=AGY_1_4_2_OUTPUT, stderr=""),
+    )
+    names, err = hub._agy_installed()
+    assert err is None
+    assert names == {"aspice", "learned-worker", "superpowers", "telaf", "worker"}
+
+
+def test_agy_installed_still_parses_json(monkeypatch):
+    data = json.dumps({"imports": [{"name": "telaf"}, {"name": "worker"}]})
+    monkeypatch.setattr(
+        hub,
+        "_run",
+        lambda *args: hub.subprocess.CompletedProcess(args, 0, stdout=data, stderr=""),
+    )
+    names, err = hub._agy_installed()
+    assert err is None
+    assert names == {"telaf", "worker"}
+
+
+def test_agy_installed_header_only_is_empty(monkeypatch):
+    monkeypatch.setattr(
+        hub,
+        "_run",
+        lambda *args: hub.subprocess.CompletedProcess(args, 0, stdout="Installed plugins:\n", stderr=""),
+    )
+    names, err = hub._agy_installed()
+    assert err is None
+    assert names == set()
+
+
+def test_agy_installed_garbage_is_error(monkeypatch):
+    monkeypatch.setattr(
+        hub,
+        "_run",
+        lambda *args: hub.subprocess.CompletedProcess(args, 0, stdout="not valid json or text\n", stderr=""),
+    )
+    names, err = hub._agy_installed()
+    assert err == "agy list output not understood"
+    assert names == set()
+
+
+def test_agy_installed_failure_is_reported(monkeypatch):
+    monkeypatch.setattr(
+        hub,
+        "_run",
+        lambda *args: hub.subprocess.CompletedProcess(args, 1, stdout="", stderr="boom"),
+    )
+    names, err = hub._agy_installed()
+    assert err == "agy list failed: boom"
+    assert names == set()
