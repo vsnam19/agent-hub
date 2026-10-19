@@ -26,6 +26,16 @@ def _prev_month(month_str: str) -> str:
     return f"{year:04d}-{month - 1:02d}"
 
 
+def _has_local_month(root: Path, month: str) -> bool:
+    m_dir = root / month
+    return m_dir.is_dir() and any(p.is_file() and _DAY_FILE_RE.match(p.name) for p in m_dir.iterdir())
+
+
+def _has_manifest(root: Path, month: str) -> bool:
+    manifest_file = root / "manifests" / f"{month}.json"
+    return manifest_file.is_file()
+
+
 def _parse_ts(ts: str) -> datetime:
     if not isinstance(ts, str) or not ts:
         raise ValueError(f"invalid ts: {ts!r}")
@@ -128,75 +138,52 @@ def verify(
             )
 
         # Determine expected prev_hash for line 1 of this day file
-        if last_verified_day is not None and last_verified_day[:7] == current_month:
+        is_month_start = last_verified_day is None or last_verified_day[:7] != current_month
+        if not is_month_start:
             # Continuing within the same month from previous verified day
             expected_prev_hash = prev_hash_for_next_day
             initial_check_reason: str | None = None
         else:
             # First day of this month
-            prev_m = _prev_month(current_month)
-            prev_m_dir = root / prev_m
-            has_local_prev_m = prev_m_dir.is_dir() and any(
-                p.is_file() and _DAY_FILE_RE.match(p.name) for p in prev_m_dir.iterdir()
-            )
-
-            if has_local_prev_m:
-                valid_prev_link = (
-                    prev_hash_for_next_day is not None
-                    and last_verified_day is not None
-                    and last_verified_day[:7] == prev_m
-                )
-                if valid_prev_link:
-                    expected_prev_hash = prev_hash_for_next_day
-                    initial_check_reason = None
-                else:
-                    hit = _latest_earlier_local_day_hash(root, current_day)
-                    if hit is not None:
-                        expected_prev_hash = hit[1]
-                        initial_check_reason = None
-                    else:
-                        expected_prev_hash = None
-                        initial_check_reason = f"cannot read last hash of previous local month {prev_m}"
+            if last_verified_day is not None and prev_hash_for_next_day is not None:
+                day_hit: tuple[str, str] | None = (last_verified_day[:7], prev_hash_for_next_day)
             else:
-                # Previous month is not local; check manifest
-                manifests_dir = root / "manifests"
-                manifest_file = manifests_dir / f"{prev_m}.json"
-                if manifest_file.is_file():
+                day_hit = _latest_earlier_local_day_hash(root, current_day)
+
+            manifests_dir = root / "manifests"
+            manifest_candidates: list[tuple[str, Path]] = []
+            if manifests_dir.is_dir():
+                for entry in manifests_dir.iterdir():
+                    m = _MANIFEST_FILE_RE.match(entry.name)
+                    if m and m.group(1) < current_month and entry.is_file():
+                        manifest_candidates.append((m.group(1), entry))
+            manifest_candidates.sort(key=lambda item: item[0], reverse=True)
+
+            if manifest_candidates:
+                latest_m_name, latest_m_path = manifest_candidates[0]
+                if day_hit is None or day_hit[0] < latest_m_name:
                     try:
-                        m_data = json.loads(manifest_file.read_text(encoding="utf-8"))
+                        m_data = json.loads(latest_m_path.read_text(encoding="utf-8"))
                         last_h = m_data.get("last_hash")
                         if isinstance(last_h, str) and last_h:
                             expected_prev_hash = last_h
                             initial_check_reason = None
                         else:
                             expected_prev_hash = None
-                            initial_check_reason = f"manifest for {prev_m} missing last_hash"
+                            initial_check_reason = f"manifest for {latest_m_name} missing last_hash"
                     except Exception as e:
                         expected_prev_hash = None
-                        initial_check_reason = f"invalid manifest for {prev_m}: {e}"
+                        initial_check_reason = f"invalid manifest for {latest_m_name}: {e}"
                 else:
-                    # Previous month manifest does not exist
-                    # Check if earlier manifests or earlier local months exist
-                    has_earlier_manifests = manifests_dir.is_dir() and any(
-                        _MANIFEST_FILE_RE.match(p.name)
-                        and _MANIFEST_FILE_RE.match(p.name).group(1) < current_month  # type: ignore[union-attr]
-                        and p.is_file()
-                        for p in manifests_dir.iterdir()
-                    )
-                    has_earlier_local = any(
-                        p.name < current_month
-                        and p.is_dir()
-                        and _MONTH_RE.match(p.name)
-                        and any(_DAY_FILE_RE.match(f.name) and f.is_file() for f in p.iterdir())
-                        for p in root.iterdir()
-                    )
-                    if has_earlier_manifests or has_earlier_local:
-                        expected_prev_hash = None
-                        initial_check_reason = f"missing local month or manifest for {prev_m}"
-                    else:
-                        # Very first event ever
-                        expected_prev_hash = ZERO_HASH
-                        initial_check_reason = None
+                    expected_prev_hash = day_hit[1]
+                    initial_check_reason = None
+            else:
+                if day_hit is not None:
+                    expected_prev_hash = day_hit[1]
+                    initial_check_reason = None
+                else:
+                    expected_prev_hash = ZERO_HASH
+                    initial_check_reason = None
 
         expected_seq = 1
 
@@ -246,18 +233,19 @@ def verify(
                     message=f"{rel_path}:{line_no} seq={seq_val}: {initial_check_reason}",
                 )
 
-            if expected_prev_hash == ZERO_HASH and actual_prev_hash != ZERO_HASH and line_no == 1:
-                prev_m = _prev_month(current_month)
-                return VerifyResult(
-                    ok=False,
-                    message=(
-                        f"{rel_path}:{line_no} seq={seq_val}: "
-                        f"prev_hash mismatch (missing local month or manifest for {prev_m}): "
-                        f"expected {expected_prev_hash}, got {actual_prev_hash!r}"
-                    ),
-                )
-
             if actual_prev_hash != expected_prev_hash:
+                if is_month_start and line_no == 1:
+                    prev_m = _prev_month(current_month)
+                    if not _has_local_month(root, prev_m) and not _has_manifest(root, prev_m):
+                        return VerifyResult(
+                            ok=False,
+                            message=(
+                                f"{rel_path}:{line_no} seq={seq_val}: "
+                                f"prev_hash mismatch (missing local month or manifest for {prev_m}): "
+                                f"expected {expected_prev_hash}, got {actual_prev_hash!r}"
+                            ),
+                        )
+
                 return VerifyResult(
                     ok=False,
                     message=(
