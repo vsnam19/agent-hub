@@ -171,5 +171,9 @@ log one whenever a task blocks or fails for a reason that is not the implementer
 - **`audit verify --month M` for an archived month with no vault configured** exits 0 with "not local and was not
   checked". Chosen so verify works on machines without the vault; a script that needs a real check must pass
   `--vault`/configure one. Revisit with G4 (digest).
+- **Pending-line race.** A `record_pending` that opened the pending file before another process claimed it and writes
+  after that process's last re-read of the claim lands in an unlinked inode and is lost uncounted. Window is a few
+  microseconds between two processes' syscalls; fixing needs `record_pending` under the chain lock (costs the fail-open
+  path its lock-free property). Revisit if gaps ever disagree with host-side counts.
 - Final review covered `4562504...HEAD` (hardening and its fix rounds); the 34 Phase G branches were each reviewed once
   in plan `phase-g` (D-124).
