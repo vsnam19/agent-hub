@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agenthub import triage
-from agenthub.redact import _HOME, redact
+from agenthub.redact import HOME_PATH, redact
 
 CAP = 300
 MAX_CORRECTIONS = 500
@@ -187,7 +187,7 @@ def _mine_jobs(state_dir: Path, branches: dict[str, str], extract: Extract, sinc
 def _dir_label(path: str) -> str:
     """Directory name; `~` at a home directory, so a user name is not taken for a repo or branch name."""
     directory = Path(path)
-    return "~" if _HOME.fullmatch(str(directory)) else directory.name
+    return "~" if HOME_PATH.fullmatch(str(directory)) else directory.name
 
 
 def _repo_name(git_dir: str) -> str:
