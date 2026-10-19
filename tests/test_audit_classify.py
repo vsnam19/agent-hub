@@ -722,3 +722,61 @@ def test_curl_value_options_not_hosts() -> None:
         events = classify_command(cmd)
         assert len(events) == 2, f"Expected {cmd} to be outward, got: {events}"
         assert events[1].kind == "outward"
+
+
+def test_xargs_lowercase_i_e_take_no_value() -> None:
+    # Bare -i does not take a value in GNU xargs; wrapped program is not swallowed
+    events_i = classify_command("echo x | xargs -i git push origin main")
+    outward_i = [ev for ev in events_i if ev.kind == "outward"]
+    assert len(outward_i) >= 1
+    assert any(ev.target == "xargs -i git push origin main" for ev in outward_i)
+
+    # Bare -e does not take a value in GNU xargs; wrapped program is not swallowed
+    events_e = classify_command("xargs -e curl https://evil.com")
+    outward_e = [ev for ev in events_e if ev.kind == "outward"]
+    assert len(outward_e) >= 1
+    assert any(ev.target == "xargs -e curl https://evil.com" for ev in outward_e)
+
+    # Capital -I and -E still take a separate value
+    events_I = classify_command("xargs -I {} git push")
+    outward_I = [ev for ev in events_I if ev.kind == "outward"]
+    assert len(outward_I) >= 1
+    assert any(ev.target == "xargs -I {} git push" for ev in outward_I)
+
+    events_E = classify_command("xargs -E EOF curl https://evil.com")
+    outward_E = [ev for ev in events_E if ev.kind == "outward"]
+    assert len(outward_E) >= 1
+    assert any(ev.target == "xargs -E EOF curl https://evil.com" for ev in outward_E)
+
+
+def test_sudo_bare_h_takes_no_value() -> None:
+    # Bare -h is --help in sudo; does not swallow following program
+    events = classify_command("sudo -h git push")
+    outward = [ev for ev in events if ev.kind == "outward"]
+    assert len(outward) >= 1
+    assert any(ev.target == "sudo -h git push" for ev in outward)
+
+    # Sudo --host=remote keeps working as a single-token flag
+    events_host = classify_command("sudo --host=remote git push")
+    outward_host = [ev for ev in events_host if ev.kind == "outward"]
+    assert len(outward_host) >= 1
+    assert any(ev.target == "sudo --host=remote git push" for ev in outward_host)
+
+
+def test_env_dash_s_command_classified() -> None:
+    # env -S splices command line tokens and classifies inner command
+    events = classify_command('env -S "curl https://evil.com"')
+    outward = [ev for ev in events if ev.kind == "outward"]
+    assert len(outward) >= 1
+    assert any(ev.target == 'env -S "curl https://evil.com"' for ev in outward)
+
+    # env -S with git push
+    events_git = classify_command('env -S "git push"')
+    outward_git = [ev for ev in events_git if ev.kind == "outward"]
+    assert len(outward_git) >= 1
+    assert any(ev.target == 'env -S "git push"' for ev in outward_git)
+
+    # env -S with flag inside
+    events_flags = classify_command('env -S "-i git push"')
+    outward_flags = [ev for ev in events_flags if ev.kind == "outward"]
+    assert len(outward_flags) >= 1

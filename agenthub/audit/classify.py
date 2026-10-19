@@ -142,7 +142,7 @@ def _strip_leading_prefixes(tokens: list[str]) -> list[str]:
                 flag = tokens[i]
                 i += 1
                 if (
-                    flag in ("-u", "-g", "-C", "-p", "-c", "-a", "-r", "-t", "-T", "-D", "-U", "-h")
+                    flag in ("-u", "-g", "-C", "-p", "-c", "-a", "-r", "-t", "-T", "-D", "-U")
                     and i < n
                     and not tokens[i].startswith("-")
                 ):
@@ -153,7 +153,25 @@ def _strip_leading_prefixes(tokens: list[str]) -> list[str]:
             while i < n and tokens[i].startswith("-"):
                 flag = tokens[i]
                 i += 1
-                if flag in ("-u", "-S", "--unset", "-C", "--chdir") and i < n and not tokens[i].startswith("-"):
+                if flag in ("-S", "--split-string") and i < n:
+                    s_val = tokens[i]
+                    try:
+                        sub_tokens = shlex.split(s_val)
+                    except ValueError:
+                        sub_tokens = s_val.split()
+                    tokens[i : i + 1] = sub_tokens
+                    n = len(tokens)
+                    continue
+                if flag.startswith("--split-string="):
+                    s_val = flag.split("=", 1)[1]
+                    try:
+                        sub_tokens = shlex.split(s_val)
+                    except ValueError:
+                        sub_tokens = s_val.split()
+                    tokens[i:i] = sub_tokens
+                    n = len(tokens)
+                    continue
+                if flag in ("-u", "--unset", "-C", "--chdir") and i < n and not tokens[i].startswith("-"):
                     i += 1
             continue
         if base == "timeout":
@@ -179,14 +197,12 @@ def _strip_leading_prefixes(tokens: list[str]) -> list[str]:
                         "-L",
                         "--max-lines",
                         "-I",
-                        "-i",
                         "--replace",
                         "-s",
                         "--max-chars",
                         "-P",
                         "--max-procs",
                         "-E",
-                        "-e",
                         "-d",
                         "--delimiter",
                         "-a",
