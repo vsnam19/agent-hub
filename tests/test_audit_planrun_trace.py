@@ -212,7 +212,10 @@ def test_each_task_gets_its_own_values(tmp_path: Path) -> None:
     assert env_2[ENV_TRACE_TASK] == "step-2"
 
 
-def test_trace_environ_context_manager_standalone(tmp_path: Path) -> None:
+def test_trace_environ_context_manager_standalone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(ENV_TRACE_PLAN, raising=False)
+    monkeypatch.delenv(ENV_TRACE_TASK, raising=False)
+
     plan = make_plan(tmp_path, [{"name": "t1"}], plan_name="standalone-plan")
 
     with _trace_environ(plan, "standalone-task"):
