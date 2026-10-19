@@ -148,6 +148,85 @@ def test_agy_error_makes_error_status_and_stderr_tail() -> None:
     assert "stderr_tail" not in non_cmd_events[0]["detail"]
 
 
+def test_post_tool_use_failure_is_error() -> None:
+    # PostToolUseFailure with empty error string must still have status == "error"
+    failure_empty_error = {
+        **REAL_AGY_POST_TOOL_USE_PAYLOAD,
+        "error": "",
+    }
+    events = normalize("agy", "PostToolUseFailure", failure_empty_error, {})
+    assert len(events) == 1
+    assert events[0]["outcome"] == {"status": "error"}
+    assert "stderr_tail" not in events[0]["detail"]
+
+    # PostToolUseFailure without error key must still have status == "error"
+    payload_no_error = dict(REAL_AGY_POST_TOOL_USE_PAYLOAD)
+    payload_no_error.pop("error", None)
+    events_no_err = normalize("agy", "PostToolUseFailure", payload_no_error, {})
+    assert len(events_no_err) == 1
+    assert events_no_err[0]["outcome"] == {"status": "error"}
+
+    # PostToolUseFailure with error text has status == "error" and stderr_tail
+    payload_with_err = {
+        **REAL_AGY_POST_TOOL_USE_PAYLOAD,
+        "error": "Command failed with exit code 1",
+    }
+    events_with_err = normalize("agy", "PostToolUseFailure", payload_with_err, {})
+    assert len(events_with_err) == 1
+    assert events_with_err[0]["outcome"] == {"status": "error"}
+    assert events_with_err[0]["detail"]["stderr_tail"] == "Command failed with exit code 1"
+
+
+def test_empty_cwd_uses_workspace_paths() -> None:
+    # 1. Empty Cwd string in toolCall args falls back to workspacePaths[0]
+    empty_cwd_payload = {
+        **REAL_AGY_POST_TOOL_USE_PAYLOAD,
+        "workspacePaths": ["/tmp/fallback/workspace"],
+        "toolCall": {
+            "name": "run_command",
+            "args": {
+                "CommandLine": "echo hello",
+                "Cwd": "",
+            },
+        },
+    }
+    events = normalize("agy", "PostToolUse", empty_cwd_payload, {})
+    assert len(events) == 1
+    assert events[0]["detail"]["cwd"] == "/tmp/fallback/workspace"
+
+    # 2. None Cwd in toolCall args also falls back to workspacePaths[0]
+    none_cwd_payload = {
+        **REAL_AGY_POST_TOOL_USE_PAYLOAD,
+        "workspacePaths": ["/tmp/fallback/workspace"],
+        "toolCall": {
+            "name": "run_command",
+            "args": {
+                "CommandLine": "echo hello",
+                "Cwd": None,
+            },
+        },
+    }
+    events_none = normalize("agy", "PostToolUse", none_cwd_payload, {})
+    assert len(events_none) == 1
+    assert events_none[0]["detail"]["cwd"] == "/tmp/fallback/workspace"
+
+    # 3. Explicit non-empty Cwd is preserved
+    explicit_cwd_payload = {
+        **REAL_AGY_POST_TOOL_USE_PAYLOAD,
+        "workspacePaths": ["/tmp/fallback/workspace"],
+        "toolCall": {
+            "name": "run_command",
+            "args": {
+                "CommandLine": "echo hello",
+                "Cwd": "/tmp/explicit/dir",
+            },
+        },
+    }
+    events_explicit = normalize("agy", "PostToolUse", explicit_cwd_payload, {})
+    assert len(events_explicit) == 1
+    assert events_explicit[0]["detail"]["cwd"] == "/tmp/explicit/dir"
+
+
 def test_agy_event_has_no_quote() -> None:
     payload_with_desc = {
         **REAL_AGY_POST_TOOL_USE_PAYLOAD,
