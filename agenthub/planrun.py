@@ -5,11 +5,14 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from agenthub import guards
+from agenthub.audit.trace import trace_env
 from agenthub.config import ConfigError, load_pool, paths
 from agenthub.guards import _git_argv
 from agenthub.jobs import list_jobs
@@ -109,6 +112,22 @@ def compose_brief(plan: Plan, task: Task, state: State, attempt_note: str) -> st
         parts.append(attempt_note.strip())
 
     return "\n\n".join(parts)
+
+
+@contextmanager
+def _trace_environ(plan: Plan, task_name: str) -> Iterator[None]:
+    plan_name = plan.path.parent.name if plan.path else None
+    env = trace_env(plan=plan_name, task=task_name)
+    saved = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def run_plan(
@@ -293,7 +312,8 @@ def run_plan(
                 if plan.jev:
                     argv.append("--jev")
 
-                popen = spawn(argv, log_file)
+                with _trace_environ(plan, task.name):
+                    popen = spawn(argv, log_file)
                 running_children[task.name] = popen
 
                 tstate.status = "running"
