@@ -13,13 +13,12 @@ vault (no config / missing vault keep data and exit 1; success; re-run no-op; ve
 `.worktrees/phase-g-*`, `.worktrees/phase-g-hardening-*`, `orch/phase-g/*`, `orch/phase-g-hardening/*` — deleting them
 is the owner's call.
 
-**Current work (2026-10-20 05:10 UTC): v0.13.0 on master (local, not pushed; plugin cache still 0.11.0).** Plan
-`ids-incidents` (D-121 + D-122, D-127) merged: lint + 1612 tests green; real check `pool --refresh-models` (agy 13 /
-codex 4 / claude 4 ids), `unknown-model` on a stale id, `incident add/list`, audit `incident` event, weekly mining
-(brief-scope ×3 → lesson draft). Reviews: owner chain Argon Medium → agy Opus 5.5 Medium → Flash → `claude:opus@low`
-(D-126; never plain `claude:opus`). Quota: agy Claude back 2026-10-20 13:48 UTC, Flash/Argon 2026-10-24, codex 11-06.
-Next: owner releases (plugin cache 0.13.0, restart, README "Audit log" owner steps); then `docs/follow-ups.md`
-"From plan ids-incidents" (runner must honour a blocked handoff — 2nd occurrence) and the Phase G lows.
+**Current work (2026-10-20 17:50 UTC): v0.13.1 on master (local, not pushed; plugin cache still 0.11.0).** Plans
+`ids-incidents` (D-127) and `followups-2` (D-128) merged; lint + 1641 tests green. Reviews follow D-126 (Argon Medium →
+agy Opus 5.5 Medium → Flash → `claude:opus@low`; never plain `claude:opus`); implement on agy Claude Sonnet 5.5 when
+free (owner), else the chain (Flash weekly quota until 2026-10-24; agy Sonnet cooldown until 2026-10-20 20:26 UTC).
+Next: owner releases (plugin cache, restart, README "Audit log" owner steps); then `docs/follow-ups.md` "From plan
+followups-2" (detect agy lost edits: ok + no changes + success handoff; techlead brief greps old-rule tests).
 
 The steps below describe how `followups-1` was run; reuse them for the next plan (new slug, new spec).
 

@@ -196,3 +196,17 @@ log one whenever a task blocks or fails for a reason that is not the implementer
 - `tests/test_pool_same_as_default.py`: one test name says `does_not_mark` while asserting the marker (rename reverted:
   it collided with a cascade; do it on master).
 - agy auto-updated to 1.4.3 during the plan; the catalog still lists the same 13 ids.
+
+## Done in plan `followups-2` (2026-10-20, D-128)
+Runner honours a blocked handoff; weekly dry-run counts incidents; audit plan id = `plan.slug`; unreadable claim kept
+on gap failure; `_redact_target` re-checks for a surviving quoted copy; curl `-E/--cert` passwords (first unescaped
+`:`, drive prefix, bundles). The `test_pool_same_as_default` rename was stale (names already match).
+
+## From plan `followups-2` (2026-10-20)
+- **agy background tasks lose edits** (agy 1.4.3): a job ends `ok` with an unchanged tree and a success handoff
+  describing edits (`planrun-blocked-handoff`, first run). Detect: implement job `ok` + `changed_files == []` + handoff
+  `success` → treat as `empty`/failed, so the chain or escalation can act. Until then briefs to agy say "edit directly,
+  no background tasks".
+- Briefs that change a shared contract keep hitting `brief-scope` (3 more times in this plan: tests asserting the old
+  rule live in files the brief does not allow). The techlead brief should require a grep for tests asserting the old
+  behaviour and list them in the task's files.
