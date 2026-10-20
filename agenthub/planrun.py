@@ -40,7 +40,7 @@ def _trail(
         f.write("\t".join(str(c).replace("\t", " ").replace("\r", " ").replace("\n", " ") for c in cells) + "\n")
     try:
         event = "autocommit" if phase == "commit" else phase
-        plan_name = plan.path.parent.name if plan.path else ""
+        plan_name = plan.slug
         parent: dict[str, Any] = {"plan": plan_name}
         if task:
             parent["task"] = task
@@ -136,7 +136,7 @@ def compose_brief(plan: Plan, task: Task, state: State, attempt_note: str) -> st
 
 @contextmanager
 def _trace_environ(plan: Plan, task_name: str) -> Iterator[None]:
-    plan_name = plan.path.parent.name if plan.path else None
+    plan_name = plan.slug
     env = trace_env(plan=plan_name, task=task_name)
     saved = {k: os.environ.get(k) for k in env}
     os.environ.update(env)
@@ -154,7 +154,7 @@ def run_plan(
     plan: Plan, state: State, spawn: Callable[[list[str], Path], subprocess.Popen], max_parallel: int | None = None
 ) -> int:
     try:
-        plan_name = plan.path.parent.name if plan.path else ""
+        plan_name = plan.slug
         emit(
             "plan",
             "run-start",
@@ -439,7 +439,22 @@ def run_plan(
 
                     # 5. Outcome
                     if _kind(task) == "implement":
-                        if job_status == "ok":
+                        handoff = job_result.get("handoff")
+                        if job_status == "ok" and isinstance(handoff, dict) and handoff.get("status") == "blocked":
+                            notes = handoff.get("notes")
+                            if isinstance(notes, list):
+                                lines = [str(item) for item in notes]
+                            elif isinstance(notes, str):
+                                lines = notes.splitlines()
+                            else:
+                                lines = []
+                            first = next((ln.strip() for ln in lines if ln.strip()), "")
+                            tstate.status = "blocked"
+                            tstate.reason = "handoff blocked: " + first[:300] if first else "handoff blocked"
+                            _trail(
+                                plan, name, "handoff-blocked", "handoff blocked", tstate.reason, attempt.job, "blocked"
+                            )
+                        elif job_status == "ok":
                             paths_allowed = task.paths_allowed
                             changed_files = job_result.get("changed_files", [])
                             violations = []
@@ -513,7 +528,7 @@ def run_plan(
         signal.signal(signal.SIGTERM, orig_sigterm)
         signal.signal(signal.SIGINT, orig_sigint)
         try:
-            plan_name = plan.path.parent.name if plan.path else ""
+            plan_name = plan.slug
             emit(
                 "plan",
                 "run-finish",

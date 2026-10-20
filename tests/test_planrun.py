@@ -1,12 +1,16 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 
 import agenthub.planrun
+from agenthub import handoff
+from agenthub.audit.trace import ENV_TRACE_PLAN
+from agenthub.audit.writer import audit_root
 from agenthub.config import load_pool, paths
 from agenthub.guards import _git_argv
 from agenthub.plan import Plan, Task
-from agenthub.planrun import _reviewers_besides, compose_brief, run_plan
+from agenthub.planrun import _reviewers_besides, _trail, compose_brief, run_plan
 from agenthub.planstate import load_or_init
 from tests.gitrepo import make_repo
 
@@ -714,3 +718,166 @@ def test_trail_header_written_once_across_resume(tmp_path):
         "attempt 2 ended",
         "task done",
     ]
+
+
+def _blocked_results(notes, status="blocked"):
+    return {"status": "ok", "exit_code": 0, "id": "j1", "handoff": {"status": status, "notes": notes}}
+
+
+def test_blocked_handoff_marks_task_blocked(tmp_path):
+    plan = make_plan(tmp_path, [{"name": "t1"}])
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [_blocked_results("\n  need the api key  \nsecond line")]})
+
+    rc = run_plan(plan, state, spawn)
+
+    assert rc == 1
+    assert state.task("t1").status == "blocked"
+    assert state.task("t1").reason.startswith("handoff blocked: ")
+    assert state.task("t1").reason == "handoff blocked: need the api key"
+    rows = [line.split("\t") for line in _trail_lines(plan)[1:]]
+    assert [row[2] for row in rows if row[1] == "t1"].count("handoff-blocked") == 1
+
+
+def test_blocked_handoff_reason_from_notes_list(tmp_path):
+    reply = "## Status\nblocked\n\n## Notes\n- need the api key\n- second line\n"
+    handoff_result = handoff.parse(reply)
+    assert handoff_result["notes"] == ["need the api key", "second line"]
+    plan = make_plan(tmp_path, [{"name": "t1"}])
+    state = load_or_init(plan)
+    result = {"status": "ok", "exit_code": 0, "id": "j1", "handoff": handoff_result}
+    spawn = FakeSpawner({"t1": [result]})
+
+    rc = run_plan(plan, state, spawn)
+
+    assert rc == 1
+    assert state.task("t1").status == "blocked"
+    assert state.task("t1").reason == "handoff blocked: need the api key"
+
+
+def test_blocked_handoff_skips_dependents(tmp_path):
+    plan = make_plan(tmp_path, [{"name": "t1"}, {"name": "t2", "depends_on": ["t1"]}])
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [_blocked_results("stuck")], "t2": [{"status": "ok"}]})
+
+    rc = run_plan(plan, state, spawn)
+
+    assert rc == 1
+    assert state.task("t1").status == "blocked"
+    assert state.task("t2").status == "skipped"
+    assert len(spawn.spawns) == 1
+
+
+def test_blocked_handoff_does_not_autocommit(tmp_path):
+    plan = make_plan(tmp_path, [{"name": "t1"}])
+    state = load_or_init(plan)
+    spawn = WritingSpawner({"t1": [_blocked_results("stuck")]}, writes={"t1"})
+
+    rc = run_plan(plan, state, spawn)
+
+    assert rc == 1
+    assert state.task("t1").status == "blocked"
+    worktree = Path(state.task("t1").worktree)
+    assert git_out(worktree, "rev-list", "--count", "master..HEAD") == "0"
+    assert "?? t1.txt" in git_out(worktree, "status", "--porcelain")
+
+
+def test_blocked_handoff_reason_truncated(tmp_path):
+    plan = make_plan(tmp_path, [{"name": "t1"}])
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [_blocked_results("x" * 500 + "\nnext")]})
+
+    run_plan(plan, state, spawn)
+
+    assert state.task("t1").status == "blocked"
+    assert state.task("t1").reason == "handoff blocked: " + "x" * 300
+
+
+def test_partial_handoff_still_done(tmp_path):
+    plan = make_plan(tmp_path, [{"name": "t1"}])
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [_blocked_results("some left", status="partial")]})
+
+    rc = run_plan(plan, state, spawn)
+
+    assert rc == 0
+    assert state.task("t1").status == "done"
+
+
+def test_missing_handoff_still_done(tmp_path):
+    plan = make_plan(tmp_path, [{"name": "t1"}])
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [{"status": "ok", "exit_code": 0, "id": "j1", "handoff": None}]})
+
+    rc = run_plan(plan, state, spawn)
+
+    assert rc == 0
+    assert state.task("t1").status == "done"
+
+
+def _slug_plan(tmp_path):
+    """A plan whose file lives in <tmp>/x/plan.json but whose slug is "s"."""
+    repo_dir = tmp_path / "repo"
+    make_repo(repo_dir)
+    plan_dir = tmp_path / "x"
+    plan_dir.mkdir()
+    (plan_dir / "t1.md").write_text("brief for t1")
+    task = Task(name="t1", role="implement", brief=plan_dir / "t1.md", max_attempts=1)
+    return Plan(
+        goal="goal", repo=repo_dir, base="master", slug="s", tasks=[task], max_parallel=1, path=plan_dir / "plan.json"
+    )
+
+
+def _audit_events(state_dir):
+    events = []
+    for p in sorted(audit_root(state_dir).glob("*/*.jsonl")):
+        for line in p.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                events.append(json.loads(line))
+    return events
+
+
+def test_trail_event_plan_is_slug(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("AGENT_HUB_STATE", str(state_dir))
+    plan = _slug_plan(tmp_path)
+
+    _trail(plan, task="t1", phase="start", decision="task started", reason="r", evidence="e", result="running")
+
+    events = _audit_events(state_dir)
+    assert len(events) == 1
+    assert events[0]["parent"]["plan"] == "s"
+    assert events[0]["parent"]["task"] == "t1"
+
+
+def test_run_finish_event_plan_is_slug(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("AGENT_HUB_STATE", str(state_dir))
+    plan = _slug_plan(tmp_path)
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [{"status": "ok", "exit_code": 0, "id": "j1"}]})
+
+    run_plan(plan, state, spawn)
+
+    events = _audit_events(state_dir)
+    by_event = {e["detail"]["event"]: e for e in events if e["kind"] == "plan" and "event" in e.get("detail", {})}
+    assert by_event["run-start"]["parent"]["plan"] == "s"
+    assert by_event["run-finish"]["parent"]["plan"] == "s"
+    assert all(e["parent"].get("plan") in (None, "s") for e in events)
+
+
+def test_trace_env_plan_is_slug(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path / "state"))
+    plan = _slug_plan(tmp_path)
+    state = load_or_init(plan)
+    seen = []
+
+    class EnvSpawner(FakeSpawner):
+        def __call__(self, argv, log_path):
+            seen.append(os.environ.get(ENV_TRACE_PLAN))
+            return super().__call__(argv, log_path)
+
+    run_plan(plan, state, EnvSpawner({"t1": [{"status": "ok", "exit_code": 0, "id": "j1"}]}))
+
+    assert seen == ["s"]
+    assert "x" not in seen
