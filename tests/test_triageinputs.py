@@ -117,7 +117,7 @@ def test_failed_gate_gives_tail(tmp_path: Path):
             "workdir": str(workdir),
             "head": head,
             "agent": "codex",
-            "model": "gpt-5",
+            "model": "m1",
         },
     ]
 
@@ -129,7 +129,7 @@ def test_failed_gate_gives_tail(tmp_path: Path):
     assert inputs.findings == []
     assert inputs.gate_tail == "just lint\nerror: unused import in a.py"
     assert inputs.diff_path == ""
-    assert inputs.implementers == ["codex:gpt-5"]
+    assert inputs.implementers == ["codex:m1"]
     assert inputs.job_ids == {"job-gate-1", "job-impl-1"}
 
 
@@ -311,7 +311,7 @@ def test_collects_implementers(tmp_path: Path):
             "kind": "implement",
             "status": "failed",
             "agent": "codex",
-            "model": "gpt-5",
+            "model": "m1",
             "workdir": str(workdir),
         },
         {
@@ -476,7 +476,7 @@ def test_running_gate_not_triaged(tmp_path: Path):
             "workdir": str(workdir),
             "head": head,
             "agent": "codex",
-            "model": "gpt-5",
+            "model": "m1",
         },
     ]
 
@@ -504,7 +504,7 @@ def test_cancelled_gate_not_triaged(tmp_path: Path):
             "workdir": str(workdir),
             "head": head,
             "agent": "codex",
-            "model": "gpt-5",
+            "model": "m1",
         },
     ]
 

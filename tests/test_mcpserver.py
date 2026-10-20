@@ -214,7 +214,7 @@ def test_wait_job_returns_result(env_sandbox, repo, monkeypatch):
     res = run_job(
         workdir=str(repo),
         role="implement",
-        agent="agy:claude-sonnet-4-6",
+        agent="agy:m1",
         brief_path=str(brief),
     )
     job_id = res["job_id"]

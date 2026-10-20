@@ -392,13 +392,13 @@ def _record_job(job_id, agent, model):
 
 
 def test_review_skips_implementing_model(tmp_path):
-    implementer = "agy:gemini-4-argon-medium"
+    implementer = next(link for link in load_pool().roles["review"].chain if link.startswith("agy:"))
     assert implementer in load_pool().roles["review"].chain
     plan = make_plan(
         tmp_path, [{"name": "t1"}, {"name": "r1", "role": "review", "verifies": "t1", "depends_on": ["t1"]}]
     )
     state = load_or_init(plan)
-    _record_job("j1", "agy", "gemini-4-argon-medium")
+    _record_job("j1", implementer.partition(":")[0], implementer.partition(":")[2])
     spawn = FakeSpawner({"t1": [{"status": "ok", "id": "j1"}], "r1": [{"status": "ok"}]})
 
     rc = run_plan(plan, state, spawn)
@@ -579,7 +579,7 @@ def test_done_task_with_uncommitted_work_is_committed(tmp_path):
     plan = make_plan(tmp_path, [{"name": "t1"}])
     state = load_or_init(plan)
     spawn = WritingSpawner(
-        {"t1": [{"status": "ok", "exit_code": 0, "id": "j1", "agent": "codex", "model": "gpt-x"}]}, writes={"t1"}
+        {"t1": [{"status": "ok", "exit_code": 0, "id": "j1", "agent": "codex", "model": "m1"}]}, writes={"t1"}
     )
 
     rc = run_plan(plan, state, spawn)
@@ -590,7 +590,7 @@ def test_done_task_with_uncommitted_work_is_committed(tmp_path):
     assert git_out(worktree, "status", "--porcelain") == ""
     assert git_out(worktree, "rev-list", "--count", "master..HEAD") == "1"
     assert git_out(worktree, "log", "-1", "--format=%s") == (
-        "orch: testslug/t1 — work left uncommitted by codex:gpt-x (gate passed)"
+        "orch: testslug/t1 — work left uncommitted by codex:m1 (gate passed)"
     )
     assert git_out(worktree, "show", "--name-only", "--format=", "HEAD") == "t1.txt"
 
@@ -617,7 +617,7 @@ def test_dependent_starts_from_autocommitted_work(tmp_path):
     state = load_or_init(plan)
     spawn = WritingSpawner(
         {
-            "t1": [{"status": "ok", "exit_code": 0, "id": "j1", "agent": "codex", "model": "gpt-x"}],
+            "t1": [{"status": "ok", "exit_code": 0, "id": "j1", "agent": "codex", "model": "m1"}],
             "t2": [{"status": "ok", "exit_code": 0, "id": "j2"}],
         },
         writes={"t1"},
