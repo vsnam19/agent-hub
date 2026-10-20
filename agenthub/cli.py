@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+import tomllib
 import unicodedata
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
@@ -20,7 +21,7 @@ from agenthub import guards
 from agenthub.agents import registry
 from agenthub.audit.emit import emit
 from agenthub.brief import BriefError, order_table
-from agenthub.config import ConfigError, parse_duration, paths, role_kind
+from agenthub.config import ConfigError, Paths, Pool, parse_duration, paths, role_kind
 from agenthub.jobs import dead_job_result, get_job, list_jobs
 from agenthub.orchestrate import EXIT, RunArgs, readiness, run_gate_job, run_job, skills_hint
 from agenthub.plan import PlanError
@@ -935,6 +936,23 @@ def _cmd_audit(args) -> int:
         return 1
 
 
+def _owner_roles_same_as_default(p: Paths, pool: Pool) -> set[str]:
+    """Owner roles whose chain equals the built-in chain (the override can be dropped)."""
+    try:
+        owner = tomllib.loads((p.config_dir / "pool.toml").read_text())
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return set()
+    owner_roles = owner.get("roles")
+    if not isinstance(owner_roles, dict):
+        return set()
+    default = load_pool(Paths(config_dir=p.state_dir / "no-owner-pool", state_dir=p.state_dir))
+    return {
+        name
+        for name in owner_roles
+        if name in pool.roles and name in default.roles and pool.roles[name].chain == default.roles[name].chain
+    }
+
+
 def _cmd_pool(args) -> int:
     p = paths()
     pool = load_pool(p)
@@ -971,9 +989,11 @@ def _cmd_pool(args) -> int:
     if args.json:
         print(json.dumps({"roles": roles}, indent=2))
         return 0
+    same_as_default = _owner_roles_same_as_default(p, pool)
     for role, config in roles.items():
         escalate = f", escalate → {config['escalate']}" if config["escalate"] else ""
-        print(_safe(f"{role} ({config['kind']}{escalate}):"))
+        marker = "  (same as default)" if role in same_as_default else ""
+        print(_safe(f"{role} ({config['kind']}{escalate}):{marker}"))
         for e in config["chain"]:
             parts = [e["link"], "installed" if e["installed"] else "missing"]
             if e["version"]:
