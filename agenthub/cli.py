@@ -382,6 +382,32 @@ def _build_parser() -> argparse.ArgumentParser:
         help=f'systemd calendar expression (default "{AUDIT_SCHEDULE_DEFAULT_AT}")',
     )
 
+    incident = sub.add_parser("incident", help="log and list process incidents")
+    incident_sub = incident.add_subparsers(dest="incident_command", required=True, parser_class=_Parser)
+
+    incident_add = incident_sub.add_parser("add", help="append an incident to the log")
+    incident_add.add_argument("--kind", required=True, help="incident kind, e.g. review-stall")
+    incident_add.add_argument("--what", required=True, help="what happened")
+    incident_add.add_argument("--lesson", help="what to do next time")
+    incident_add.add_argument(
+        "--source",
+        choices=["director", "techlead", "tool", "owner"],
+        default="director",
+        help="who recorded the incident (default director)",
+    )
+    incident_add.add_argument("--plan", help="plan name")
+    incident_add.add_argument("--task", help="task name")
+    incident_add.add_argument("--job", help="job id")
+    incident_add.add_argument("--attempts", type=int, help="attempts spent")
+    incident_add.add_argument("--rounds", type=int, help="review rounds spent")
+    incident_add.add_argument("--minutes", type=int, help="minutes lost")
+    incident_add.add_argument("--json", action="store_true", help="print the record as one JSON object")
+
+    incident_list = incident_sub.add_parser("list", help="list incidents, oldest first")
+    incident_list.add_argument("--since", help="filter incidents since date, iso timestamp, or relative time")
+    incident_list.add_argument("--kind", help="filter by incident kind")
+    incident_list.add_argument("--json", action="store_true", help="output one JSON object per line")
+
     sub.add_parser("mcp", help="run the MCP server over stdio")
 
     hook = sub.add_parser("hook", help="Claude Code session hooks")
@@ -408,6 +434,7 @@ def main(argv: list[str] | None = None) -> int:
             "hub": _cmd_hub,
             "skills": _cmd_skills,
             "audit": _cmd_audit,
+            "incident": _cmd_incident,
             "mcp": _cmd_mcp,
             "hook": _cmd_hook,
         }[args.command]
@@ -934,6 +961,63 @@ def _cmd_audit(args) -> int:
         detail = getattr(e, "filename", None) or e
         print(_safe(f"audit: cannot read {detail}", sys.stderr), file=sys.stderr)
         return 1
+
+
+def _cmd_incident_add(args) -> int:
+    from agenthub import incidents
+
+    try:
+        record = incidents.add(
+            paths().state_dir,
+            kind=args.kind,
+            what=args.what,
+            source=args.source,
+            lesson=args.lesson,
+            plan=args.plan,
+            task=args.task,
+            job=args.job,
+            attempts=args.attempts,
+            rounds=args.rounds,
+            minutes=args.minutes,
+        )
+    except ValueError as e:
+        raise UsageError(str(e)) from None
+
+    if args.json:
+        print(_safe(json.dumps(record, ensure_ascii=False)))
+    else:
+        print(_safe(f"logged incident {record['kind']}"))
+    return 0
+
+
+def _cmd_incident_list(args) -> int:
+    from agenthub import incidents
+    from agenthub.audit.show import parse_since
+
+    since = None
+    if args.since is not None:
+        try:
+            since = datetime.fromisoformat(parse_since(args.since).replace("Z", "+00:00"))
+        except ValueError:
+            raise UsageError(f"invalid --since: {args.since!r}") from None
+
+    for row in incidents.read(paths().state_dir, since=since, kind=args.kind):
+        if args.json:
+            print(_safe(json.dumps(row, ensure_ascii=False)))
+            continue
+        line = f"{row.get('ts', '')}  {row.get('source', '')}  {row.get('kind', '')}  {row.get('what', '')}"
+        if row.get("lesson"):
+            line += f"  — {row['lesson']}"
+        print(_safe(line))
+    return 0
+
+
+def _cmd_incident(args) -> int:
+    if args.incident_command == "add":
+        return _cmd_incident_add(args)
+    if args.incident_command == "list":
+        return _cmd_incident_list(args)
+    raise UsageError(f"unknown incident command: {args.incident_command}")
 
 
 def _owner_roles_same_as_default(p: Paths, pool: Pool) -> set[str]:
