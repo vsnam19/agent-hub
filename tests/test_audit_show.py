@@ -72,13 +72,13 @@ def test_oldest_first_and_format_line(tmp_path: Path) -> None:
 
     e2 = {
         "ts": "2026-10-18T10:05:00.000Z",
-        "actor": {"agent": "agy:gemini-3.8-flash-high", "role": "worker", "host": "agy"},
+        "actor": {"agent": "agy:m2", "role": "worker", "host": "agy"},
         "kind": "tool",
         "target": "run_command",
         "outcome": {"status": "ok"},
         "quote": "running tests",
     }
-    assert format_line(e2) == "2026-10-18T10:05:00.000Z agy:gemini-3.8-flash-high tool run_command ok running tests"
+    assert format_line(e2) == "2026-10-18T10:05:00.000Z agy:m2 tool run_command ok running tests"
 
     e3 = {
         "ts": "2026-10-18T10:10:00.000Z",
