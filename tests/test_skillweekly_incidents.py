@@ -59,3 +59,21 @@ def test_no_findings_corrections_or_incidents_still_stops(tmp_path):
     assert "nothing to learn" in (env.out / "report.md").read_text()
     assert env.last_run.read_text().strip() == NOW.isoformat()
     assert env.fake.calls == []
+
+
+def mine_step_detail(report: skillweekly.Report) -> str:
+    return next(step.detail for step in report.steps if step.name == "mine")
+
+
+def test_dry_run_mine_line_counts_incidents(tmp_path):
+    env = Env(tmp_path, findings=0)
+    rows = [{"ts": "2026-10-10T10:00:00Z", "kind": kind, "what": "x", "source": "director"} for kind in ("a", "a", "b")]
+    (env.state / "incidents.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    report = env.run(dry_run=True)
+    assert ", 3 incidents since" in mine_step_detail(report)
+
+
+def test_dry_run_mine_line_zero_incidents(tmp_path):
+    env = Env(tmp_path)
+    report = env.run(dry_run=True)
+    assert ", 0 incidents since" in mine_step_detail(report)
