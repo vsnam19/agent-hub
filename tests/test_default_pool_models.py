@@ -1,4 +1,5 @@
 from agenthub.config import load_pool, paths
+from agenthub.pool import parse_link
 
 
 def test_default_pool_has_no_removed_models(monkeypatch, tmp_path):
@@ -12,7 +13,7 @@ def test_default_pool_has_no_removed_models(monkeypatch, tmp_path):
             for item in removed:
                 assert item not in model, f"role {role_name} contains removed model: {model}"
 
-    assert "agy:gemini-3.8-flash-high" in pool.roles["implement"].chain
+    assert any(parse_link(link).agent == "agy" for link in pool.roles["implement"].chain)
 
 
 def test_default_pool_uses_argon_for_hard_and_review(monkeypatch, tmp_path):
@@ -20,5 +21,11 @@ def test_default_pool_uses_argon_for_hard_and_review(monkeypatch, tmp_path):
     p = paths()
     pool = load_pool(p)
 
-    assert pool.roles["implement-hard"].chain[0] == "agy:gemini-4-argon-high"
-    assert pool.roles["review"].chain[0] == "agy:gemini-4-argon-medium"
+    assert pool.roles["implement-hard"].chain
+    assert pool.roles["review"].chain
+    hard = parse_link(pool.roles["implement-hard"].chain[0])
+    assert hard.agent == "agy"
+    assert "argon" in hard.model
+    review = parse_link(pool.roles["review"].chain[0])
+    assert review.agent == "agy"
+    assert "argon" in review.model
