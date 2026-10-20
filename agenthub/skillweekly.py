@@ -260,7 +260,7 @@ class _Run:
         add(Step("lock", "would", f"{self.cfg.state_dir / 'skills' / 'weekly.lock'}"))
         found = f"{len(extract.findings)} findings, {extract.corrections_total} corrections since {since.date()}"
         add(Step("mine", "would", f"into {self.out}: {found}"))
-        if len(extract.findings) < MIN_FINDINGS and not extract.corrections_total:
+        if len(extract.findings) < MIN_FINDINGS and not extract.corrections_total and not extract.incidents:
             add(Step("stop", "would", "nothing to learn; advance last-run"))
             return
         add(Step("worktree", "would", f"{self.wt} on new branch {self.branch} from <default branch>"))
@@ -302,7 +302,7 @@ class _Run:
             if g["count"] >= 2
         ][:5]
         self.step("mine", f"{len(extract.findings)} findings, {extract.corrections_total} corrections")
-        if len(extract.findings) < MIN_FINDINGS and not extract.corrections_total:
+        if len(extract.findings) < MIN_FINDINGS and not extract.corrections_total and not extract.incidents:
             self.report.outcome = "nothing to learn"
             self.step("stop", "nothing to learn")
             raise Done
