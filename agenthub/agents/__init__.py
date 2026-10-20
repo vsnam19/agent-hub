@@ -1,8 +1,10 @@
 import importlib
+import os
 import shutil
 import subprocess
 import tomllib
-from dataclasses import dataclass
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -25,6 +27,7 @@ class AgentConfig:
     version_args: list[str]
     env_passthrough: list[str]
     read_only: str
+    known_models: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -58,6 +61,7 @@ class Adapter:
     name: str
     config: AgentConfig
     profile_path: Path
+    models_error: str | None = None
 
     def preflight(self, req: Request) -> Classified | None:
         return None
@@ -88,6 +92,32 @@ class Adapter:
             pass
         return None
 
+    def list_models(self) -> list[str] | None:
+        return None
+
+    def _catalog_output(self, args: Sequence[str] | list[str], drop_env: Iterable[str] = ()) -> str | None:
+        drop = set(drop_env)
+        env = {k: v for k, v in os.environ.items() if k not in drop}
+        try:
+            res = subprocess.run(
+                [self.config.binary, *args],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                stdin=subprocess.DEVNULL,
+                env=env,
+            )
+            if res.returncode == 0:
+                return res.stdout
+            self.models_error = f"rc {res.returncode}"
+            return None
+        except subprocess.TimeoutExpired:
+            self.models_error = "timeout"
+            return None
+        except Exception as exc:
+            self.models_error = str(exc) or type(exc).__name__
+            return None
+
 
 def discover(package_dir: Path, package_name: str) -> dict[str, Adapter]:
     adapters = {}
@@ -110,6 +140,7 @@ def discover(package_dir: Path, package_name: str) -> dict[str, Adapter]:
             version_args=cfg_data.get("version_args", []),
             env_passthrough=cfg_data.get("env_passthrough", []),
             read_only=cfg_data.get("read_only", "best-effort"),
+            known_models=cfg_data.get("known_models", []),
         )
 
         profile_path = item / "profile.md"
