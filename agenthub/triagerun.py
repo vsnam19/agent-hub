@@ -51,7 +51,7 @@ def triage_task(
     its decision. Returns None when no triage is needed; otherwise the apply summary plus the task name."""
 
     def _finish(res: dict) -> dict:
-        plan_name = plan.path.parent.name if plan.path else plan.slug
+        plan_name = plan.slug
         decision = res.get("status", "")
         reason = res.get("reason", "")
         try:
