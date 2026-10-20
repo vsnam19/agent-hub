@@ -77,7 +77,7 @@ _PASSWORD_PROGRAMS = {"mysql", "mysqldump", "mysqladmin", "sshpass"}
 _CURL_USER_FLAGS = {"-u", "--user", "-U", "--proxy-user"}
 # bundle letters must be curl short flags that never take a value
 _CURL_CERT_FLAGS = {"-E", "--cert", "--proxy-cert"}
-_CURL_SHORT_CERT = re.compile(r"^-E(.+)$")
+_CURL_SHORT_CERT = re.compile(r"^-([#0123456ABCGIJLMNOREVZfgijklnpqsSv]*)E(.*)$")
 _CURL_SHORT_USER = re.compile(r"^-([#0123456ABCGIJLMNOREVZfgijklnpqsSv]*)([uU])(.*)$")
 _SECRET_KEY = re.compile(rf"(?i)^{_NAME}$")
 _ENV_VAR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
@@ -218,13 +218,20 @@ def _redact_userpass(value: str) -> str:
 
 
 def _redact_certpass(value: str) -> str:
-    """`cert:password` -> `cert:<redacted>`; split at the last `:` that is not a Windows drive prefix."""
-    idx = value.rfind(":")
-    if idx == 1 and value[0].isalpha():
-        idx = -1
-    if idx <= 0:
-        return value
-    return f"{value[:idx]}:<redacted>"
+    """`cert:password` -> `cert:<redacted>`; split at the first unescaped `:` after a Windows drive prefix.
+
+    Like curl, `\\:` is an escaped colon that belongs to the cert name; any other backslash is literal.
+    """
+    start = 2 if len(value) >= 2 and value[0].isalpha() and value[1] == ":" else 0
+    i = start
+    while i < len(value):
+        if value[i] == "\\" and value[i + 1 : i + 2] == ":":
+            i += 2
+            continue
+        if value[i] == ":":
+            return f"{value[:i]}:<redacted>"
+        i += 1
+    return value
 
 
 def redact_argv(argv: list[str]) -> list[str]:
@@ -308,8 +315,17 @@ def _redact_argv_items(argv: list[str]) -> list[str]:
                 continue
             m_cert = _CURL_SHORT_CERT.match(arg)
             if m_cert:
-                res.append(f"-E{_redact_certpass(m_cert.group(1))}")
-                i += 1
+                head, rest = m_cert.group(1), m_cert.group(2)
+                if rest:
+                    res.append(f"-{head}E{_redact_certpass(rest)}")
+                    i += 1
+                else:
+                    res.append(arg)
+                    if i + 1 < len(argv):
+                        res.append(_redact_certpass(argv[i + 1]))
+                        i += 2
+                    else:
+                        i += 1
                 continue
             m = _CURL_SHORT_USER.match(arg)
             if m:
