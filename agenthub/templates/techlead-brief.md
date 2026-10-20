@@ -25,6 +25,7 @@ Rules for every task:
   name a real check for it: a command to run against the real tool, or a fixture copied from its real output. Read the
   code that calls the tool first; do not invent flags or output formats.
 - The `## Gate` section of every task is: $gates.
+- When a task changes an existing behaviour or contract, grep `tests/` for assertions of the old behaviour and list every such test file in the task's changed files (they count toward the file limit; split the task if needed).
 - Write every brief for a model that has not read the spec: copy what it needs into `## Input`.
 
 Each brief is markdown with these five headings, each one present:
