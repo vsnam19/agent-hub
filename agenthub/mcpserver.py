@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agenthub import brief as briefmod
-from agenthub import guards
+from agenthub import guards, incidents
 from agenthub.agents import registry
 from agenthub.audit.archive import archive_month
 from agenthub.audit.show import parse_since, read_events_with_archives, select
@@ -212,6 +212,38 @@ def audit_show_data(
     return {
         "events": events,
         "skipped_months": skipped,
+        "truncated": truncated,
+    }
+
+
+def incidents_data(
+    since: str | None = None,
+    kind: str | None = None,
+    p: Paths | None = None,
+) -> dict[str, Any]:
+    p = p or paths()
+
+    since_dt: datetime | None = None
+    if since is not None:
+        cleaned = since.strip()
+        if not cleaned:
+            raise UsageError("empty since expression")
+        try:
+            since_iso = parse_since(cleaned)
+            since_dt = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
+        except ValueError as err:
+            raise UsageError(f"invalid since expression: {since!r}") from err
+
+    rows = incidents.read(p.state_dir, since=since_dt, kind=kind)
+
+    if len(rows) > 500:
+        rows = rows[-500:]
+        truncated = True
+    else:
+        truncated = False
+
+    return {
+        "incidents": rows,
         "truncated": truncated,
     }
 
@@ -1661,6 +1693,19 @@ def build_server(audit: bool = False) -> "MCPServer":
         )
         def audit_archive_rerun(month: str) -> dict[str, Any]:
             return audit_archive_rerun_data(month=month)
+
+        @server.tool(
+            name="incidents",
+            description=(
+                "List incident log entries (process failures) filtered by since or kind (last 500); read-only"
+            ),
+            annotations=ToolAnnotations(readOnlyHint=True),
+        )
+        def incidents_tool(
+            since: str | None = None,
+            kind: str | None = None,
+        ) -> dict[str, Any]:
+            return incidents_data(since=since, kind=kind)
 
     return server
 
