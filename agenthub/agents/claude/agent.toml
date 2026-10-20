@@ -2,3 +2,4 @@ binary = "claude"
 version_args = ["--version"]
 env_passthrough = []
 read_only = "native"
+known_models = ["haiku", "sonnet", "opus", "fable"]
