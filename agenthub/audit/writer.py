@@ -714,7 +714,8 @@ def _claim_pending_and_emit_gap(root: Path, state_dir: Path | str | None) -> Non
                 os.fsync(fd)
             finally:
                 os.close(fd)
-        _release_claims(claims, sizes, pending_path)
+        # an unreadable claim stays on disk: the orphan rule picks it up later
+        _release_claims([path for path in claims if path in sizes], sizes, pending_path)
         raise
     _state.emitting_gap = False
     _release_claims(claims, sizes, pending_path)
