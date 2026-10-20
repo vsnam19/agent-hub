@@ -376,6 +376,16 @@ def _sanitize_detail(detail: Mapping[str, Any]) -> dict[str, Any]:
     return _sanitize_mapping(detail)
 
 
+def _still_changes(text: str) -> bool:
+    """Re-tokenise `text` like `_redact_target` does; True if `redact_argv` still changes any token."""
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        tokens = text.split()
+    redacted = redact_argv(tokens)
+    return len(redacted) != len(tokens) or any(tok != red for tok, red in zip(tokens, redacted, strict=True))
+
+
 def _redact_target(target: str) -> str:
     try:
         tokens = shlex.split(target)
@@ -396,6 +406,8 @@ def _redact_target(target: str) -> str:
         return redact(shlex.join(redacted_tokens))
     combined = re.compile(r"(?<![^\s'\"=])(?:" + "|".join(re.escape(tok) for tok in ordered) + r")(?![^\s'\"])")
     result = combined.sub(lambda m: changed[m.group(0)], target)  # one pass: never rewrites an inserted <redacted>
+    if _still_changes(result):  # a quoted/escaped copy of a secret survived the replacement
+        return redact(shlex.join(redacted_tokens))
     return redact(result)
 
 

@@ -629,3 +629,31 @@ def test_target_any_changed_token_replaced() -> None:
     out2 = sanitize({"target": "a --token abcd1234 && b --token abcd1234 c"})["target"]
     assert "abcd1234" not in out2
     assert out2 == "a --token <redacted> && b --token <redacted> c"
+
+
+def test_redact_target_quoted_secret_with_plain_copy() -> None:
+    secret = "s3cr3tpw"
+    target = f"curl -u alice:'{secret}' http://x/a && curl -u alice:{secret} http://x/b"
+    out = sanitize({"target": target})["target"]
+    assert secret not in out
+    assert out.count("alice:<redacted>") == 2
+    assert "curl" in out
+    assert "http://x/a" in out
+    assert "http://x/b" in out
+
+
+def test_redact_target_backslash_secret_with_plain_copy() -> None:
+    secret = "s3cr3t!pw"
+    target = f"curl -u alice:s3cr3t\\!pw http://x/a && curl -u alice:{secret} http://x/b"
+    out = sanitize({"target": target})["target"]
+    assert secret not in out
+    assert "s3cr3t\\!pw" not in out
+    assert out.count("alice:<redacted>") == 2
+    assert "http://x/a" in out
+    assert "http://x/b" in out
+
+
+def test_redact_target_plain_case_unchanged() -> None:
+    out = sanitize({"target": "x && curl -u alice:hunter2 http://x/path --silent"})["target"]
+    assert out == "x && curl -u alice:<redacted> http://x/path --silent"
+    assert "hunter2" not in out
