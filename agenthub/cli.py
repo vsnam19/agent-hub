@@ -1022,7 +1022,7 @@ def _cmd_incident(args) -> int:
 
 
 def _owner_roles_same_as_default(p: Paths, pool: Pool) -> set[str]:
-    """Owner roles whose chain equals the built-in chain (the override can be dropped)."""
+    """Owner roles that equal the built-in role (chain, kind and escalate), so the override can be dropped."""
     try:
         owner = tomllib.loads((p.config_dir / "pool.toml").read_text())
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
@@ -1034,7 +1034,7 @@ def _owner_roles_same_as_default(p: Paths, pool: Pool) -> set[str]:
     return {
         name
         for name in owner_roles
-        if name in pool.roles and name in default.roles and pool.roles[name].chain == default.roles[name].chain
+        if name in pool.roles and name in default.roles and pool.roles[name] == default.roles[name]
     }
 
 
