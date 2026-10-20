@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agenthub import brief as briefmod
-from agenthub import guards
+from agenthub import guards, models
 from agenthub.agents import registry
 from agenthub.audit.archive import archive_month
 from agenthub.audit.show import parse_since, read_events_with_archives, select
@@ -55,22 +55,14 @@ def pool_data(p: Paths | None = None, now: datetime | None = None) -> dict[str, 
     adapters = registry()
     now = now or datetime.now(timezone.utc)
 
+    cache = models.read(p.models_file)
     roles: dict[str, dict] = {}
     for role, config in pool.roles.items():
         entries = []
         for text in config.chain:
             link = parse_link(text)
-            adapter = adapters.get(link.agent)
-            installed = adapter is not None and adapter.installed()
             until = cooldowns.until(link, now)
-            entries.append(
-                {
-                    "link": str(link),
-                    "installed": installed,
-                    "version": adapter.version() if installed else None,
-                    "cooldown_until": until.isoformat() if until else None,
-                }
-            )
+            entries.append(models.pool_entry(link, adapters.get(link.agent), until, cache, now))
         roles[role] = {"kind": config.kind, "escalate": config.escalate, "chain": entries}
 
     return {"roles": roles}
