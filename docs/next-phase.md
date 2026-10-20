@@ -48,9 +48,9 @@ The steps below describe how `followups-1` was run; reuse them for the next plan
 `agent-hub wait`/`plan wait` or a `run_in_background` loop on the result file. Foreground waits over ~10 min get moved
 to the background — keep a backgrounded waiter and keep working.
 
-**Routing:** gwen is off. Implement: `agy:gemini-3.8-flash-high` first (saves Claude tokens); haiku fallback.
-Review: a model that did not write any commit on the branch (usually `claude:opus`). If claude:opus is on cooldown,
-wait for it (check `agent-hub pool`) rather than accept a self-review.
+**Routing (D-126, owner 2026-10-20):** gwen is off. Implement on agy Claude Sonnet 5.5 when free, else
+`agy:gemini-3.8-flash-high`, else claude:haiku (chain). Review chain: Argon Medium → agy Claude Opus 5.5 Medium →
+Flash → `claude:opus@low` — never plain `claude:opus`. Brief agy to edit directly (no background tasks, D-129).
 
 **After `followups-1`:** release v0.11.0 only if the owner asks; otherwise next is F6 (codex/agy MCP registration via
 `hub install`), then E5 (`plan draft`, with the E5 extras in follow-ups), E6, E7 techlead bench. Update
