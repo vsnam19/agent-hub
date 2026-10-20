@@ -651,6 +651,19 @@ def run_job(
     record["head"] = guards.head(repo)
     files, stat = guards.changes(repo, start_head)
     record.update(changed_files=files, diffstat=stat)
+    parsed = record.get("handoff")
+    if (
+        kind == "implement"
+        and status == "ok"
+        and files == []
+        and record["head"] == start_head
+        and parsed is not None
+        and str(parsed.get("status", "")).strip().lower() == "success"
+        and record.get("agent") == "agy"
+        and _delegated_to_background(record.get("reply_path"))
+    ):
+        status = "empty"
+        record["empty_reason"] = "success handoff but no change in the work tree"
     if args.allow and kind == "implement" and status in ("ok", "gate-failed"):
         outside = [
             f
@@ -800,6 +813,14 @@ def _passed_gate(j: dict, head: str) -> bool:
         ran = {g.get("cmd") for g in j["gate"]}
         return j.get("status") == "ok" and bool(j.get("repo_gates")) and set(j["repo_gates"]) <= ran
     return True
+
+
+def _delegated_to_background(reply_path: str | None) -> bool:
+    """True when the attempt's stderr says agy handed the work to background tasks."""
+    if not reply_path:
+        return False
+    stderr = Path(reply_path).parent / "stderr"
+    return stderr.is_file() and "background task" in stderr.read_text(errors="replace")
 
 
 def _rel(job: Job, attempt_dir: Path, name: str) -> str:
