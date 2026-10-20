@@ -47,7 +47,7 @@ def test_pool_does_not_mark_changed_owner_role(env_sandbox, capsys):
     assert MARK not in out
 
 
-def test_pool_marks_role_with_owner_override(env_sandbox, capsys):
+def test_pool_does_not_mark_role_without_owner_override(env_sandbox, capsys):
     chain = default_chain(env_sandbox, "implement")
     assert chain
     write_owner(env_sandbox, {"implement": ("implement", chain)})
