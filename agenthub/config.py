@@ -27,6 +27,10 @@ class Paths:
     def models_file(self) -> Path:
         return self.state_dir / "models.json"
 
+    @property
+    def incidents_file(self) -> Path:
+        return self.state_dir / "incidents.jsonl"
+
 
 def paths() -> Paths:
     home = Path(os.environ.get("HOME", "~")).expanduser()
