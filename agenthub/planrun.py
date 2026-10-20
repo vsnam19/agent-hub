@@ -442,9 +442,13 @@ def run_plan(
                         handoff = job_result.get("handoff")
                         if job_status == "ok" and isinstance(handoff, dict) and handoff.get("status") == "blocked":
                             notes = handoff.get("notes")
-                            first = ""
-                            if isinstance(notes, str):
-                                first = next((ln.strip() for ln in notes.splitlines() if ln.strip()), "")
+                            if isinstance(notes, list):
+                                lines = [str(item) for item in notes]
+                            elif isinstance(notes, str):
+                                lines = notes.splitlines()
+                            else:
+                                lines = []
+                            first = next((ln.strip() for ln in lines if ln.strip()), "")
                             tstate.status = "blocked"
                             tstate.reason = "handoff blocked: " + first[:300] if first else "handoff blocked"
                             _trail(

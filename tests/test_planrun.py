@@ -3,6 +3,7 @@ import subprocess
 from pathlib import Path
 
 import agenthub.planrun
+from agenthub import handoff
 from agenthub.config import load_pool, paths
 from agenthub.guards import _git_argv
 from agenthub.plan import Plan, Task
@@ -733,6 +734,22 @@ def test_blocked_handoff_marks_task_blocked(tmp_path):
     assert state.task("t1").reason == "handoff blocked: need the api key"
     rows = [line.split("\t") for line in _trail_lines(plan)[1:]]
     assert [row[2] for row in rows if row[1] == "t1"].count("handoff-blocked") == 1
+
+
+def test_blocked_handoff_reason_from_notes_list(tmp_path):
+    reply = "## Status\nblocked\n\n## Notes\n- need the api key\n- second line\n"
+    handoff_result = handoff.parse(reply)
+    assert handoff_result["notes"] == ["need the api key", "second line"]
+    plan = make_plan(tmp_path, [{"name": "t1"}])
+    state = load_or_init(plan)
+    result = {"status": "ok", "exit_code": 0, "id": "j1", "handoff": handoff_result}
+    spawn = FakeSpawner({"t1": [result]})
+
+    rc = run_plan(plan, state, spawn)
+
+    assert rc == 1
+    assert state.task("t1").status == "blocked"
+    assert state.task("t1").reason == "handoff blocked: need the api key"
 
 
 def test_blocked_handoff_skips_dependents(tmp_path):
