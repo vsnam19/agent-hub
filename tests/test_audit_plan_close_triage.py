@@ -43,7 +43,7 @@ def _make_plan(tmp_path: Path, tasks: list[Task] | None = None) -> tuple[Plan, A
         goal="Test plan close loop",
         repo=tmp_path,
         base="main",
-        slug="test-close",
+        slug="plan-alpha",
         tasks=tasks,
         path=plan_file,
     )
@@ -59,7 +59,7 @@ def _setup_triage(tmp_path: Path) -> tuple[Plan, Task, TaskState, list[dict[str,
     brief = plan_dir / "t.md"
     brief.write_text("task brief", encoding="utf-8")
     task = Task(name="task-t", role="implement", brief=brief, gate=["just lint"])
-    plan = Plan(goal="g", repo=tmp_path, base="main", slug="s", tasks=[task], path=plan_dir / "plan.json")
+    plan = Plan(goal="g", repo=tmp_path, base="main", slug="plan-beta", tasks=[task], path=plan_dir / "plan.json")
     tstate = TaskState(status="done", worktree=str(wt))
     review_reply = tmp_path / "review" / "x" / "y" / "reply.md"
     review_reply.parent.mkdir(parents=True, exist_ok=True)

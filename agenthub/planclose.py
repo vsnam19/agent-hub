@@ -192,7 +192,7 @@ def close(
         for t in plan.tasks
     )
     ok = not cancelled and not stale and not cascade_blocked and all(t.name in approved for t in implement_tasks)
-    plan_name = plan.path.parent.name if plan.path else plan.slug
+    plan_name = plan.slug
     try:
         emit(
             "plan",
