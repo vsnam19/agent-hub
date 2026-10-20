@@ -285,6 +285,53 @@ def test_gap_written_then_error_does_not_restore(tmp_path: Path, monkeypatch: py
     assert not list(tmp_path.glob("*.claimed"))
 
 
+def _make_unreadable(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+    real_read = Path.read_bytes
+
+    def read_bytes(self: Path) -> bytes:
+        if self == target:
+            raise PermissionError("unreadable claim")
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+
+
+def test_unreadable_claim_left_when_gap_append_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pending = tmp_path / "audit-pending-gap.jsonl"
+    bad = tmp_path / "audit-pending-gap.999999991.claimed"
+    good = tmp_path / "audit-pending-gap.999999992.claimed"
+    bad.write_text("secret\n", encoding="utf-8")
+    good.write_text('{"ts":"2026-01-01T00:00:00.000Z","reason":"old"}\n', encoding="utf-8")
+    _make_unreadable(monkeypatch, bad)
+    real = writer._write_record_to_file
+
+    def boom_on_gap(record, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if record.get("kind") == "gap":
+            raise RuntimeError("gap append failed")
+        return real(record, *args, **kwargs)
+
+    monkeypatch.setattr(writer, "_write_record_to_file", boom_on_gap)
+    assert write({"kind": "tool", "target": "x"}, state_dir=tmp_path) is False
+    assert bad.exists()
+    assert not good.exists()
+    reasons = [json.loads(line).get("reason") for line in pending.read_text(encoding="utf-8").splitlines()]
+    assert "old" in reasons
+
+
+def test_unreadable_claim_unlinked_after_gap_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bad = tmp_path / "audit-pending-gap.999999991.claimed"
+    good = tmp_path / "audit-pending-gap.999999992.claimed"
+    bad.write_text("secret\n", encoding="utf-8")
+    good.write_text('{"ts":"2026-01-01T00:00:00.000Z","reason":"old"}\n', encoding="utf-8")
+    _make_unreadable(monkeypatch, bad)
+    assert write({"kind": "tool", "target": "x"}, state_dir=tmp_path) is True
+    assert not bad.exists()
+    assert not good.exists()
+    events = [json.loads(line) for line in _all_lines(tmp_path)]
+    assert [e["kind"] for e in events] == ["gap", "tool"]
+    assert events[0]["detail"]["lost"] == "unknown"
+
+
 def test_unparsable_pending_lines_counted(tmp_path: Path) -> None:
     pending = tmp_path / "audit-pending-gap.jsonl"
     pending.write_text(
