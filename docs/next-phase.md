@@ -13,12 +13,13 @@ vault (no config / missing vault keep data and exit 1; success; re-run no-op; ve
 `.worktrees/phase-g-*`, `.worktrees/phase-g-hardening-*`, `orch/phase-g/*`, `orch/phase-g-hardening/*` — deleting them
 is the owner's call.
 
-**Current work (2026-10-20 00:00 UTC): plan `ids-incidents` (D-121 + D-122) running.** Spec
-`docs/superpowers/specs/2026-10-20-model-ids-and-incidents-design.md`; split by techlead job
-`20261019-234713-techlead-ed70` (21 tasks); plan `~/.local/state/agent-hub/plans/ids-incidents/plan.json`
-(implement on `agy:gemini-3.8-flash-high`; reviews on the owner review chain Argon Medium → agy Claude Opus 5.5 Medium →
-Flash — **never claude:opus**, D-126). Next: plan wait → plan review → plan close → ready → plan merge → v0.13.0.
-Owner still to do for v0.12.0: release (plugin cache), then README "Audit log" owner steps.
+**Current work (2026-10-20 05:10 UTC): v0.13.0 on master (local, not pushed; plugin cache still 0.11.0).** Plan
+`ids-incidents` (D-121 + D-122, D-127) merged: lint + 1612 tests green; real check `pool --refresh-models` (agy 13 /
+codex 4 / claude 4 ids), `unknown-model` on a stale id, `incident add/list`, audit `incident` event, weekly mining
+(brief-scope ×3 → lesson draft). Reviews: owner chain Argon Medium → agy Opus 5.5 Medium → Flash → `claude:opus@low`
+(D-126; never plain `claude:opus`). Quota: agy Claude back 2026-10-20 13:48 UTC, Flash/Argon 2026-10-24, codex 11-06.
+Next: owner releases (plugin cache 0.13.0, restart, README "Audit log" owner steps); then `docs/follow-ups.md`
+"From plan ids-incidents" (runner must honour a blocked handoff — 2nd occurrence) and the Phase G lows.
 
 The steps below describe how `followups-1` was run; reuse them for the next plan (new slug, new spec).
 

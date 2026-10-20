@@ -136,7 +136,7 @@ a turn. Items:
 - **Spec-review gate for the techlead.** Revisit after the scorecard baseline exists, so its effect can be measured
   (fix rounds and spec-caused `blocked` tasks with vs without the gate).
 
-## Single source of truth for model ids (owner, 2026-10-19, D-121) — next plan after Phase G
+## ~~Single source of truth for model ids (owner, 2026-10-19, D-121)~~ — done in plan `ids-incidents` (2026-10-20, D-127)
 
 agy 1.4.2 removed `claude-*-4-6`; nothing noticed (cooldowns hid it) and the Phase G task `pool-agy-model-ids` blocked
 because three test files hard-code default-pool ids. Fix: (1) each agent's model list comes from its host CLI
@@ -187,3 +187,12 @@ log one whenever a task blocks or fails for a reason that is not the implementer
 - **Plan id in audit events is the plan file's directory name** (`plan.path.parent.name` in `planrun.py`,
   `planclose.py`, `triagerun.py`), not `plan.slug`; equal only under the standard `plans/<slug>/plan.json` layout.
 - **Real codex `PostToolUse` fixture** still missing (codex quota until 2026-11-06).
+
+## From plan `ids-incidents` (2026-10-20)
+- **Runner ignores a blocked handoff — second occurrence** (`pool-refresh-models`: done with no change; three dependents
+  built on it). Raise priority: a `blocked` handoff must set the task blocked.
+- `skills weekly --dry-run`'s "mine" line does not mention incidents (the extract has them: counts and the
+  `## Incidents` section render correctly).
+- `tests/test_pool_same_as_default.py`: one test name says `does_not_mark` while asserting the marker (rename reverted:
+  it collided with a cascade; do it on master).
+- agy auto-updated to 1.4.3 during the plan; the catalog still lists the same 13 ids.
