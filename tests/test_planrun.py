@@ -1,12 +1,15 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 
 import agenthub.planrun
+from agenthub.audit.trace import ENV_TRACE_PLAN
+from agenthub.audit.writer import audit_root
 from agenthub.config import load_pool, paths
 from agenthub.guards import _git_argv
 from agenthub.plan import Plan, Task
-from agenthub.planrun import _reviewers_besides, compose_brief, run_plan
+from agenthub.planrun import _reviewers_besides, _trail, compose_brief, run_plan
 from agenthub.planstate import load_or_init
 from tests.gitrepo import make_repo
 
@@ -714,3 +717,71 @@ def test_trail_header_written_once_across_resume(tmp_path):
         "attempt 2 ended",
         "task done",
     ]
+
+
+def _slug_plan(tmp_path):
+    """A plan whose file lives in <tmp>/x/plan.json but whose slug is "s"."""
+    repo_dir = tmp_path / "repo"
+    make_repo(repo_dir)
+    plan_dir = tmp_path / "x"
+    plan_dir.mkdir()
+    (plan_dir / "t1.md").write_text("brief for t1")
+    task = Task(name="t1", role="implement", brief=plan_dir / "t1.md", max_attempts=1)
+    return Plan(
+        goal="goal", repo=repo_dir, base="master", slug="s", tasks=[task], max_parallel=1, path=plan_dir / "plan.json"
+    )
+
+
+def _audit_events(state_dir):
+    events = []
+    for p in sorted(audit_root(state_dir).glob("*/*.jsonl")):
+        for line in p.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                events.append(json.loads(line))
+    return events
+
+
+def test_trail_event_plan_is_slug(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("AGENT_HUB_STATE", str(state_dir))
+    plan = _slug_plan(tmp_path)
+
+    _trail(plan, task="t1", phase="start", decision="task started", reason="r", evidence="e", result="running")
+
+    events = _audit_events(state_dir)
+    assert len(events) == 1
+    assert events[0]["parent"]["plan"] == "s"
+    assert events[0]["parent"]["task"] == "t1"
+
+
+def test_run_finish_event_plan_is_slug(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("AGENT_HUB_STATE", str(state_dir))
+    plan = _slug_plan(tmp_path)
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [{"status": "ok", "exit_code": 0, "id": "j1"}]})
+
+    run_plan(plan, state, spawn)
+
+    events = _audit_events(state_dir)
+    by_event = {e["detail"]["event"]: e for e in events if e["kind"] == "plan" and "event" in e.get("detail", {})}
+    assert by_event["run-start"]["parent"]["plan"] == "s"
+    assert by_event["run-finish"]["parent"]["plan"] == "s"
+    assert all(e["parent"].get("plan") in (None, "s") for e in events)
+
+
+def test_trace_env_plan_is_slug(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_HUB_STATE", str(tmp_path / "state"))
+    plan = _slug_plan(tmp_path)
+    state = load_or_init(plan)
+    seen = []
+
+    class EnvSpawner(FakeSpawner):
+        def __call__(self, argv, log_path):
+            seen.append(os.environ.get(ENV_TRACE_PLAN))
+            return super().__call__(argv, log_path)
+
+    run_plan(plan, state, EnvSpawner({"t1": [{"status": "ok", "exit_code": 0, "id": "j1"}]}))
+
+    assert seen == ["s"]
+    assert "x" not in seen

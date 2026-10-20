@@ -98,7 +98,7 @@ def _make_plan(
         goal="test plan goal",
         repo=repo_dir,
         base="master",
-        slug="testslug",
+        slug=plan_name,
         tasks=plan_tasks,
         max_parallel=2,
         path=plan_file,
