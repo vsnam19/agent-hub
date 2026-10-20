@@ -1,8 +1,15 @@
+import importlib.resources
+import tomllib
 from datetime import timedelta
 
 import pytest
 
 from agenthub.config import ConfigError, load_pool, parse_duration, paths, role_kind
+
+
+def _default_chain(name: str) -> list[str]:
+    data = tomllib.loads(importlib.resources.files("agenthub").joinpath("default_pool.toml").read_text())
+    return data["roles"][name]["chain"]
 
 
 def test_paths_honour_agent_hub_env(monkeypatch, tmp_path):
@@ -59,12 +66,7 @@ def test_load_pool_default_only(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_HUB_CONFIG", str(tmp_path / "conf"))
     p = paths()
     pool = load_pool(p)
-    assert pool.roles["implement"].chain == [
-        "claude:haiku",
-        "agy:claude-sonnet-5-5-medium",
-        "agy:gemini-3.8-flash-high",
-        "codex:gpt-5.6-terra",
-    ]
+    assert pool.roles["implement"].chain == _default_chain("implement")
     assert pool.timeouts["review"] == timedelta(minutes=20)
     assert pool.quota_cooldown == timedelta(minutes=60)
 
@@ -81,12 +83,7 @@ chain = ["x:y"]
     pool = load_pool(p)
     assert pool.roles["implement"].chain == ["x:y"]
     assert "review" in pool.roles
-    assert pool.roles["review"].chain == [
-        "agy:gemini-4-argon-medium",
-        "codex:gpt-5.6-terra",
-        "agy:gemini-3.8-flash-high",
-        "claude:sonnet",
-    ]
+    assert pool.roles["review"].chain == _default_chain("review")
 
 
 def test_load_pool_user_defaults_merge(monkeypatch, tmp_path):
