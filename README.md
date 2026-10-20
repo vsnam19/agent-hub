@@ -41,11 +41,30 @@ chain = ["<agent>:<model>", "<agent>:<model>"]
 Durations accept `s`, `m`, `h`. The agent part of a link must name a registered adapter under `agenthub/agents/`.
 State (cooldowns and job directories) lives in `$XDG_STATE_HOME/agent-hub/` or `$AGENT_HUB_STATE`.
 
+### Model catalog
+
+`pool` flags links whose model the host CLI does not list. Each agent's valid model ids are read into a 24 h cache,
+`models.json` in the state directory (mode 600). `agent-hub pool --refresh-models` forces a refresh. A plain
+`agent-hub pool` refreshes lazily when the cache is missing or older than 24 h, for installed agents only. Job runs only
+read the cache.
+
+- agy: `agy models` (SSH variables removed).
+- codex: `codex debug models`.
+- claude: a static alias list from its `agent.toml`; any id starting with `claude-` is accepted.
+- gwen: not checked.
+
+`pool` prints `unknown-model` next to a link whose agent has a fresh catalog without that model (`--json`:
+`model_known` is `true`, `false` or `null`). A chain skips such a link at once and records `unknown-model` in the job's
+attempts. A missing or stale catalog never blocks work.
+
+`pool` prints `(same as default)` on an owner role whose chain equals the built-in chain, so you can delete that role
+from `pool.toml`.
+
 ## Commands
 
 ```
 agent-hub run --role ROLE [--brief BRIEF] -d WORKDIR [--agent AGENT:MODEL] [--exclude AGENT:MODEL]... [--base BASE] [--timeout TIMEOUT] [--gate CMD]... [--allow GLOB]... [--jev] [--json]
-agent-hub pool [--json] [--clear AGENT:MODEL]
+agent-hub pool [--json] [--clear AGENT:MODEL] [--refresh-models]
 agent-hub profile AGENT
 agent-hub jobs [--limit LIMIT] [--all]              # this repository's jobs; --all lists every project's
 agent-hub show [--json] ID
@@ -71,7 +90,7 @@ agent-hub ready -d WORKDIR [--json]               # merge check: HEAD gated + ap
   that file; the reviewer never gets a shell. `--base` defaults to the repository's default branch. The work tree is
   fingerprinted before and after, and any change fails the job as `modified-tree`. `--gate` is ignored.
 - `pool` lists every role, its chain, and per link whether it is installed, its version and any cooldown;
-  `--clear` lifts one cooldown.
+  `--clear` lifts one cooldown; `--refresh-models` forces a model catalog refresh (see Model catalog).
 - `profile` prints an agent's `profile.md`, with strengths, weaknesses and what to put in a brief.
 - `jobs` lists recent jobs, newest first; `show` prints a job's result and reply.
 - `cancel` sends SIGTERM to the job's recorded pid, after verifying the pid against the process start time so a
@@ -194,7 +213,7 @@ model thinking, file contents, command output, bodies, auth headers.
 - `agent-hub audit archive [--month YYYY-MM]`
 - `agent-hub audit schedule [--apply] [--remove] [--at CALENDAR]`
 
-MCP tools: `audit_status`, `audit_show`, `audit_archive_status`, `audit_archive_rerun`.
+MCP tools: `audit_status`, `audit_show`, `audit_archive_status`, `audit_archive_rerun`, `incidents`.
 
 Owner steps after release:
 1. restart Claude Code (plugin hooks load);
@@ -202,6 +221,18 @@ Owner steps after release:
 3. trust the codex hook (codex asks on next start, or `/hooks`);
 4. write the vault path as `vault = '...'` in audit.toml in the agent-hub config directory;
 5. `agent-hub audit schedule --apply`.
+
+### Incident log
+
+Process failures (a wrong pick, a rejected plan, a rework loop) are logged on purpose, so the weekly mining can see them.
+
+- `agent-hub incident add --kind K --what TEXT [--lesson TEXT] [--source director|techlead|tool|owner] [--plan P] [--task T] [--job J] [--attempts N] [--rounds N] [--minutes N] [--json]` appends one line to `incidents.jsonl` in the state directory and writes an audit event. `--kind` and `--what` are required; without either it exits 2.
+- `agent-hub incident list [--since T] [--kind K] [--json]` prints the logged incidents.
+
+The MCP tool `incidents(since?, kind?)` reads the same log and never writes it. It is registered with the audit tools.
+
+`agent-hub skills weekly` counts incidents in its window. A kind with 3 or more incidents becomes a `learned-director`
+skill draft (see Learned skills).
 
 ## MCP server
 
