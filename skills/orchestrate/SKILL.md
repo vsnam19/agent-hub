@@ -25,6 +25,7 @@ Each trigger maps to one action. The Principles below ground them; read a leaf s
 - Starting a job → never end your turn while it runs; keep calling `wait`.
 - Writing a brief → never put secrets in it; briefs are stored in the job directory.
 - A tree an agent already edited → no automatic fallback; the next step is yours.
+- A task blocks or fails for a reason that is not the implementer's (brief, spec, tool, quota, process) → run `agent-hub incident add --kind K --what TEXT` (add `--lesson TEXT` when you know it).
 
 ## Routing
 
