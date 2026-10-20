@@ -258,7 +258,11 @@ class _Run:
         self.report.window = f"{since.date()} .. {self.date}"
         add = self.report.steps.append
         add(Step("lock", "would", f"{self.cfg.state_dir / 'skills' / 'weekly.lock'}"))
-        found = f"{len(extract.findings)} findings, {extract.corrections_total} corrections since {since.date()}"
+        incidents = sum(extract.incident_counts.values())
+        found = (
+            f"{len(extract.findings)} findings, {extract.corrections_total} corrections, "
+            f"{incidents} incidents since {since.date()}"
+        )
         add(Step("mine", "would", f"into {self.out}: {found}"))
         if len(extract.findings) < MIN_FINDINGS and not extract.corrections_total and not extract.incidents:
             add(Step("stop", "would", "nothing to learn; advance last-run"))
