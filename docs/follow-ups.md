@@ -210,3 +210,9 @@ on gap failure; `_redact_target` re-checks for a surviving quoted copy; curl `-E
 - Briefs that change a shared contract keep hitting `brief-scope` (3 more times in this plan: tests asserting the old
   rule live in files the brief does not allow). The techlead brief should require a grep for tests asserting the old
   behaviour and list them in the task's files.
+
+## Done in plan `followups-3` (2026-10-20, D-129)
+- agy lost edits: an agy implement job whose attempt stderr mentions `background task`, with a success handoff and no
+  change, is now `empty` (exit 7) so the plan runner escalates. Narrowed after the broad rule (any agent) broke 61
+  tests: stacked tasks legitimately find work already present.
+- Techlead brief: a task changing a behaviour lists the tests asserting the old one.

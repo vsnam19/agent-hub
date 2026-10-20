@@ -13,12 +13,12 @@ vault (no config / missing vault keep data and exit 1; success; re-run no-op; ve
 `.worktrees/phase-g-*`, `.worktrees/phase-g-hardening-*`, `orch/phase-g/*`, `orch/phase-g-hardening/*` — deleting them
 is the owner's call.
 
-**Current work (2026-10-20 17:50 UTC): v0.13.1 on master (local, not pushed; plugin cache still 0.11.0).** Plans
-`ids-incidents` (D-127) and `followups-2` (D-128) merged; lint + 1641 tests green. Reviews follow D-126 (Argon Medium →
+**Current work (2026-10-20 19:05 UTC): v0.13.2 on master (local, not pushed; plugin cache still 0.11.0).** Plans
+`ids-incidents` (D-127), `followups-2` (D-128) and `followups-3` (D-129) merged; lint + 1648 tests green. Reviews follow D-126 (Argon Medium →
 agy Opus 5.5 Medium → Flash → `claude:opus@low`; never plain `claude:opus`); implement on agy Claude Sonnet 5.5 when
 free (owner), else the chain (Flash weekly quota until 2026-10-24; agy Sonnet cooldown until 2026-10-20 20:26 UTC).
-Next: owner releases (plugin cache, restart, README "Audit log" owner steps); then `docs/follow-ups.md` "From plan
-followups-2" (detect agy lost edits: ok + no changes + success handoff; techlead brief greps old-rule tests).
+Next: owner releases (plugin cache, restart, README "Audit log" owner steps); then `docs/follow-ups.md` the Phase G
+leftovers in `docs/follow-ups.md` (codex `PostToolUse` fixture after 2026-11-06), E5/E6/E7 from the roadmap.
 
 The steps below describe how `followups-1` was run; reuse them for the next plan (new slug, new spec).
 
