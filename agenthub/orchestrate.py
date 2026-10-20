@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from agenthub import brief as briefmod
 from agenthub import env, gateguard, guards, handoff, process
+from agenthub import models as modelcat
 from agenthub.agents import Classified, Outcome, Request, registry
 from agenthub.audit.emit import emit
 from agenthub.audit.trace import trace_context, trace_env
@@ -465,6 +466,8 @@ def run_job(
             start_head = guards.head(repo)
             before = guards.fingerprint(repo)
             cooldowns = Cooldowns(p.cooldowns_file)
+            # read-only: job runs never fetch or write the catalog cache
+            catalog = modelcat.read(p.models_file)
 
             for n, link in enumerate(links, start=1):
                 if cancel.cancelled:
@@ -481,6 +484,10 @@ def run_job(
                     continue
                 if not adapter.installed():
                     entry.update(outcome="skipped", reason="not-installed")
+                    continue
+                # D-121 2.3: only a fresh catalog that lacks the model skips; unknown or stale answers None
+                if modelcat.model_known(catalog, link.agent, link.model, now()) is False:
+                    entry.update(outcome="skipped", reason="unknown-model")
                     continue
                 until = cooldowns.until(link, now())
                 if until is not None:
