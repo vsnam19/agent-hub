@@ -826,3 +826,50 @@ def test_effort_cleared_after_fallback(env_sandbox, repo, monkeypatch):
     assert result["model"] == "sonnet"
     assert "effort" not in result
     assert json.loads((job_dir(result) / "result.json").read_text()).get("effort") is None
+
+
+def test_success_handoff_without_change_is_empty(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "agy", "handoff-nochange")
+    result = go(repo, ["agy:m1"])
+    assert result["status"] == "empty"
+    assert result["exit_code"] == 7
+    assert result["empty_reason"] == "success handoff but no change in the work tree"
+
+
+def test_success_handoff_without_change_no_background_is_ok(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "agy", "handoff-quiet")
+    result = go(repo, ["agy:m1"])
+    assert result["status"] == "ok"
+    assert result["handoff"]["status"] == "success"
+
+
+def test_success_handoff_with_change_is_ok(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "agy", "handoff")
+    result = go(repo, ["agy:m1"])
+    assert result["status"] == "ok"
+    assert result["changed_files"] == ["agent_wrote.txt"]
+
+
+def test_blocked_handoff_without_change_stays_ok(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "agy", "blocked-nochange")
+    result = go(repo, ["agy:m1"])
+    assert result["status"] == "ok"
+    assert result["handoff"]["status"] == "blocked"
+
+
+def test_no_handoff_without_change_stays_ok(env_sandbox, repo, monkeypatch):
+    scenario(monkeypatch, "agy", "no-handoff")
+    result = go(repo, ["agy:m1"])
+    assert result["status"] == "ok"
+    assert result["handoff"] is None
+
+
+def test_committed_work_is_ok(env_sandbox, repo, monkeypatch):
+    import subprocess
+
+    rev = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True)
+    before = rev.stdout.strip()
+    scenario(monkeypatch, "agy", "commit")
+    result = go(repo, ["agy:m1"])
+    assert result["status"] == "ok"
+    assert result["head"] != before

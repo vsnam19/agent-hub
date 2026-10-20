@@ -88,6 +88,18 @@ unit-test-verified
     elif scenario == "no-handoff":
         print(json.dumps({"status": "SUCCESS", "response": "I did the work but no handoff"}))
         sys.exit(0)
+    elif scenario in ("handoff-nochange", "handoff-quiet", "blocked-nochange", "commit"):
+        if scenario in ("handoff-nochange", "blocked-nochange"):
+            print("root agent idle; waiting up to 60s for 1 background task(s)", file=sys.stderr)
+        status = "blocked" if scenario == "blocked-nochange" else "success"
+        if scenario == "commit":
+            Path("committed.txt").write_text("hello")
+            git = ["git", "-c", "user.name=fake", "-c", "user.email=fake@example.com"]
+            subprocess.run(git + ["add", "committed.txt"], check=True)
+            subprocess.run(git + ["commit", "-m", "fake commit"], check=True, capture_output=True)
+        response = f"done\n## Status\n{status}\n## What I did\n- x\n## Verification\nnot-verified\n"
+        print(json.dumps({"status": "SUCCESS", "response": response}))
+        sys.exit(0)
     elif scenario == "write-quota":
         Path("agent_wrote.txt").write_text("hello")
         print(json.dumps({"status": "ERROR", "error": "RESOURCE_EXHAUSTED: quota exceeded"}))
