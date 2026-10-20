@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agenthub import triage
+from agenthub import incidents, triage
 from agenthub.redact import HOME_PATH, redact
 
 CAP = 300
@@ -71,6 +71,8 @@ class Extract:
     corrections_total: int = 0
     agenthub_commands: dict[str, dict] = field(default_factory=dict)
     outcomes: dict[str, dict] = field(default_factory=lambda: {"by_role": {}, "by_agent": {}})
+    incidents: list[dict] = field(default_factory=list)
+    incident_counts: dict[str, int] = field(default_factory=dict)
 
     def to_json(self) -> dict:
         return _redact_all(asdict(self))
@@ -80,8 +82,15 @@ def mine(state_dir: Path, transcripts_dir: Path, since: datetime, now: datetime)
     extract = Extract(since=since.isoformat(), until=now.isoformat())
     _mine_jobs(Path(state_dir), _plan_branches(Path(state_dir)), extract, since)
     _mine_transcripts(Path(transcripts_dir), extract, since)
+    _mine_incidents(Path(state_dir), extract, since)
     extract.groups = group_findings(extract.findings)
     return extract
+
+
+def _mine_incidents(state_dir: Path, extract: Extract, since: datetime) -> None:
+    rows = incidents.read(state_dir, since=since)
+    extract.incidents = rows
+    extract.incident_counts = dict(Counter(r.get("kind") for r in rows if isinstance(r.get("kind"), str)))
 
 
 def _parse_time(value) -> datetime | None:
