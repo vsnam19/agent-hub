@@ -439,7 +439,22 @@ def run_plan(
 
                     # 5. Outcome
                     if _kind(task) == "implement":
-                        if job_status == "ok":
+                        handoff = job_result.get("handoff")
+                        if job_status == "ok" and isinstance(handoff, dict) and handoff.get("status") == "blocked":
+                            notes = handoff.get("notes")
+                            if isinstance(notes, list):
+                                lines = [str(item) for item in notes]
+                            elif isinstance(notes, str):
+                                lines = notes.splitlines()
+                            else:
+                                lines = []
+                            first = next((ln.strip() for ln in lines if ln.strip()), "")
+                            tstate.status = "blocked"
+                            tstate.reason = "handoff blocked: " + first[:300] if first else "handoff blocked"
+                            _trail(
+                                plan, name, "handoff-blocked", "handoff blocked", tstate.reason, attempt.job, "blocked"
+                            )
+                        elif job_status == "ok":
                             paths_allowed = task.paths_allowed
                             changed_files = job_result.get("changed_files", [])
                             violations = []

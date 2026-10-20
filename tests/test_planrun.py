@@ -3,6 +3,7 @@ import subprocess
 from pathlib import Path
 
 import agenthub.planrun
+from agenthub import handoff
 from agenthub.config import load_pool, paths
 from agenthub.guards import _git_argv
 from agenthub.plan import Plan, Task
@@ -714,3 +715,98 @@ def test_trail_header_written_once_across_resume(tmp_path):
         "attempt 2 ended",
         "task done",
     ]
+
+
+def _blocked_results(notes, status="blocked"):
+    return {"status": "ok", "exit_code": 0, "id": "j1", "handoff": {"status": status, "notes": notes}}
+
+
+def test_blocked_handoff_marks_task_blocked(tmp_path):
+    plan = make_plan(tmp_path, [{"name": "t1"}])
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [_blocked_results("\n  need the api key  \nsecond line")]})
+
+    rc = run_plan(plan, state, spawn)
+
+    assert rc == 1
+    assert state.task("t1").status == "blocked"
+    assert state.task("t1").reason.startswith("handoff blocked: ")
+    assert state.task("t1").reason == "handoff blocked: need the api key"
+    rows = [line.split("\t") for line in _trail_lines(plan)[1:]]
+    assert [row[2] for row in rows if row[1] == "t1"].count("handoff-blocked") == 1
+
+
+def test_blocked_handoff_reason_from_notes_list(tmp_path):
+    reply = "## Status\nblocked\n\n## Notes\n- need the api key\n- second line\n"
+    handoff_result = handoff.parse(reply)
+    assert handoff_result["notes"] == ["need the api key", "second line"]
+    plan = make_plan(tmp_path, [{"name": "t1"}])
+    state = load_or_init(plan)
+    result = {"status": "ok", "exit_code": 0, "id": "j1", "handoff": handoff_result}
+    spawn = FakeSpawner({"t1": [result]})
+
+    rc = run_plan(plan, state, spawn)
+
+    assert rc == 1
+    assert state.task("t1").status == "blocked"
+    assert state.task("t1").reason == "handoff blocked: need the api key"
+
+
+def test_blocked_handoff_skips_dependents(tmp_path):
+    plan = make_plan(tmp_path, [{"name": "t1"}, {"name": "t2", "depends_on": ["t1"]}])
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [_blocked_results("stuck")], "t2": [{"status": "ok"}]})
+
+    rc = run_plan(plan, state, spawn)
+
+    assert rc == 1
+    assert state.task("t1").status == "blocked"
+    assert state.task("t2").status == "skipped"
+    assert len(spawn.spawns) == 1
+
+
+def test_blocked_handoff_does_not_autocommit(tmp_path):
+    plan = make_plan(tmp_path, [{"name": "t1"}])
+    state = load_or_init(plan)
+    spawn = WritingSpawner({"t1": [_blocked_results("stuck")]}, writes={"t1"})
+
+    rc = run_plan(plan, state, spawn)
+
+    assert rc == 1
+    assert state.task("t1").status == "blocked"
+    worktree = Path(state.task("t1").worktree)
+    assert git_out(worktree, "rev-list", "--count", "master..HEAD") == "0"
+    assert "?? t1.txt" in git_out(worktree, "status", "--porcelain")
+
+
+def test_blocked_handoff_reason_truncated(tmp_path):
+    plan = make_plan(tmp_path, [{"name": "t1"}])
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [_blocked_results("x" * 500 + "\nnext")]})
+
+    run_plan(plan, state, spawn)
+
+    assert state.task("t1").status == "blocked"
+    assert state.task("t1").reason == "handoff blocked: " + "x" * 300
+
+
+def test_partial_handoff_still_done(tmp_path):
+    plan = make_plan(tmp_path, [{"name": "t1"}])
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [_blocked_results("some left", status="partial")]})
+
+    rc = run_plan(plan, state, spawn)
+
+    assert rc == 0
+    assert state.task("t1").status == "done"
+
+
+def test_missing_handoff_still_done(tmp_path):
+    plan = make_plan(tmp_path, [{"name": "t1"}])
+    state = load_or_init(plan)
+    spawn = FakeSpawner({"t1": [{"status": "ok", "exit_code": 0, "id": "j1", "handoff": None}]})
+
+    rc = run_plan(plan, state, spawn)
+
+    assert rc == 0
+    assert state.task("t1").status == "done"
