@@ -99,7 +99,7 @@ def make_plan(
         goal="goal",
         repo=repo_dir,
         base="master",
-        slug="testslug",
+        slug=plan_name,
         tasks=plan_tasks,
         max_parallel=2,
         path=plan_file,
