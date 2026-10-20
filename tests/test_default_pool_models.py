@@ -23,5 +23,9 @@ def test_default_pool_uses_argon_for_hard_and_review(monkeypatch, tmp_path):
 
     assert pool.roles["implement-hard"].chain
     assert pool.roles["review"].chain
-    assert parse_link(pool.roles["implement-hard"].chain[0]).agent == "agy"
-    assert parse_link(pool.roles["review"].chain[0]).agent == "agy"
+    hard = parse_link(pool.roles["implement-hard"].chain[0])
+    assert hard.agent == "agy"
+    assert "argon" in hard.model
+    review = parse_link(pool.roles["review"].chain[0])
+    assert review.agent == "agy"
+    assert "argon" in review.model
