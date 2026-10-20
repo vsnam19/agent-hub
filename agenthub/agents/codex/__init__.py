@@ -20,6 +20,44 @@ def parse_try_again_at(message: str) -> datetime | None:
 
 
 class CodexAdapter(Adapter):
+    def list_models(self) -> list[str] | None:
+        if not self.installed():
+            self.models_error = "not installed"
+            return None
+
+        output = self._catalog_output(["debug", "models"])
+        if output is None:
+            return None
+
+        try:
+            data = json.loads(output)
+        except Exception:
+            self.models_error = "bad json"
+            return None
+
+        if not isinstance(data, dict) or "models" not in data:
+            self.models_error = "no models key"
+            return None
+
+        raw_models = data["models"]
+        if not isinstance(raw_models, list):
+            self.models_error = "no models listed"
+            return None
+
+        slugs: list[str] = []
+        for item in raw_models:
+            if isinstance(item, dict):
+                slug = item.get("slug")
+                if isinstance(slug, str) and slug:
+                    slugs.append(slug)
+
+        if not slugs:
+            self.models_error = "no models listed"
+            return None
+
+        self.models_error = None
+        return slugs
+
     def build(self, req: Request) -> Invocation:
         argv = [
             self.config.binary,

@@ -58,6 +58,10 @@ def _reset_from_text(text: str) -> datetime | None:
 
 
 class ClaudeAdapter(Adapter):
+    def list_models(self) -> list[str] | None:
+        # Claude Code has no list command; the catalog is the static alias list in agent.toml.
+        return list(self.config.known_models) or None
+
     def build(self, req: Request) -> Invocation:
         argv = [
             self.config.binary,

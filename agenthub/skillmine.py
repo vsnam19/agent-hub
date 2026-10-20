@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agenthub import triage
+from agenthub import incidents, triage
 from agenthub.redact import HOME_PATH, redact
 
 CAP = 300
@@ -71,6 +71,8 @@ class Extract:
     corrections_total: int = 0
     agenthub_commands: dict[str, dict] = field(default_factory=dict)
     outcomes: dict[str, dict] = field(default_factory=lambda: {"by_role": {}, "by_agent": {}})
+    incidents: list[dict] = field(default_factory=list)
+    incident_counts: dict[str, int] = field(default_factory=dict)
 
     def to_json(self) -> dict:
         return _redact_all(asdict(self))
@@ -80,8 +82,15 @@ def mine(state_dir: Path, transcripts_dir: Path, since: datetime, now: datetime)
     extract = Extract(since=since.isoformat(), until=now.isoformat())
     _mine_jobs(Path(state_dir), _plan_branches(Path(state_dir)), extract, since)
     _mine_transcripts(Path(transcripts_dir), extract, since)
+    _mine_incidents(Path(state_dir), extract, since)
     extract.groups = group_findings(extract.findings)
     return extract
+
+
+def _mine_incidents(state_dir: Path, extract: Extract, since: datetime) -> None:
+    rows = incidents.read(state_dir, since=since)
+    extract.incidents = rows
+    extract.incident_counts = dict(Counter(r.get("kind") for r in rows if isinstance(r.get("kind"), str)))
 
 
 def _parse_time(value) -> datetime | None:
@@ -366,6 +375,37 @@ def metrics(extract: Extract) -> dict:
     }
 
 
+def _incident_cost(row: dict) -> float:
+    cost = row.get("cost") if isinstance(row.get("cost"), dict) else {}
+
+    def number(key: str) -> float:
+        value = cost.get(key)
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+
+    return number("attempts") + number("rounds") + number("minutes") / 10
+
+
+def _render_cost(value: float) -> str:
+    rounded = round(value, 2)
+    return str(int(rounded)) if rounded == int(rounded) else str(rounded)
+
+
+def _render_incidents(extract: Extract) -> list[str]:
+    if not extract.incidents:
+        return ["- (none)"]
+    ranked = sorted(extract.incidents, key=_incident_cost, reverse=True)[:3]
+    counts = sorted(extract.incident_counts.items(), key=lambda kc: (-kc[1], kc[0]))
+    lines = ["Counts: " + ", ".join(f"{kind} ×{n}" for kind, n in counts)]
+    for row in ranked:
+        kind = row.get("kind") if isinstance(row.get("kind"), str) else "unknown"
+        line = f"- {kind} (cost {_render_cost(_incident_cost(row))}): {row.get('what', '')}"
+        lesson = row.get("lesson")
+        if isinstance(lesson, str) and lesson:
+            line += f" — lesson: {lesson}"
+        lines.append(line)
+    return lines
+
+
 def render_md(extract: Extract) -> str:
     lines = [f"# Skill mining extract ({extract.since[:10]} .. {extract.until[:10]})", ""]
     lines += [f"Findings: {len(extract.findings)}; corrections: {extract.corrections_total}", ""]
@@ -385,6 +425,8 @@ def render_md(extract: Extract) -> str:
         lines += [f"  - {b}: {t}" for t in d["fix_brief_titles"]]
     lines += ["", "## Corrections"]
     lines += [f"- {c['text']}" for c in extract.corrections[:20]] or ["- (none)"]
+    lines += ["", "## Incidents"]
+    lines += _render_incidents(extract)
     return "\n".join(lines) + "\n"
 
 
