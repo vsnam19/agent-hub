@@ -53,6 +53,32 @@ def _keyring_env(
 
 
 class AgyAdapter(Adapter):
+    def list_models(self) -> list[str] | None:
+        if not self.installed():
+            self.models_error = "not installed"
+            return None
+
+        output = self._catalog_output(
+            ["models"],
+            drop_env=("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"),
+        )
+        if output is None:
+            return None
+
+        models: list[str] = []
+        for line in output.splitlines():
+            if "\t" in line:
+                model_id = line.split("\t", 1)[0].strip()
+                if model_id:
+                    models.append(model_id)
+
+        if not models:
+            self.models_error = "no models listed"
+            return None
+
+        self.models_error = None
+        return models
+
     def build(self, req: Request) -> Invocation:
         dest_brief = req.attempt_dir / "brief.md"
         shutil.copy2(req.brief_path, dest_brief)
