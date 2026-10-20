@@ -10,7 +10,7 @@ from agenthub import guards
 from agenthub.cli import main
 from agenthub.config import paths
 from agenthub.jobs import list_jobs
-from agenthub.pool import Cooldowns, Link
+from agenthub.pool import Cooldowns, load_pool, parse_link
 
 BRIEF = "## Input\n\nfoo\n\n## Expected output\n\nbar\n"
 
@@ -93,22 +93,29 @@ def test_run_bad_timeout_exit_2(env_sandbox, repo, tmp_path, capsys):
     assert capsys.readouterr().err.startswith("agent-hub: ")
 
 
+def default_links(role):
+    return [parse_link(link) for link in load_pool().roles[role].chain]
+
+
 def test_pool_output_and_clear(env_sandbox, capsys):
+    implement = default_links("implement")
+    sonnet_link = next(link for link in implement if link.agent == "agy")
+    other_link = next(link for link in default_links("implement-hard") if link.agent == "agy" and link not in implement)
     until = datetime.now(timezone.utc) + timedelta(hours=2)
-    Cooldowns(paths().cooldowns_file).set(Link("agy", "claude-sonnet-5-5-medium"), until)
+    Cooldowns(paths().cooldowns_file).set(sonnet_link, until)
     assert main(["pool"]) == 0
     out = capsys.readouterr().out
     assert "implement (implement, escalate → implement-hard):" in out
     assert "review (review):" in out
-    sonnet = next(line for line in out.splitlines() if "agy:claude-sonnet-5-5-medium" in line)
+    sonnet = next(line for line in out.splitlines() if str(sonnet_link) in line)
     assert line_has(sonnet, "installed", "9.9.9", "cooldown until")
-    opus = next(line for line in out.splitlines() if "agy:claude-opus-5-5-high" in line)
+    opus = next(line for line in out.splitlines() if str(other_link) in line)
     assert "cooldown" not in opus and opus.startswith("  ")
 
-    assert main(["pool", "--clear", "agy:claude-sonnet-5-5-medium"]) == 0
-    assert capsys.readouterr().out.strip() == "cleared agy:claude-sonnet-5-5-medium"
-    assert main(["pool", "--clear", "agy:claude-sonnet-5-5-medium"]) == 0
-    assert capsys.readouterr().out.strip() == "no cooldown for agy:claude-sonnet-5-5-medium"
+    assert main(["pool", "--clear", str(sonnet_link)]) == 0
+    assert capsys.readouterr().out.strip() == f"cleared {sonnet_link}"
+    assert main(["pool", "--clear", str(sonnet_link)]) == 0
+    assert capsys.readouterr().out.strip() == f"no cooldown for {sonnet_link}"
 
 
 def line_has(line, *needles):
@@ -116,18 +123,19 @@ def line_has(line, *needles):
 
 
 def test_pool_json(env_sandbox, capsys):
-    Cooldowns(paths().cooldowns_file).set(
-        Link("codex", "gpt-5.6-terra"), datetime.now(timezone.utc) + timedelta(hours=1)
-    )
+    review = default_links("review")
+    codex_link = next(link for link in review if link.agent == "codex")
+    other_link = next(link for link in review if link.agent == "agy")
+    Cooldowns(paths().cooldowns_file).set(codex_link, datetime.now(timezone.utc) + timedelta(hours=1))
     assert main(["pool", "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert set(data["roles"]) == {"implement-small", "implement", "implement-hard", "review", "techlead"}
-    entry = next(e for e in data["roles"]["review"]["chain"] if e["link"] == "codex:gpt-5.6-terra")
+    entry = next(e for e in data["roles"]["review"]["chain"] if e["link"] == str(codex_link))
     assert set(entry) == {"link", "installed", "version", "cooldown_until", "model_known"}
-    assert entry["link"] == "codex:gpt-5.6-terra"
+    assert entry["link"] == str(codex_link)
     assert entry["installed"] is True and entry["version"] == "codex 9.9.9"
     assert entry["cooldown_until"] is not None
-    other = next(e for e in data["roles"]["review"]["chain"] if e["link"] == "agy:gemini-3.8-flash-high")
+    other = next(e for e in data["roles"]["review"]["chain"] if e["link"] == str(other_link))
     assert other["cooldown_until"] is None
 
 
@@ -428,7 +436,7 @@ def test_wait_follows_job_to_completion(env_sandbox, repo, tmp_path, capsys):
     import sys
 
     write_brief(repo)
-    write_pool(env_sandbox, '[roles.implement]\nchain = ["agy:claude-sonnet-4-6"]\n')
+    write_pool(env_sandbox, '[roles.implement]\nchain = ["agy:m1"]\n')
 
     env = os.environ.copy()
     env["FAKE_AGY_SCENARIO"] = "slow2"
