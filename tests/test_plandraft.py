@@ -228,3 +228,11 @@ def test_techlead_brief_states_file_counting_and_repo_paths():
     assert "`## Expected output`" in text
     assert "relative to the repository root" in text
     assert "home-directory path" in text
+
+
+def test_techlead_brief_asks_for_tests_of_old_behaviour():
+    text = techlead_brief("docs/spec.md", ["just test"])
+
+    assert "grep `tests/` for assertions of the old behaviour" in text
+    assert "list every such test file in the task's changed files" in text
+    assert "$" not in text
