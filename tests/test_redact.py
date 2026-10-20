@@ -534,3 +534,85 @@ def test_every_argv_item_gets_redact_pass():
     assert redact(key) != key
     for argv in (["curl", "-u", key], ["curl", f"-u{key}"], ["curl", "--user", key], ["curl", f"--user={key}"]):
         assert key not in " ".join(redact_argv(argv))
+
+
+def test_curl_cert_separate_redacts_password():
+    from agenthub.redact import redact_argv
+
+    out = redact_argv(["curl", "-E", "cert.pem:pw", "--cert", "cert.pem:pw", "http://x"])
+    assert out == ["curl", "-E", "cert.pem:<redacted>", "--cert", "cert.pem:<redacted>", "http://x"]
+    assert redact_argv(["curl", "-E", "cert.pem"]) == ["curl", "-E", "cert.pem"]
+
+
+def test_curl_cert_equals_form():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["curl", "--cert=cert.pem:pw"]) == ["curl", "--cert=cert.pem:<redacted>"]
+    assert redact_argv(["curl", "--proxy-cert=cert.pem:pw"]) == ["curl", "--proxy-cert=cert.pem:<redacted>"]
+    assert redact_argv(["curl", "--cert=cert.pem"]) == ["curl", "--cert=cert.pem"]
+
+
+def test_curl_proxy_cert_redacts_password():
+    from agenthub.redact import redact_argv
+
+    out = redact_argv(["curl", "--proxy-cert", "cert.pem:pw", "http://x"])
+    assert out == ["curl", "--proxy-cert", "cert.pem:<redacted>", "http://x"]
+
+
+def test_curl_short_cert_attached():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["curl", "-Ecert.pem:pw", "http://x"]) == ["curl", "-Ecert.pem:<redacted>", "http://x"]
+    assert redact_argv(["curl", "-Ecert.pem"]) == ["curl", "-Ecert.pem"]
+
+
+def test_curl_cert_windows_drive_kept():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["curl", "-E", "C:\\certs\\a.pem"]) == ["curl", "-E", "C:\\certs\\a.pem"]
+    assert redact_argv(["curl", "-E", "C:\\certs\\a.pem:pw"]) == ["curl", "-E", "C:\\certs\\a.pem:<redacted>"]
+
+
+def test_curl_cert_password_with_colon():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["curl", "-E", "cert.pem:pa:ss", "http://x"]) == [
+        "curl",
+        "-E",
+        "cert.pem:<redacted>",
+        "http://x",
+    ]
+    assert redact_argv(["curl", "--cert=cert.pem:pa:ss"]) == ["curl", "--cert=cert.pem:<redacted>"]
+    assert redact_argv(["curl", "-Ecert.pem:pa:ss"]) == ["curl", "-Ecert.pem:<redacted>"]
+
+
+def test_curl_cert_escaped_colon_in_cert():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["curl", "-E", "my\\:cert.pem:pw"]) == ["curl", "-E", "my\\:cert.pem:<redacted>"]
+    assert redact_argv(["curl", "-E", "my\\:cert.pem:pa:ss"]) == ["curl", "-E", "my\\:cert.pem:<redacted>"]
+
+
+def test_curl_cert_windows_drive():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["curl", "-E", "C:\\a\\b.pem:pa:ss"]) == ["curl", "-E", "C:\\a\\b.pem:<redacted>"]
+    assert redact_argv(["curl", "-E", "C:\\a\\my\\:cert.pem:pw"]) == ["curl", "-E", "C:\\a\\my\\:cert.pem:<redacted>"]
+    assert redact_argv(["curl", "-E", "C:\\a\\b.pem"]) == ["curl", "-E", "C:\\a\\b.pem"]
+
+
+def test_curl_cert_bundled_flags():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["curl", "-kEcert.pem:pw", "http://x"]) == ["curl", "-kEcert.pem:<redacted>", "http://x"]
+    assert redact_argv(["curl", "-sE", "cert.pem:pw", "http://x"]) == ["curl", "-sE", "cert.pem:<redacted>", "http://x"]
+    assert redact_argv(["curl", "-sSEcert.pem:pa:ss", "http://x"]) == ["curl", "-sSEcert.pem:<redacted>", "http://x"]
+    assert redact_argv(["curl", "-sE", "cert.pem"]) == ["curl", "-sE", "cert.pem"]
+    assert redact_argv(["curl", "-kEcert.pem"]) == ["curl", "-kEcert.pem"]
+
+
+def test_non_curl_cert_flag_untouched():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["ls", "-E", "cert.pem:pw"]) == ["ls", "-E", "cert.pem:pw"]
+    assert redact_argv(["ls", "--cert=cert.pem:pw"]) == ["ls", "--cert=cert.pem:pw"]
