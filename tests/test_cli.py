@@ -123,7 +123,7 @@ def test_pool_json(env_sandbox, capsys):
     data = json.loads(capsys.readouterr().out)
     assert set(data["roles"]) == {"implement-small", "implement", "implement-hard", "review", "techlead"}
     entry = next(e for e in data["roles"]["review"]["chain"] if e["link"] == "codex:gpt-5.6-terra")
-    assert set(entry) == {"link", "installed", "version", "cooldown_until"}
+    assert set(entry) == {"link", "installed", "version", "cooldown_until", "model_known"}
     assert entry["link"] == "codex:gpt-5.6-terra"
     assert entry["installed"] is True and entry["version"] == "codex 9.9.9"
     assert entry["cooldown_until"] is not None

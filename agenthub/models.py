@@ -14,6 +14,8 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from agenthub.pool import Link
+
 FRESH_FOR = timedelta(hours=24)
 
 
@@ -46,6 +48,18 @@ def model_known(cache: Mapping, agent: str, model: str, now: datetime) -> bool |
     if not is_fresh(entry, now):
         return None
     return model in entry["models"]
+
+
+def pool_entry(link: Link, adapter, until: datetime | None, cache: Mapping, now: datetime) -> dict:
+    """One chain entry for `agent-hub pool` and the pool MCP tool; reads the cache, never refreshes."""
+    installed = adapter is not None and adapter.installed()
+    return {
+        "link": str(link),
+        "installed": installed,
+        "version": adapter.version() if installed else None,
+        "cooldown_until": until.isoformat() if until else None,
+        "model_known": model_known(cache, link.agent, link.model, now),
+    }
 
 
 def _write(path: Path, cache: dict) -> None:
