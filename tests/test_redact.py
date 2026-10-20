@@ -534,3 +534,47 @@ def test_every_argv_item_gets_redact_pass():
     assert redact(key) != key
     for argv in (["curl", "-u", key], ["curl", f"-u{key}"], ["curl", "--user", key], ["curl", f"--user={key}"]):
         assert key not in " ".join(redact_argv(argv))
+
+
+def test_curl_cert_separate_redacts_password():
+    from agenthub.redact import redact_argv
+
+    out = redact_argv(["curl", "-E", "cert.pem:pw", "--cert", "cert.pem:pw", "http://x"])
+    assert out == ["curl", "-E", "cert.pem:<redacted>", "--cert", "cert.pem:<redacted>", "http://x"]
+    assert redact_argv(["curl", "-E", "cert.pem"]) == ["curl", "-E", "cert.pem"]
+
+
+def test_curl_cert_equals_form():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["curl", "--cert=cert.pem:pw"]) == ["curl", "--cert=cert.pem:<redacted>"]
+    assert redact_argv(["curl", "--proxy-cert=cert.pem:pw"]) == ["curl", "--proxy-cert=cert.pem:<redacted>"]
+    assert redact_argv(["curl", "--cert=cert.pem"]) == ["curl", "--cert=cert.pem"]
+
+
+def test_curl_proxy_cert_redacts_password():
+    from agenthub.redact import redact_argv
+
+    out = redact_argv(["curl", "--proxy-cert", "cert.pem:pw", "http://x"])
+    assert out == ["curl", "--proxy-cert", "cert.pem:<redacted>", "http://x"]
+
+
+def test_curl_short_cert_attached():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["curl", "-Ecert.pem:pw", "http://x"]) == ["curl", "-Ecert.pem:<redacted>", "http://x"]
+    assert redact_argv(["curl", "-Ecert.pem"]) == ["curl", "-Ecert.pem"]
+
+
+def test_curl_cert_windows_drive_kept():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["curl", "-E", "C:\\certs\\a.pem"]) == ["curl", "-E", "C:\\certs\\a.pem"]
+    assert redact_argv(["curl", "-E", "C:\\certs\\a.pem:pw"]) == ["curl", "-E", "C:\\certs\\a.pem:<redacted>"]
+
+
+def test_non_curl_cert_flag_untouched():
+    from agenthub.redact import redact_argv
+
+    assert redact_argv(["ls", "-E", "cert.pem:pw"]) == ["ls", "-E", "cert.pem:pw"]
+    assert redact_argv(["ls", "--cert=cert.pem:pw"]) == ["ls", "--cert=cert.pem:pw"]
