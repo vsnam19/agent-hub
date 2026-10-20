@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agenthub import guards
+from agenthub import guards, models
 from agenthub.agents import registry
 from agenthub.audit.emit import emit
 from agenthub.brief import BriefError, order_table
@@ -235,6 +235,7 @@ def _build_parser() -> argparse.ArgumentParser:
     pool = sub.add_parser("pool", help="show roles, chains and cooldowns")
     pool.add_argument("--json", action="store_true")
     pool.add_argument("--clear", metavar="AGENT:MODEL")
+    pool.add_argument("--refresh-models", action="store_true", help="re-read every host's model catalog first")
 
     profile = sub.add_parser("profile", help="print an agent's profile")
     profile.add_argument("agent")
@@ -1052,22 +1053,18 @@ def _cmd_pool(args) -> int:
             print(_safe(f"no cooldown for {link}"))
         return 0
 
+    try:
+        cache = models.refresh(adapters, p.models_file, now, force=args.refresh_models)
+    except OSError:
+        cache = models.read(p.models_file)
+
     roles: dict[str, dict] = {}
     for role, config in pool.roles.items():
         entries = []
         for text in config.chain:
             link = parse_link(text)
-            adapter = adapters.get(link.agent)
-            installed = adapter is not None and adapter.installed()
             until = cooldowns.until(link, now)
-            entries.append(
-                {
-                    "link": str(link),
-                    "installed": installed,
-                    "version": adapter.version() if installed else None,
-                    "cooldown_until": until.isoformat() if until else None,
-                }
-            )
+            entries.append(models.pool_entry(link, adapters.get(link.agent), until, cache, now))
         roles[role] = {"kind": config.kind, "escalate": config.escalate, "chain": entries}
 
     if args.json:
@@ -1082,6 +1079,8 @@ def _cmd_pool(args) -> int:
             parts = [e["link"], "installed" if e["installed"] else "missing"]
             if e["version"]:
                 parts.append(e["version"])
+            if e["model_known"] is False:
+                parts.append("unknown-model")
             if e["cooldown_until"]:
                 parts.append(f"cooldown until {e['cooldown_until']}")
             print(_safe("  " + "  ".join(parts)))
