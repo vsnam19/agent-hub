@@ -14,7 +14,7 @@ REAL_AGY_POST_TOOL_USE_PAYLOAD: dict[str, Any] = {
     "artifactDirectoryPath": "/tmp/x/.gemini/antigravity-cli/brain/4f99fb2c-c829-4ded-a556-16d5e0bf6021",
     "conversationId": "4f99fb2c-c829-4ded-a556-16d5e0bf6021",
     "error": "",
-    "modelName": "gemini-4-argon-medium",
+    "modelName": "m1",
     "stepIdx": 2,
     "toolCall": {
         "args": {
@@ -43,8 +43,8 @@ def test_agy_real_payload_becomes_command_event() -> None:
         "role": "director",
         "host": "agy",
         "session_id": "4f99fb2c-c829-4ded-a556-16d5e0bf6021",
-        "model": "gemini-4-argon-medium",
-        "agent": "agy:gemini-4-argon-medium",
+        "model": "m1",
+        "agent": "agy:m1",
     }
     assert ev["parent"] == {}
     assert ev["kind"] == "command"
@@ -297,7 +297,7 @@ def test_agy_thinking_and_transcript_path_ignored(tmp_path: Path) -> None:
 def test_agy_session_start_and_stop_events() -> None:
     start_payload = {
         "conversationId": "4f99fb2c-c829-4ded-a556-16d5e0bf6021",
-        "modelName": "gemini-4-argon-medium",
+        "modelName": "m1",
         "workspacePaths": ["/tmp/x/Workspaces/tools/agent-hub"],
         "artifactDirectoryPath": "/tmp/x/artifacts",
         "transcriptPath": "/tmp/x/transcript.jsonl",
@@ -313,8 +313,8 @@ def test_agy_session_start_and_stop_events() -> None:
         "role": "director",
         "host": "agy",
         "session_id": "4f99fb2c-c829-4ded-a556-16d5e0bf6021",
-        "model": "gemini-4-argon-medium",
-        "agent": "agy:gemini-4-argon-medium",
+        "model": "m1",
+        "agent": "agy:m1",
     }
     assert sev["parent"] == {}
     assert "quote" not in sev
@@ -323,7 +323,7 @@ def test_agy_session_start_and_stop_events() -> None:
 
     stop_payload = {
         "conversationId": "4f99fb2c-c829-4ded-a556-16d5e0bf6021",
-        "modelName": "gemini-4-argon-medium",
+        "modelName": "m1",
         "terminationReason": "NO_TOOL_CALL",
         "error": "",
         "executionNum": 1,
@@ -340,8 +340,8 @@ def test_agy_session_start_and_stop_events() -> None:
         "role": "director",
         "host": "agy",
         "session_id": "4f99fb2c-c829-4ded-a556-16d5e0bf6021",
-        "model": "gemini-4-argon-medium",
-        "agent": "agy:gemini-4-argon-medium",
+        "model": "m1",
+        "agent": "agy:m1",
     }
     assert tev["parent"] == {}
     assert "quote" not in tev
@@ -373,7 +373,7 @@ def test_agy_model_and_session_in_actor() -> None:
     payload = {
         **REAL_AGY_POST_TOOL_USE_PAYLOAD,
         "conversationId": "conv-worker-1234",
-        "modelName": "gemini-3.8-flash-high",
+        "modelName": "m2",
     }
     events = normalize("agy", "PostToolUse", payload, env)
     assert len(events) == 1
@@ -382,8 +382,8 @@ def test_agy_model_and_session_in_actor() -> None:
         "role": "worker",
         "host": "agy",
         "session_id": "conv-worker-1234",
-        "model": "gemini-3.8-flash-high",
-        "agent": "agy:gemini-3.8-flash-high",
+        "model": "m2",
+        "agent": "agy:m2",
         "pool_role": "implement",
     }
     assert ev["parent"] == {
