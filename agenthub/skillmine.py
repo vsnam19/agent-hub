@@ -375,6 +375,37 @@ def metrics(extract: Extract) -> dict:
     }
 
 
+def _incident_cost(row: dict) -> float:
+    cost = row.get("cost") if isinstance(row.get("cost"), dict) else {}
+
+    def number(key: str) -> float:
+        value = cost.get(key)
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+
+    return number("attempts") + number("rounds") + number("minutes") / 10
+
+
+def _render_cost(value: float) -> str:
+    rounded = round(value, 2)
+    return str(int(rounded)) if rounded == int(rounded) else str(rounded)
+
+
+def _render_incidents(extract: Extract) -> list[str]:
+    if not extract.incidents:
+        return ["- (none)"]
+    ranked = sorted(extract.incidents, key=_incident_cost, reverse=True)[:3]
+    counts = sorted(extract.incident_counts.items(), key=lambda kc: (-kc[1], kc[0]))
+    lines = ["Counts: " + ", ".join(f"{kind} ×{n}" for kind, n in counts)]
+    for row in ranked:
+        kind = row.get("kind") if isinstance(row.get("kind"), str) else "unknown"
+        line = f"- {kind} (cost {_render_cost(_incident_cost(row))}): {row.get('what', '')}"
+        lesson = row.get("lesson")
+        if isinstance(lesson, str) and lesson:
+            line += f" — lesson: {lesson}"
+        lines.append(line)
+    return lines
+
+
 def render_md(extract: Extract) -> str:
     lines = [f"# Skill mining extract ({extract.since[:10]} .. {extract.until[:10]})", ""]
     lines += [f"Findings: {len(extract.findings)}; corrections: {extract.corrections_total}", ""]
@@ -394,6 +425,8 @@ def render_md(extract: Extract) -> str:
         lines += [f"  - {b}: {t}" for t in d["fix_brief_titles"]]
     lines += ["", "## Corrections"]
     lines += [f"- {c['text']}" for c in extract.corrections[:20]] or ["- (none)"]
+    lines += ["", "## Incidents"]
+    lines += _render_incidents(extract)
     return "\n".join(lines) + "\n"
 
 
