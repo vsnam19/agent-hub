@@ -1,5 +1,6 @@
 [defaults]
 quota_cooldown = "60m"        # used when the agent does not say when quota resets
+transient_cooldown = "3m"   # after a network failure (DNS, connection)
 timeout = { implement = "60m", review = "20m", plan = "20m" }
 
 [roles.implement-small]

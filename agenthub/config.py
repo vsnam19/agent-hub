@@ -100,6 +100,7 @@ class Pool:
     roles: dict[str, Role]
     quota_cooldown: timedelta
     timeouts: dict[str, timedelta]
+    transient_cooldown: timedelta = timedelta(minutes=3)
 
 
 def role_kind(pool: Pool, role_name: str) -> str:
@@ -172,6 +173,12 @@ def load_pool(p: Paths | None = None) -> Pool:
     except ConfigError as e:
         raise ConfigError(f"{user_file}: {e}") from e
 
+    transient_cooldown_str = user_defaults.get("transient_cooldown", defaults.get("transient_cooldown", "3m"))
+    try:
+        transient_cooldown = parse_duration(transient_cooldown_str)
+    except ConfigError as e:
+        raise ConfigError(f"{user_file}: {e}") from e
+
     timeouts_data = defaults.get("timeout", {}).copy()
     user_timeouts = user_defaults.get("timeout", {})
     timeouts_data.update(user_timeouts)
@@ -197,4 +204,4 @@ def load_pool(p: Paths | None = None) -> Pool:
             if link.effort and link.agent != "claude":
                 raise ConfigError(f"effort is only supported for claude links: {link_str}")
 
-    return Pool(roles=roles, quota_cooldown=quota_cooldown, timeouts=timeouts)
+    return Pool(roles=roles, quota_cooldown=quota_cooldown, timeouts=timeouts, transient_cooldown=transient_cooldown)

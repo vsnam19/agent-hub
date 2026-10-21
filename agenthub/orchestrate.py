@@ -567,7 +567,7 @@ def run_job(
                 if cl.outcome == Outcome.QUOTA:
                     cooldowns.set(link, cl.reset_at or (now() + pool.quota_cooldown))
                 elif cl.outcome == Outcome.TRANSIENT:
-                    cooldowns.set(link, now() + timedelta(minutes=3))
+                    cooldowns.set(link, now() + pool.transient_cooldown)
 
                 if read_only and guards.fingerprint(repo) != before:
                     status = "modified-tree"
