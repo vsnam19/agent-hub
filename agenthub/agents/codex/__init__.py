@@ -3,7 +3,15 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agenthub.agents import Adapter, Classified, Invocation, Outcome, Request, common_stderr_text
+from agenthub.agents import (
+    Adapter,
+    Classified,
+    Invocation,
+    Outcome,
+    Request,
+    common_stderr_text,
+    is_network_failure,
+)
 
 
 def parse_try_again_at(message: str) -> datetime | None:
@@ -129,6 +137,9 @@ class CodexAdapter(Adapter):
 
         if "print timeout after" in diag and "returning partial output" in diag:
             return Classified(Outcome.TIMEOUT, reply=reply, detail=diag)
+
+        if rc != 0 and is_network_failure(diag):
+            return Classified(Outcome.TRANSIENT, reply=reply, detail=diag)
 
         if rc != 0:
             return Classified(Outcome.FAILED, reply=reply, detail=diag)

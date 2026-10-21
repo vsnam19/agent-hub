@@ -2,8 +2,10 @@ import json
 from datetime import timedelta
 
 from agenthub import process
-from agenthub.agents import Outcome
+from agenthub.agents import NETWORK_MARKERS, Outcome, is_network_failure
+from agenthub.agents.agy import AgyAdapter
 from agenthub.agents.claude import ClaudeAdapter
+from agenthub.agents.codex import CodexAdapter
 from agenthub.config import paths
 from agenthub.pool import Cooldowns, Link
 from tests.test_run import go, now
@@ -74,3 +76,62 @@ def test_network_words_on_success_stay_ok(tmp_path):
     (attempt / "stderr").write_text("ECONNREFUSED from mcp server")
     c = adapter.classify(0, attempt)
     assert c.outcome == Outcome.OK
+
+
+def _agy_attempt(tmp_path, name, stderr, response=""):
+    d = tmp_path / name
+    d.mkdir()
+    (d / "stdout").write_text(json.dumps({"response": response}))
+    (d / "stderr").write_text(stderr)
+    return d
+
+
+def _codex_attempt(tmp_path, name, stderr, reply=""):
+    d = tmp_path / name
+    d.mkdir()
+    (d / "stdout").write_text("")
+    (d / "stderr").write_text(stderr)
+    if reply:
+        (d / "reply.md").write_text(reply)
+    return d
+
+
+def test_agy_network_failure_is_transient(tmp_path):
+    adapter = AgyAdapter()
+    adapter.config = type("C", (), {"binary": "agy"})()
+    stderr = "getaddrinfo EAI_AGAIN generativelanguage.googleapis.com"
+
+    c = adapter.classify(1, _agy_attempt(tmp_path, "a1", stderr))
+    assert c.outcome == Outcome.TRANSIENT
+    assert "eai_again" in c.detail
+
+    c = adapter.classify(0, _agy_attempt(tmp_path, "a2", stderr, response="done"))
+    assert c.outcome != Outcome.TRANSIENT
+
+
+def test_codex_network_failure_is_transient(tmp_path):
+    adapter = CodexAdapter()
+    adapter.config = type("C", (), {"binary": "codex"})()
+    stderr = "getaddrinfo EAI_AGAIN api.openai.com"
+
+    c = adapter.classify(1, _codex_attempt(tmp_path, "c1", stderr))
+    assert c.outcome == Outcome.TRANSIENT
+    assert "eai_again" in c.detail
+
+    c = adapter.classify(0, _codex_attempt(tmp_path, "c2", stderr, reply="done"))
+    assert c.outcome != Outcome.TRANSIENT
+
+
+def test_agy_quota_beats_network(tmp_path):
+    adapter = AgyAdapter()
+    adapter.config = type("C", (), {"binary": "agy"})()
+    c = adapter.classify(1, _agy_attempt(tmp_path, "q", "quota exceeded; ECONNRESET"))
+    assert c.outcome == Outcome.QUOTA
+
+
+def test_is_network_failure_markers():
+    assert NETWORK_MARKERS
+    for marker in NETWORK_MARKERS:
+        assert is_network_failure(marker)
+        assert is_network_failure(f"Error: {marker.upper()} while connecting")
+    assert not is_network_failure("syntax error")
