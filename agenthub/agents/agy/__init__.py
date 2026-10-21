@@ -110,13 +110,20 @@ class AgyAdapter(Adapter):
             argv.append("--mode")
             argv.append("plan")
 
-        argv.extend(
-            [
-                "-p",
+        if req.role == "implement":
+            prompt = (
                 f"Read the file {req.attempt_dir}/brief.md and carry out the task it describes. "
-                "Work in the current directory.",
-            ]
-        )
+                "Work in the current directory."
+            )
+        else:
+            # plan mode auto-denies shell commands; say so before the model tries one
+            prompt = (
+                "This is a read-only job and you have no shell: do not run any command "
+                "(no ls, cat, git, grep or tests); use only your file-reading and search tools. "
+                f"Read the file {req.attempt_dir}/brief.md first and carry out the task it describes. "
+                "Work in the current directory."
+            )
+        argv.extend(["-p", prompt])
 
         return Invocation(
             argv=argv, stdin_path=None, env=_keyring_env(os.environ, secret_service=_secret_service_running)

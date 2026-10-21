@@ -103,10 +103,38 @@ def test_agy_build_review_argv(tmp_path):
         "--mode",
         "plan",
         "-p",
-        f"Read the file {attempt}/brief.md and carry out the task it describes. Work in the current directory.",
+        "This is a read-only job and you have no shell: do not run any command "
+        "(no ls, cat, git, grep or tests); use only your file-reading and search tools. "
+        f"Read the file {attempt}/brief.md first and carry out the task it describes. "
+        "Work in the current directory.",
     ]
     assert inv.stdin_path is None
     assert (attempt / "brief.md").read_text() == "hello"
+
+
+def test_agy_build_plan_role_prompt_forbids_shell(tmp_path):
+    adapter = AgyAdapter()
+    adapter.config = type("C", (), {"binary": "agy"})()
+
+    brief = tmp_path / "b.md"
+    brief.write_text("hello")
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+
+    req = Request(
+        role="plan",
+        model="m",
+        workdir=tmp_path,
+        brief_path=brief,
+        attempt_dir=attempt,
+        git_common_dir=tmp_path,
+    )
+
+    inv = adapter.build(req)
+    assert "--mode" in inv.argv
+    assert inv.argv[inv.argv.index("--mode") + 1] == "plan"
+    prompt = inv.argv[inv.argv.index("-p") + 1]
+    assert prompt.startswith("This is a read-only job and you have no shell")
 
 
 BLANK_SSH = {"SSH_CONNECTION": "", "SSH_CLIENT": "", "SSH_TTY": ""}
