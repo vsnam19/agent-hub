@@ -251,14 +251,14 @@ agent-hub mcp
 - `jobs`: List recent jobs of a repository or all repositories.
 - `show_job`: Show a job's result by id.
 - `run_job`: Run a job detached, returning its job id immediately.
-- `wait_job`: Wait for a job to finish, bounded by `timeout_s` (at most 300s).
+- `wait_job`: Wait for a job to finish, bounded by `timeout_s` (at most 100s).
 - `gate_start`: Gate a work tree's committed HEAD detached, returning the gate job id.
 - `ready`: Check readiness of a work tree's committed HEAD to merge.
 - `plan_run`: Start a plan run detached, returning the plan slug and runner pid immediately.
 - `plan_status`: Show per-task status of a plan, optionally with decision trail.
-- `plan_wait`: Wait for a plan to finish, bounded by `timeout_s` (at most 300s).
+- `plan_wait`: Wait for a plan to finish, bounded by `timeout_s` (at most 100s).
 - `plan_review`: Review done tasks of a plan detached, returning a review handle.
-- `plan_review_wait`: Wait for a plan review to finish, bounded by `timeout_s` (at most 300s).
+- `plan_review_wait`: Wait for a plan review to finish, bounded by `timeout_s` (at most 100s).
 - `plan_merge`: Merge ready tasks of a plan in dependency order.
 - `plan_triage`: Start a plan triage detached, returning a handle; wait with `plan_review_wait(handle)`.
 - `plan_close`: Start a plan close loop detached, returning a handle; wait with `plan_review_wait(handle)`.
@@ -271,7 +271,7 @@ Long jobs are asynchronous: tool calls never block indefinitely. Starting a job 
 - `plan_run` returns `{"plan": "<slug>", "runner_pid": ...}`; wait with `plan_wait(plan_path=..., timeout_s=...)`.
 - `plan_review` returns `{"handle": "<handle>", ...}`; wait with `plan_review_wait(handle=..., timeout_s=...)`.
 
-While running, `wait_job`, `plan_wait` and `plan_review_wait` return status `"running"` when `timeout_s` (at most 300s) elapses; call wait again until the job finishes.
+While running, `wait_job`, `plan_wait` and `plan_review_wait` return status `"running"` when `timeout_s` (at most 100s) elapses; call wait again until the job finishes.
 
 ### Destructive tools
 

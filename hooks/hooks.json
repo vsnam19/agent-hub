@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/agent-hub hook session-start",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agent-hub\" hook session-start",
             "timeout": 10
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -I ${CLAUDE_PLUGIN_ROOT}/hooks/audit-hook.py --host claude SessionStart",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/audit-hook.py\" --host claude SessionStart",
             "timeout": 5
           }
         ]
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/agent-hub hook stop",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agent-hub\" hook stop",
             "timeout": 10
           }
         ]
@@ -37,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -I ${CLAUDE_PLUGIN_ROOT}/hooks/audit-hook.py --host claude Stop",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/audit-hook.py\" --host claude Stop",
             "timeout": 5
           }
         ]
@@ -49,7 +49,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -I ${CLAUDE_PLUGIN_ROOT}/hooks/audit-hook.py --host claude PostToolUse",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/audit-hook.py\" --host claude PostToolUse",
             "timeout": 5
           }
         ]
@@ -61,7 +61,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -I ${CLAUDE_PLUGIN_ROOT}/hooks/audit-hook.py --host claude PostToolUseFailure",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/audit-hook.py\" --host claude PostToolUseFailure",
             "timeout": 5
           }
         ]

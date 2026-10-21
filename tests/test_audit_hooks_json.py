@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +41,7 @@ def test_existing_entries_unchanged() -> None:
         "hooks": [
             {
                 "type": "command",
-                "command": "${CLAUDE_PLUGIN_ROOT}/bin/agent-hub hook session-start",
+                "command": '"${CLAUDE_PLUGIN_ROOT}/bin/agent-hub" hook session-start',
                 "timeout": 10,
             }
         ],
@@ -52,7 +53,7 @@ def test_existing_entries_unchanged() -> None:
         "hooks": [
             {
                 "type": "command",
-                "command": "${CLAUDE_PLUGIN_ROOT}/bin/agent-hub hook stop",
+                "command": '"${CLAUDE_PLUGIN_ROOT}/bin/agent-hub" hook stop',
                 "timeout": 10,
             }
         ],
@@ -96,7 +97,7 @@ def test_audit_commands_use_isolated_python_not_agent_hub_bin() -> None:
         group = _audit_group_for_event(hooks, event)
         entry = group["hooks"][0]
         cmd = entry["command"]
-        expected = f"python3 -I ${{CLAUDE_PLUGIN_ROOT}}/hooks/audit-hook.py --host claude {event}"
+        expected = f'python3 -I "${{CLAUDE_PLUGIN_ROOT}}/hooks/audit-hook.py" --host claude {event}'
         assert cmd == expected
         assert "python3 -I " in cmd
         assert "bin/agent-hub" not in cmd
@@ -109,8 +110,22 @@ def test_audit_script_exists() -> None:
     for event in AUDIT_EVENTS:
         group = _audit_group_for_event(hooks, event)
         cmd = group["hooks"][0]["command"]
-        tokens = cmd.split()
-        script_token = next(t for t in tokens if "${CLAUDE_PLUGIN_ROOT}" in t)
+        tokens = shlex.split(cmd)
+        script_token = next(t for t in tokens if t.startswith("${CLAUDE_PLUGIN_ROOT}/"))
         rel_path = script_token.replace("${CLAUDE_PLUGIN_ROOT}/", "")
         script_path = REPO_ROOT / rel_path
         assert script_path.is_file(), f"Audit script {script_path} must exist"
+
+
+def test_hook_commands_quote_plugin_root() -> None:
+    data = _load_hooks_json()
+    checked = 0
+    for groups in data["hooks"].values():
+        for group in groups:
+            for entry in group["hooks"]:
+                cmd = entry["command"]
+                if "${CLAUDE_PLUGIN_ROOT}" not in cmd:
+                    continue
+                checked += 1
+                assert cmd.count("${CLAUDE_PLUGIN_ROOT}") == cmd.count('"${CLAUDE_PLUGIN_ROOT}/'), cmd
+    assert checked == 6
