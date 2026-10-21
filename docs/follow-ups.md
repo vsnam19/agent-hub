@@ -108,7 +108,9 @@ a turn. Items:
   decide and record a rejection instead of another round.
 - **Agent tests that spawn real agents:** a `plan close` test written by Gemini ran a real `plan run` and hung the job
   30 min; the brief now forbids it, but a conftest guard (fail when a test execs `agy`/`claude`/`codex`) would catch it.
-  Medium.
+  Medium. Second sign (2026-10-21): an `agenthub run … --announce` child of `test_run_job_returns_id_before…`
+  (MCP `run_job` test) was left running 8.5 h with parent init after its worktree was deleted; the guard should also
+  kill detached children a test started.
 - **agent-plugins repo:** add to `skills/orchestrate/SKILL.md` Non-negotiables "never wait on `kill -0 <pid>`; wait on
   the result file or a wait tool that also ends on a dead/zombie process" (still open).
 - **F6 lows (review of `orch/f6/mcp-register`, approve):** a stale codex entry is replaced by `mcp remove` then `mcp add`;
