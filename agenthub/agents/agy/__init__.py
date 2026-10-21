@@ -8,7 +8,15 @@ from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agenthub.agents import Adapter, Classified, Invocation, Outcome, Request, common_stderr_text
+from agenthub.agents import (
+    Adapter,
+    Classified,
+    Invocation,
+    Outcome,
+    Request,
+    common_stderr_text,
+    is_network_failure,
+)
 
 
 @functools.cache
@@ -169,6 +177,9 @@ class AgyAdapter(Adapter):
             names = [str(a.get("display_name")) for a in denied if isinstance(a, dict) and a.get("display_name")]
             detail = "permission auto-denied: " + (", ".join(names) or "unknown")
             return Classified(Outcome.FAILED, reply=reply, detail=detail)
+
+        if rc != 0 and is_network_failure(diag):
+            return Classified(Outcome.TRANSIENT, reply=reply, detail=diag)
 
         if rc != 0:
             return Classified(Outcome.FAILED, reply=reply, detail=diag)

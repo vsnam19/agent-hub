@@ -173,6 +173,27 @@ def registry() -> dict[str, Adapter]:
     return _REGISTRY_CACHE
 
 
+NETWORK_MARKERS = (
+    "can't reach the api server",
+    "eai_again",
+    "enotfound",
+    "econnreset",
+    "econnrefused",
+    "etimedout",
+    "network error",
+    "getaddrinfo",
+    "connection refused",
+    "connection reset",
+    "temporary failure in name resolution",
+)
+
+
+def is_network_failure(diag: str) -> bool:
+    """True when diag (any case) contains a DNS/connection failure marker."""
+    low = diag.lower()
+    return any(m in low for m in NETWORK_MARKERS)
+
+
 def common_stderr_text(attempt_dir: Path) -> str:
     stderr_file = attempt_dir / "stderr"
     if stderr_file.is_file():
