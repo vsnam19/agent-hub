@@ -95,30 +95,30 @@ a turn. Items:
   (file, kind, all lines); a reviewer who splits one group (`lines 235,…,1410`) into two lines leaves it "not judged"
   and `ready` refuses (wait-timeout-cap needed a targeted re-review). Accept legitimate entries whose lines together
   cover the group. Low.
-- **Real cancel gap in gates:** a SIGTERM after `process.run` creates the gate's stdout file but before `on_start`
+- **Done 2026-10-21 (plan `followups-4`, D-130).** **Real cancel gap in gates:** a SIGTERM after `process.run` creates the gate's stdout file but before `on_start`
   records the process group only sets `cancelled`; the gate command runs on until it ends or `GATE_TIMEOUT_S`
   (review 20261018-154041-review-09d2). Low.
-- **README still says the MCP wait tools cap at 300 s** (now 100 s, `MAX_WAIT_S`). Low, docs.
-- **Quote `${CLAUDE_PLUGIN_ROOT}` in `hooks/hooks.json`** (`claude plugin validate` warns: a path with a space splits).
+- **Done 2026-10-21 (plan `followups-4`, D-130).** **README still says the MCP wait tools cap at 300 s** (now 100 s, `MAX_WAIT_S`). Low, docs.
+- **Done 2026-10-21 (plan `followups-4`, D-130).** **Quote `${CLAUDE_PLUGIN_ROOT}` in `hooks/hooks.json`** (`claude plugin validate` warns: a path with a space splits).
   Low.
-- **Network-transient only for the Claude adapter:** agy/codex DNS or connection failures still end `failed`; the 3-minute
+- **Done 2026-10-21 (plan `followups-4`, D-130).** **Network-transient only for the Claude adapter:** agy/codex DNS or connection failures still end `failed`; the 3-minute
   transient cooldown is hard-coded (review 20261018-145747-review-a609). Low.
 - **Review loops on edge cases:** gateguard took 4 rounds and review-excludes 3 because each review found the inverse
   of the last fix; the director ended both by narrowing the rule (D-103). When a round re-raises the opposite trade-off,
   decide and record a rejection instead of another round.
-- **Agent tests that spawn real agents:** a `plan close` test written by Gemini ran a real `plan run` and hung the job
+- **Done 2026-10-21 (plan `followups-4`, D-130).** **Agent tests that spawn real agents:** a `plan close` test written by Gemini ran a real `plan run` and hung the job
   30 min; the brief now forbids it, but a conftest guard (fail when a test execs `agy`/`claude`/`codex`) would catch it.
   Medium. Second sign (2026-10-21): an `agenthub run … --announce` child of `test_run_job_returns_id_before…`
   (MCP `run_job` test) was left running 8.5 h with parent init after its worktree was deleted; the guard should also
   kill detached children a test started.
 - **agent-plugins repo:** add to `skills/orchestrate/SKILL.md` Non-negotiables "never wait on `kill -0 <pid>`; wait on
   the result file or a wait tool that also ends on a dead/zombie process" (still open).
-- **F6 lows (review of `orch/f6/mcp-register`, approve):** a stale codex entry is replaced by `mcp remove` then `mcp add`;
+- **Done 2026-10-21 (plan `followups-4`, D-130).** **F6 lows (review of `orch/f6/mcp-register`, approve):** a stale codex entry is replaced by `mcp remove` then `mcp add`;
   if the add fails the server is gone until the next `hub install`. A non-string codex `transport.command` would make
   `hub status` raise. Low.
 - **uv-tool `agent-hub` lacks the `mcp` extra:** `agent-hub mcp` on PATH fails ("mcp SDK not installed"); reinstall
   with `uv tool install -e '.[mcp]'` at release, or keep registering `bin/agent-hub`. Low.
-- **agy 1.4.2 changed `agy plugin list` to text** (`Installed plugins:` / `- name (enabled, 1.0.0)` / `Source:` …;
+- **Done (already on master, found 2026-10-21: `hub._agy_installed` parses the text form).** **agy 1.4.2 changed `agy plugin list` to text** (`Installed plugins:` / `- name (enabled, 1.0.0)` / `Source:` …;
   no JSON `imports`): `hub status` reports `agy - error: agy list output not understood` and every agy plugin as
   `missing`, so each `hub install` reinstalls them (harmless). Parse the text form (keep the JSON form). Seen at the
   v0.11.0 `hub install --apply` (2026-10-19), where the plugins were in fact installed. Small task, next.
@@ -218,3 +218,26 @@ on gap failure; `_redact_target` re-checks for a surviving quoted copy; curl `-E
   change, is now `empty` (exit 7) so the plan runner escalates. Narrowed after the broad rule (any agent) broke 61
   tests: stacked tasks legitimately find work already present.
 - Techlead brief: a task changing a behaviour lists the tests asserting the old one.
+
+## Done in plan `followups-4` (2026-10-21, D-130)
+Network failures are transient for agy and codex (shared `NETWORK_MARKERS`); `transient_cooldown` pool default (3m);
+`_Cancel.attach` stops a child whose cancel landed before its pgid was recorded (gates and attempts); README wait cap
+100 s; quoted `${CLAUDE_PLUGIN_ROOT}` in `hooks/hooks.json`; codex stale MCP entry re-added without `remove`, non-string
+`transport.command` → stale; test guard (stub dir for real agents, `/proc` scan for leaked children); agy read-only
+jobs get the no-shell rule in the `-p` prompt.
+
+## From plan `followups-4` (2026-10-21)
+- **agy Claude reviews auto-denied:** all six agy `claude-opus-5-5-medium` reviews failed in ~10 s (`RunCommand` denied:
+  the model ran `ls` before reading brief.md) and fell to `claude:opus@low`. Fixed in the `-p` prompt; **real check
+  pending** — agy's Claude quota ran out (resets ~2026-10-27; Gemini cooldown to 2026-10-24). Run one review with
+  `--agent agy:claude-opus-5-5-medium` (or Argon) when quota is back and confirm no denied action.
+- **agy implement jobs end `cancelled` mid-run** (jobs `20261021-010513-implement-e0fb`, `20261021-013242-implement-1b1e`):
+  agent-hub received SIGTERM/SIGINT from an unknown source; both used agy background tasks (`manage_task`/`schedule`),
+  as did every agy job that day despite "no background tasks" in the brief. No test signals outside its own process.
+  Investigate whether agy's background-task teardown signals its parent. Medium.
+- **`ready` ignores a cancelled/interrupted implement job that changed the tree:** `implementers()` counts only `ok` and
+  `gate-failed`, so a branch finished from a cancelled job's edits gets "no implementer recorded" and must be merged by
+  hand (`agy-readonly-prompt`). Count every implement job on the work tree whose `changed_files` is non-empty. Low.
+- **MCP `run_job` tests** do not wait for the cancelled job to end; the guard's 3 s grace hides it. Add a bounded wait
+  in their `finally`. Low.
+- Brief lesson: a kill-on-leak guard must never signal its own process group (incident, first `test-guard-agents` brief).
