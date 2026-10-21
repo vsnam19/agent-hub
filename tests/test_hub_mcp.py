@@ -154,7 +154,7 @@ def test_mcp_row_current_codex_and_agy(mcp_env, tmp_path):
     assert not any(c[0] in ("codex", "agy") and "mcp" in c for c in cmds)
 
 
-def test_mcp_row_stale_codex_removes_then_adds(mcp_env, tmp_path):
+def test_mcp_row_stale_codex_readds_without_remove(mcp_env, tmp_path):
     mcp_env.set_codex_mcp(
         [
             {
@@ -175,10 +175,24 @@ def test_mcp_row_stale_codex_removes_then_adds(mcp_env, tmp_path):
 
     cmds = hub.plan_install(rows, hub.load_config(mcp_env.config), hosts=("codex",))
     bin_cmd = hub._mcp_command()[0]
-    assert cmds == [
-        ["codex", "mcp", "remove", "agent-hub"],
-        ["codex", "mcp", "add", "agent-hub", "--", bin_cmd, "mcp"],
-    ]
+    assert not any("remove" in c for c in cmds)
+    assert cmds == [["codex", "mcp", "add", "agent-hub", "--", bin_cmd, "mcp"]]
+
+
+def test_codex_non_string_command_is_stale(mcp_env, tmp_path):
+    mcp_env.set_codex_mcp(
+        [
+            {
+                "name": "agent-hub",
+                "enabled": True,
+                "transport": {"type": "stdio", "command": 7, "args": ["mcp"]},
+            }
+        ]
+    )
+    rows = hub.status(mcp_env.config, tmp_path / "repo")
+    codex_row = next(r for r in rows if r.host == "codex" and r.plugin == hub.MCP_ROW)
+    assert codex_row.state == "stale"
+    assert codex_row.detail == "7"
 
 
 def test_codex_args_string_detail(mcp_env, tmp_path):

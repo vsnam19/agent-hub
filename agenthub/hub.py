@@ -279,9 +279,7 @@ def plan_install(rows: list[Row], config: HubConfig, hosts: tuple[str, ...] = HO
     mcp_todo = [r for r in rows if r.state in INSTALLABLE and r.plugin == MCP_ROW]
     bin_cmd = str(_mcp_bin_path())
     if "codex" in hosts:
-        for r in (r for r in mcp_todo if r.host == "codex"):
-            if r.state == "stale":
-                cmds.append(["codex", "mcp", "remove", MCP_SERVER_NAME])
+        for _ in (r for r in mcp_todo if r.host == "codex"):
             cmds.append(["codex", "mcp", "add", MCP_SERVER_NAME, "--", bin_cmd, "mcp"])
     if "agy" in hosts:
         for r in (r for r in todo if r.host == "agy"):
@@ -561,6 +559,8 @@ def _codex_mcp_row() -> Row:
     if not isinstance(transport, dict):
         return Row("codex", MCP_ROW, "error", detail="codex mcp list output not understood")
     cmd = transport.get("command") or ""
+    if not isinstance(cmd, str):
+        return Row("codex", MCP_ROW, "stale", detail=repr(cmd))
     raw_args = transport.get("args")
     if raw_args is None:
         args: list[str] = []
