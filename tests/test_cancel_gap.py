@@ -1,15 +1,16 @@
 import json
 import os
 import signal
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from agenthub import guards, orchestrate
+from agenthub import guards, orchestrate, process
 from agenthub.config import Pool, paths
 from agenthub.jobs import Job
-from agenthub.orchestrate import RunArgs, _Cancel, _finish, run_gate_job, run_job
+from agenthub.orchestrate import RunArgs, _Cancel, _finish, run_gate_job, run_gates, run_job
 from agenthub.pool import parse_link
 
 BRIEF = "## Input\n\nfoo\n\n## Expected output\n\nbar\n"
@@ -179,3 +180,53 @@ def test_cancel_during_announce_ends_in_finish(env_sandbox, repo, job_type):
     assert res["exit_code"] == 130
     recorded = paths().jobs_dir / res["id"] / "result.json"
     assert json.loads(recorded.read_text())["status"] == "cancelled"
+
+
+def test_attach_after_cancel_terminates(monkeypatch):
+    calls = []
+    monkeypatch.setattr(process, "terminate", lambda pgid, leader=None: calls.append(pgid))
+    cancel = _Cancel()
+    cancel.cancelled = True
+    cancel.attach(4242)
+    assert calls == [4242]
+    assert cancel.pgid == 4242
+
+
+def test_attach_before_cancel_does_not_terminate(monkeypatch):
+    calls = []
+    monkeypatch.setattr(process, "terminate", lambda pgid, leader=None: calls.append(pgid))
+    cancel = _Cancel()
+    cancel.attach(4242)
+    assert calls == []
+    assert cancel.pgid == 4242
+
+
+def test_gate_cancelled_before_on_start_is_stopped(env_sandbox, monkeypatch, tmp_path):
+    cancel = _Cancel()
+    real_run = process.run
+    pgids = []
+
+    def run_cancelled(inv, workdir, env, attempt_dir, timeout, on_start=None):
+        cancel.cancelled = True
+
+        def spy(pgid):
+            pgids.append(pgid)
+            on_start(pgid)
+
+        return real_run(inv, workdir, env, attempt_dir, timeout, on_start=spy)
+
+    monkeypatch.setattr(process, "run", run_cancelled)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    started = time.monotonic()
+    try:
+        records, passed = run_gates(["sleep 30"], workdir, tmp_path / "gate", "abc123", cancel)
+    finally:
+        for pgid in pgids:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    assert time.monotonic() - started < 10
+    assert passed is False
+    assert records[0]["rc"] != 0
