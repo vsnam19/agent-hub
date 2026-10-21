@@ -181,7 +181,7 @@ def run_gates(
 
         def on_start(pgid: int) -> None:
             if cancel is not None:
-                cancel.pgid = pgid
+                cancel.attach(pgid)
 
         ran = process.run(inv, workdir, gate_env, attempt_dir, timedelta(seconds=GATE_TIMEOUT_S), on_start=on_start)
         if cancel is not None:
@@ -297,6 +297,12 @@ class _Cancel:
         self.cancelled = False
         self.pgid: int | None = None
         self._old: dict[int, object] = {}
+
+    def attach(self, pgid: int) -> None:
+        """Record the running child's group; stop it at once if a cancel already landed before it was recorded."""
+        self.pgid = pgid
+        if self.cancelled:
+            process.terminate(pgid)
 
     def _handle(self, signum, frame) -> None:
         self.cancelled = True
@@ -514,7 +520,7 @@ def run_job(
                     child_env.update(trace_env(job=job.id, role=args.role, attempt=n))
 
                     def on_start(pgid: int, n=n, link=link, attempt_dir=attempt_dir) -> None:
-                        cancel.pgid = pgid
+                        cancel.attach(pgid)
                         meta = {
                             "n": n,
                             "agent": link.agent,
