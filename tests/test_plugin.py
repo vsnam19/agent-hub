@@ -197,13 +197,13 @@ def test_plugin_hooks_manifest():
     assert "hooks" in data
     hooks = data["hooks"]
 
+    session_start_cmd = '"${CLAUDE_PLUGIN_ROOT}/bin/agent-hub" hook session-start'
+
     # SessionStart hook
     assert "SessionStart" in hooks
     session_start_entries = hooks["SessionStart"]
     session_start_groups = [
-        g
-        for g in session_start_entries
-        if [h.get("command") for h in g.get("hooks", [])] == ["${CLAUDE_PLUGIN_ROOT}/bin/agent-hub hook session-start"]
+        g for g in session_start_entries if [h.get("command") for h in g.get("hooks", [])] == [session_start_cmd]
     ]
     assert len(session_start_groups) == 1
     session_start = session_start_groups[0]
@@ -212,7 +212,7 @@ def test_plugin_hooks_manifest():
     assert len(session_start.get("hooks", [])) == 1
     ss_hook = session_start["hooks"][0]
     assert ss_hook.get("type") == "command"
-    assert ss_hook.get("command") == "${CLAUDE_PLUGIN_ROOT}/bin/agent-hub hook session-start"
+    assert ss_hook.get("command") == session_start_cmd
     assert ss_hook.get("timeout") == 10
 
     # Stop hook
@@ -221,7 +221,7 @@ def test_plugin_hooks_manifest():
     stop_groups = [
         g
         for g in stop_entries
-        if [h.get("command") for h in g.get("hooks", [])] == ["${CLAUDE_PLUGIN_ROOT}/bin/agent-hub hook stop"]
+        if [h.get("command") for h in g.get("hooks", [])] == ['"${CLAUDE_PLUGIN_ROOT}/bin/agent-hub" hook stop']
     ]
     assert len(stop_groups) == 1
     stop = stop_groups[0]
@@ -229,7 +229,7 @@ def test_plugin_hooks_manifest():
     assert len(stop.get("hooks", [])) == 1
     stop_hook = stop["hooks"][0]
     assert stop_hook.get("type") == "command"
-    assert stop_hook.get("command") == "${CLAUDE_PLUGIN_ROOT}/bin/agent-hub hook stop"
+    assert stop_hook.get("command") == '"${CLAUDE_PLUGIN_ROOT}/bin/agent-hub" hook stop'
     assert stop_hook.get("timeout") == 10
 
     # README documentation
