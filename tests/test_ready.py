@@ -23,7 +23,19 @@ def commit(repo, name):
 
 
 def add_job(
-    repo, kind, head, *, model="m1", agent="codex", verdict=None, gate_sha=None, n=0, repo_gates=("true",), touched=()
+    repo,
+    kind,
+    head,
+    *,
+    model="m1",
+    agent="codex",
+    verdict=None,
+    gate_sha=None,
+    n=0,
+    repo_gates=("true",),
+    touched=(),
+    status="ok",
+    changed_files=None,
 ):
     when = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=n)
     job = new_job(paths(), kind, when)
@@ -31,7 +43,7 @@ def add_job(
         "id": job.id,
         "role": kind,
         "kind": kind,
-        "status": "ok",
+        "status": status,
         "agent": agent,
         "model": model,
         "workdir": str(repo),
@@ -40,6 +52,8 @@ def add_job(
         "gate": [{"cmd": "true", "rc": 0, "sha": gate_sha or head}] if kind in ("implement", "gate") else [],
         "gate_touched": list(touched),
     }
+    if changed_files is not None:
+        record["changed_files"] = list(changed_files)
     if kind == "gate":
         record["repo_gates"] = list(repo_gates)
     job.write_json("result.json", record)
@@ -252,3 +266,30 @@ def test_judgement_covers_only_its_lines(env_sandbox, repo, capsys):
     rc, out = ready(repo, capsys)
     assert rc == 1
     assert out["problems"] == ["gate touched: 1 findings not judged by the reviewer"]
+
+
+def test_ready_counts_cancelled_implementer_that_changed_files(env_sandbox, repo, capsys):
+    head = git_head(repo)
+    add_job(repo, "implement", head, model="m1", status="cancelled", changed_files=["a.py"], n=1)
+    add_job(repo, "review", head, model="m2", verdict="approve", n=2)
+    rc, out = ready(repo, capsys)
+    assert rc == 0
+    assert out == {"ready": True, "head": head, "problems": []}
+
+
+def test_ready_ignores_cancelled_implementer_without_changes(env_sandbox, repo, capsys):
+    head = git_head(repo)
+    add_job(repo, "implement", head, model="m1", status="cancelled", changed_files=[], n=1)
+    add_job(repo, "review", head, model="m2", verdict="approve", n=2)
+    rc, out = ready(repo, capsys)
+    assert rc == 1
+    assert out["problems"] == ["no implementer recorded: cannot check reviewer independence"]
+
+
+def test_cancelled_implementer_cannot_review_itself(env_sandbox, repo, capsys):
+    head = git_head(repo)
+    add_job(repo, "implement", head, model="m1", status="cancelled", changed_files=["a.py"], n=1)
+    add_job(repo, "review", head, model="m1", verdict="approve", n=2)
+    rc, out = ready(repo, capsys)
+    assert rc == 1
+    assert out["problems"] == ["reviewer is the implementer"]
