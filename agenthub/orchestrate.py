@@ -684,13 +684,14 @@ def run_job(
 
 
 def implementers(jobs: list[dict], workdir: Path) -> set[str]:
-    """The agent:model of every implement job on that resolved work tree with status ok or gate-failed."""
+    """The agent:model of every implement job on that resolved work tree that wrote code: status ok or
+    gate-failed, or any other status (e.g. cancelled, interrupted) that still changed files in the tree."""
     target = Path(workdir).resolve()
     found: set[str] = set()
     for j in jobs:
         if (
             j.get("kind") == "implement"
-            and j.get("status") in ("ok", "gate-failed")
+            and (j.get("status") in ("ok", "gate-failed") or j.get("changed_files"))
             and j.get("agent")
             and j.get("model")
             and j.get("workdir")
