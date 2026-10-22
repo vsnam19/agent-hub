@@ -54,6 +54,16 @@ def write_brief(tmp_path, text=BRIEF):
     return f
 
 
+def _cancel_and_wait(job_id: str, repo: Path, timeout_s: float = 20.0) -> str:
+    main(["cancel", job_id, "-d", str(repo)])
+    deadline = time.monotonic() + timeout_s
+    status = get_job(paths(), job_id).read_json("result.json")["status"]
+    while status == "running" and time.monotonic() < deadline:
+        time.sleep(0.1)
+        status = get_job(paths(), job_id).read_json("result.json")["status"]
+    return status
+
+
 def test_pool_data_matches_cli_json(env_sandbox, capsys):
     assert main(["pool", "--json"]) == 0
     cli_out = json.loads(capsys.readouterr().out)
@@ -189,7 +199,8 @@ def test_run_job_returns_id_before_job_finishes(env_sandbox, repo, monkeypatch):
         record = job.read_json("result.json")
         assert record["status"] == "running"
     finally:
-        main(["cancel", job_id, "-d", str(repo)])
+        final_status = _cancel_and_wait(job_id, repo)
+        assert final_status != "running"
 
 
 def test_wait_job_times_out_running(env_sandbox, repo, monkeypatch):
@@ -204,7 +215,8 @@ def test_wait_job_times_out_running(env_sandbox, repo, monkeypatch):
         wait_res = wait_job(job_id=job_id, timeout_s=1)
         assert wait_res == {"state": "running"}
     finally:
-        main(["cancel", job_id, "-d", str(repo)])
+        final_status = _cancel_and_wait(job_id, repo)
+        assert final_status != "running"
 
 
 def test_wait_job_returns_result(env_sandbox, repo, monkeypatch):
