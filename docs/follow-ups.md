@@ -235,9 +235,9 @@ jobs get the no-shell rule in the `-p` prompt.
   agent-hub received SIGTERM/SIGINT from an unknown source; both used agy background tasks (`manage_task`/`schedule`),
   as did every agy job that day despite "no background tasks" in the brief. No test signals outside its own process.
   Investigate whether agy's background-task teardown signals its parent. Medium.
-- **`ready` ignores a cancelled/interrupted implement job that changed the tree:** `implementers()` counts only `ok` and
+- **Done 2026-10-22 (plan `followups-5`, D-131).** **`ready` ignores a cancelled/interrupted implement job that changed the tree:** `implementers()` counts only `ok` and
   `gate-failed`, so a branch finished from a cancelled job's edits gets "no implementer recorded" and must be merged by
   hand (`agy-readonly-prompt`). Count every implement job on the work tree whose `changed_files` is non-empty. Low.
-- **MCP `run_job` tests** do not wait for the cancelled job to end; the guard's 3 s grace hides it. Add a bounded wait
+- **Done 2026-10-22 (plan `followups-5`, D-131).** **MCP `run_job` tests** do not wait for the cancelled job to end; the guard's 3 s grace hides it. Add a bounded wait
   in their `finally`. Low.
 - Brief lesson: a kill-on-leak guard must never signal its own process group (incident, first `test-guard-agents` brief).

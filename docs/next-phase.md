@@ -13,13 +13,13 @@ vault (no config / missing vault keep data and exit 1; success; re-run no-op; ve
 `.worktrees/phase-g-*`, `.worktrees/phase-g-hardening-*`, `orch/phase-g/*`, `orch/phase-g-hardening/*` — deleting them
 is the owner's call.
 
-**Current work (2026-10-21 01:50 UTC): v0.13.3 on master (local, not pushed; plugin cache 0.13.2).** Plan
-`followups-4` (D-130) merged; lint + 1669 tests green. Worktrees/branches of `followups-4` are merged and left in place
-(deleting them is the owner's call). Quota: agy Claude models (Sonnet/Opus) out until ~2026-10-27, agy Gemini (Argon,
-Flash) cooldown until 2026-10-24, codex until 2026-11-06 → implement falls to `claude:haiku`, reviews to
-`claude:opus@low`. Reviews follow D-126; implement on agy Claude Sonnet 5.5 when free. Next: when agy quota is back,
-the real check of the agy read-only prompt (see `docs/follow-ups.md` "From plan `followups-4`"); the agy
-cancelled-mid-run investigation; then E5/E6/E7 from the roadmap. Owner: release 0.13.3 (plugin cache) when wanted.
+**Current work (2026-10-22 00:30 UTC): v0.13.4 on master (local, not pushed; plugin cache 0.13.2).** Plans
+`followups-4` (D-130) and `followups-5` (D-131) merged; lint + 1672 tests green. Their worktrees/branches are merged and
+left in place (deleting them is the owner's call). Quota: every agy model is out — Claude (Sonnet/Opus, shared) until
+~2026-10-27, Gemini (Argon, Flash) until 2026-10-24; codex until 2026-11-06. Do not start big work on Claude quota.
+Next, from 2026-10-24 (Gemini back): (1) real check of the agy read-only prompt with one Argon/Flash review
+(`docs/follow-ups.md` "From plan `followups-4`"); (2) investigate agy jobs ending `cancelled` mid-run; (3) E5/E6/E7.
+Owner: release 0.13.4 (plugin cache) when wanted.
 
 The steps below describe how `followups-1` was run; reuse them for the next plan (new slug, new spec).
 
