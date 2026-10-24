@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agenthub import guards, models
+from agenthub import guards, models, tasksize
 from agenthub.agents import registry
 from agenthub.audit.emit import emit
 from agenthub.brief import BriefError, order_table
@@ -467,6 +467,16 @@ def _read_brief(args, kind: str) -> str:
         raise UsageError(f"cannot read brief: {e}") from None
 
 
+def _size_warnings(text: str, prefix: str = "") -> list[str]:
+    """Stderr lines for a brief too large for one cheap run; empty when the brief is small enough."""
+    problems = tasksize.check(text)
+    if not problems:
+        return []
+    lines = [f"agent-hub: warning: {prefix}brief size: {problem}" for problem in problems]
+    lines.append("agent-hub: warning: a large brief may be on purpose; split it or use 'agent-hub plan draft'")
+    return lines
+
+
 def _safe(text: str, stream=None) -> str:
     """On a terminal, drop control/format characters (except newline and tab)."""
     if stream is None:
@@ -523,6 +533,9 @@ def _cmd_run(args) -> int:
         links = [parse_link(x) for x in pool.roles[args.role].chain]
     timeout = parse_duration(args.timeout) if args.timeout else pool.timeouts[args.role]
     text = _read_brief(args, kind)
+    if kind == "implement" and not args.json:
+        for line in _size_warnings(text):
+            print(_safe(line, sys.stderr), file=sys.stderr)
     run_args = RunArgs(
         role=args.role,
         kind=kind,
