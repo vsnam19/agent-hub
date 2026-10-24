@@ -477,6 +477,16 @@ def _size_warnings(text: str, prefix: str = "") -> list[str]:
     return lines
 
 
+def _warn_plan_sizes(plan) -> None:
+    """Warn on stderr about each implement task whose brief is too large for one cheap run."""
+    for task in plan.tasks:
+        if task.kind != "implement" or task.brief is None:
+            continue
+        text = task.brief.read_text(encoding="utf-8")
+        for line in _size_warnings(text, f"task {task.name}: "):
+            print(_safe(line, sys.stderr), file=sys.stderr)
+
+
 def _safe(text: str, stream=None) -> str:
     """On a terminal, drop control/format characters (except newline and tab)."""
     if stream is None:
@@ -1592,6 +1602,7 @@ def _cmd_plan(args) -> int:
         from agenthub.planstate import load_or_init
 
         _check_plan_skills(plan)
+        _warn_plan_sizes(plan)
 
         state = load_or_init(plan)
         _claim_runner(state, plan_dir, plan=plan)
