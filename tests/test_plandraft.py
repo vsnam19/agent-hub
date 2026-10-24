@@ -4,7 +4,7 @@ import re
 import pytest
 
 from agenthub import tasksize
-from agenthub.plandraft import DraftError, parse, techlead_brief
+from agenthub.plandraft import Draft, DraftError, DraftTask, ordered, parse, techlead_brief, write
 
 
 def _reply(data: object, prefix: str = "Here is the plan.\n") -> str:
@@ -236,3 +236,79 @@ def test_techlead_brief_asks_for_tests_of_old_behaviour():
     assert "grep `tests/` for assertions of the old behaviour" in text
     assert "list every such test file in the task's changed files" in text
     assert "$" not in text
+
+
+def test_null_reason_is_empty():
+    draft = parse(_reply({"goal": "g", "tasks": [{**_task("a"), "reason": None}]}))
+
+    assert draft.tasks[0].reason == ""
+
+    with pytest.raises(DraftError, match="needs a non-empty reason"):
+        parse(_reply({"goal": "g", "tasks": [{**_task("a", "implement-small"), "reason": None}]}))
+
+
+def test_ordered_puts_dependencies_first():
+    tasks = [
+        DraftTask(name="c", role="implement", depends_on=["a"]),
+        DraftTask(name="a", role="implement"),
+        DraftTask(name="b", role="implement", depends_on=["c"]),
+    ]
+
+    assert [t.name for t in ordered(tasks)] == ["a", "c", "b"]
+
+
+def test_write_creates_plan_and_briefs(tmp_path):
+    draft = Draft(
+        goal="ship it",
+        tasks=[
+            DraftTask(name="b", role="implement-hard", depends_on=["a"], reason="hard part", brief="B brief\n\n"),
+            DraftTask(name="a", role="implement", brief="A brief"),
+        ],
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    plan_dir = tmp_path / "plan"
+
+    plan_path = write(draft, plan_dir, repo=repo, slug="s", base="master", gates=["just lint", "uv run pytest -q"])
+
+    assert plan_path == plan_dir / "plan.json"
+    assert (plan_dir / "briefs" / "a.md").read_text(encoding="utf-8") == "A brief\n"
+    assert (plan_dir / "briefs" / "b.md").read_text(encoding="utf-8") == "B brief\n"
+    data = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert data == {
+        "goal": "ship it",
+        "repo": str(repo.resolve()),
+        "base": "master",
+        "slug": "s",
+        "max_parallel": 3,
+        "tasks": [
+            {
+                "name": "a",
+                "role": "implement",
+                "depends_on": [],
+                "gate": ["just lint", "uv run pytest -q"],
+                "brief": "briefs/a.md",
+            },
+            {
+                "name": "b",
+                "role": "implement-hard",
+                "depends_on": ["a"],
+                "gate": ["just lint", "uv run pytest -q"],
+                "brief": "briefs/b.md",
+                "reason": "hard part",
+            },
+        ],
+    }
+
+
+def test_write_refuses_existing_plan(tmp_path):
+    plan_dir = tmp_path / "plan"
+    plan_dir.mkdir()
+    (plan_dir / "plan.json").write_text("{}", encoding="utf-8")
+    draft = Draft(goal="g", tasks=[DraftTask(name="a", role="implement", brief="b")])
+
+    with pytest.raises(DraftError, match="plan already exists"):
+        write(draft, plan_dir, repo=tmp_path, slug="s", base="master", gates=["just lint"])
+
+    assert (plan_dir / "plan.json").read_text(encoding="utf-8") == "{}"
+    assert not (plan_dir / "briefs").exists()

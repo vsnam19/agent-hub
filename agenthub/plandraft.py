@@ -1,3 +1,4 @@
+import heapq
 import json
 import re
 import string
@@ -110,6 +111,8 @@ def _parse_task(index: int, raw: object) -> DraftTask:
     if not isinstance(deps, list) or not all(isinstance(d, str) for d in deps):
         raise DraftError(f"task {name} depends_on must be a list of strings")
     reason = raw.get("reason", "")
+    if reason is None:
+        reason = ""
     if not isinstance(reason, str):
         raise DraftError(f"task {name} reason must be a string")
     if role != DEFAULT_ROLE and not reason.strip():
@@ -144,3 +147,63 @@ def _check_cycles(tasks: list[DraftTask]) -> None:
                 path.append(dep)
                 on_path.add(dep)
                 stack.append(iter(deps[dep]))
+
+
+def ordered(tasks: list[DraftTask]) -> list[DraftTask]:
+    """Topological order: every task after its dependencies, ties kept in the original order.
+
+    Assumes no cycles; `parse` already rejects them.
+    """
+    waiting = [len(t.depends_on) for t in tasks]
+    dependents: dict[str, list[int]] = {t.name: [] for t in tasks}
+    for i, t in enumerate(tasks):
+        for dep in t.depends_on:
+            dependents[dep].append(i)
+
+    ready = [i for i, count in enumerate(waiting) if count == 0]
+    heapq.heapify(ready)
+    out: list[DraftTask] = []
+    while ready:
+        i = heapq.heappop(ready)
+        out.append(tasks[i])
+        for j in dependents[tasks[i].name]:
+            waiting[j] -= 1
+            if waiting[j] == 0:
+                heapq.heappush(ready, j)
+    return out
+
+
+def write(
+    draft: Draft, plan_dir: Path, *, repo: Path, slug: str, base: str, gates: list[str], max_parallel: int = 3
+) -> Path:
+    """Write `plan_dir/plan.json` and one `briefs/<name>.md` per task; return the plan.json path."""
+    plan_path = plan_dir / "plan.json"
+    if plan_path.exists():
+        raise DraftError(f"plan already exists: {plan_path}")
+
+    (plan_dir / "briefs").mkdir(parents=True, exist_ok=True)
+    tasks = []
+    for t in ordered(draft.tasks):
+        brief_rel = f"briefs/{t.name}.md"
+        (plan_dir / brief_rel).write_text(t.brief.rstrip("\n") + "\n", encoding="utf-8")
+        entry = {
+            "name": t.name,
+            "role": t.role,
+            "depends_on": list(t.depends_on),
+            "gate": list(gates),
+            "brief": brief_rel,
+        }
+        if t.reason:
+            entry["reason"] = t.reason
+        tasks.append(entry)
+
+    data = {
+        "goal": draft.goal,
+        "repo": str(repo.resolve()),
+        "base": base,
+        "slug": slug,
+        "max_parallel": max_parallel,
+        "tasks": tasks,
+    }
+    plan_path.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
+    return plan_path
