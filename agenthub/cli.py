@@ -300,6 +300,13 @@ def _build_parser() -> argparse.ArgumentParser:
     plan_cancel = plan_sub.add_parser("cancel", help="stop the plan's runner and its running jobs")
     plan_cancel.add_argument("plan_file", metavar="<plan.json>")
     plan_cancel.add_argument("-d", "--dir", default=".", dest="workdir", help="repository the caller runs from")
+    plan_draft = plan_sub.add_parser(
+        "draft", help="write a plan from a techlead spec and print its task sizes (never runs the plan)"
+    )
+    plan_draft.add_argument("--spec", required=True, metavar="FILE", help="spec the techlead plans from")
+    plan_draft.add_argument("--slug", required=True, help="plan slug; the plan is written under it")
+    plan_draft.add_argument("--base", default="master", help="branch the plan starts from (default: master)")
+    plan_draft.add_argument("-d", "--dir", default=".", dest="workdir", help="repository to plan for")
 
     orders = sub.add_parser("orders", help="list standing orders and what enforces each (exit 1 if one has none)")
     orders.add_argument("-d", "--dir", default=".", dest="workdir", help="repo whose standing orders to list")
@@ -1524,7 +1531,43 @@ def _check_plan_skills(plan) -> None:
                 raise UsageError(f"task {task.name}: unknown skill {skill}: {skills_hint(known_skills)}")
 
 
+def _cmd_plan_draft(args) -> int:
+    """Write a plan from a spec and print each task's size. The plan is written, never run."""
+    import agenthub.plandraftrun as plandraftrun
+    from agenthub.plandraft import DraftError
+    from agenthub.tasksize import measure
+
+    try:
+        repo = guards.inspect(Path(args.workdir)).root
+    except guards.GuardError as e:
+        raise UsageError(str(e)) from None
+    try:
+        result = plandraftrun.draft(Path(args.spec), args.slug, args.base, repo)
+    except DraftError as e:
+        print(_safe(f"agent-hub: {e}", sys.stderr), file=sys.stderr)
+        return 1
+
+    print(_safe(f"plan: {result['plan_path']}"))
+    print(f"re-split: {'yes' if result['resplit'] else 'no'}")
+    print("  ".join(["name", "role", "depends_on", "files", "deliverables", "tests"]))
+    for task in load_plan(Path(result["plan_path"])).tasks:
+        text = task.brief.read_text(encoding="utf-8") if task.brief else ""
+        sizes = measure(text)
+        row = [
+            task.name,
+            task.role,
+            ",".join(task.depends_on) or "-",
+            str(sizes["files"]),
+            str(sizes["deliverables"]),
+            str(sizes["tests"]),
+        ]
+        print(_safe("  ".join(row)))
+    return 0
+
+
 def _cmd_plan(args) -> int:
+    if args.plan_command == "draft":
+        return _cmd_plan_draft(args)
     plan_file = Path(args.plan_file).resolve()
     if args.plan_command == "cancel":
         return _cmd_plan_cancel(args, plan_file)
