@@ -100,6 +100,7 @@ When a goal has several tasks, write a plan file. Prefer the MCP tools when pres
 repository's lint and tests. Read `handoffs/` first, the full reply only when needed, and use `plan status` (or `plan_status` MCP tool). Merge
 verified `orch/<slug>/*` branches with `plan_merge` or yourself.
 
+- **Draft.** For a spec with more than a couple of tasks, run `agent-hub plan draft --spec <file> --slug <slug>`, read and edit the plan it writes, then `plan run`: the director approves, the techlead splits.
 - **Escalation.** When an implement task ends `gate-failed`, `failed`, `timeout`, `empty` or `interrupted` after its
   retries and its role names an `escalate` target, the runner resets the task's tree to its start point and runs it
   once at that role, with the failing gate output appended to the brief. At most one step per escalation; the chain

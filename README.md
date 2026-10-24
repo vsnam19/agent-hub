@@ -119,6 +119,8 @@ Run a graph of tasks with `agent-hub plan run <plan.json>`. The file defines the
 - `plan run` creates worktrees (`repo/.worktrees/slug-name`) and branches (`orch/slug/name`), running dependencies first and merging upstream branches into dependents. It saves state to `state.json` and resumes on restart. It polls the jobs and retries tasks based on exit codes.
 - `plan status` prints the status of each task in the plan.
 - `plan wait` blocks until all tasks in the plan are done (or failed/blocked), and prints the status.
+- `plan draft --spec <file> --slug <slug> [--base master] [-d <repo>]`: the techlead reads the spec and writes `<state>/plans/<slug>/plan.json` plus `briefs/`. It makes one re-split if a brief is too large. It never runs the plan. It prints a table of sizes (name, role, depends_on, files, deliverables, tests). It exits 1 with the problems when the re-split is still too large.
+- Size warning: `agent-hub run` (implement jobs) and `agent-hub plan run` (every implement task) check the brief with the size rules (at most 3 changed files, 4 numbered deliverables, 6 named tests, the five headings) and print `agent-hub: warning: brief size: <problem>` lines on stderr (`agent-hub: warning: task <name>: brief size: <problem>` in `plan run`). The warning never blocks the job. Review and plan kinds are not checked. The MCP tools do not warn yet.
 
 ### Jev (optional)
 
