@@ -1,4 +1,4 @@
-from agenthub.tasksize import MAX_DELIVERABLES, MAX_FILES, MAX_TESTS, check
+from agenthub.tasksize import MAX_DELIVERABLES, MAX_FILES, MAX_TESTS, check, measure
 
 
 def make_brief(
@@ -101,3 +101,15 @@ def test_non_path_backticks_ignored():
         "   Covers `agenthub/x.py::test_a` and `agenthub/y.py::test_b`.",
     ]
     assert check(make_brief(extra_expected=extra)) == []
+
+
+def test_measure_counts_small_brief():
+    # Default brief: two deliverables, two files (the Only line), one test.
+    assert measure(make_brief()) == {"files": 2, "deliverables": 2, "tests": 1}
+
+
+def test_measure_matches_check_limits():
+    # Five deliverables: measure reports the count that check compares against the limit of four.
+    text = make_brief(deliverables=5)
+    assert measure(text)["deliverables"] == 5
+    assert check(text) == ["too many deliverables: 5 (max 4)"]
