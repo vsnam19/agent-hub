@@ -75,26 +75,34 @@ def _paths(text: str) -> set[str]:
     }
 
 
-def check(text: str) -> list[str]:
-    """One problem string per violated rule; an empty list means the brief is small enough."""
+def measure(text: str) -> dict[str, int]:
+    """Counts of files, deliverables and tests in a brief, as the limits in check() compare them."""
     sections = _sections(text)
-    problems = [f"missing heading: ## {name}" for name in HEADINGS if _section(sections, name) is None]
     expected = _section(sections, "Expected output") or []
 
     deliverables = sum(1 for line in expected if DELIVERABLE.match(line))
-    if deliverables > MAX_DELIVERABLES:
-        problems.append(f"too many deliverables: {deliverables} (max {MAX_DELIVERABLES})")
 
     files = set()
     for bullet in _only_bullets(_section(sections, "Constraints") or []):
         if CHANGE_WORD.search(bullet):
             files |= _paths(bullet)
     files |= _paths("\n".join(expected))
-    if len(files) > MAX_FILES:
-        problems.append(f"too many files: {len(files)} (max {MAX_FILES})")
 
     tests = {match.group(1) for match in TEST_NAME.finditer(text)}
-    if len(tests) > MAX_TESTS:
-        problems.append(f"too many tests: {len(tests)} (max {MAX_TESTS})")
+    return {"files": len(files), "deliverables": deliverables, "tests": len(tests)}
+
+
+def check(text: str) -> list[str]:
+    """One problem string per violated rule; an empty list means the brief is small enough."""
+    sections = _sections(text)
+    problems = [f"missing heading: ## {name}" for name in HEADINGS if _section(sections, name) is None]
+    counts = measure(text)
+
+    if counts["deliverables"] > MAX_DELIVERABLES:
+        problems.append(f"too many deliverables: {counts['deliverables']} (max {MAX_DELIVERABLES})")
+    if counts["files"] > MAX_FILES:
+        problems.append(f"too many files: {counts['files']} (max {MAX_FILES})")
+    if counts["tests"] > MAX_TESTS:
+        problems.append(f"too many tests: {counts['tests']} (max {MAX_TESTS})")
 
     return problems
